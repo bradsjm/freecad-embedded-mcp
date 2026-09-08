@@ -72,30 +72,46 @@ The "FreeCAD MCP" toolbar and menu contain:
 * **Auto-Start Server** — persist a setting so the server starts on every
   FreeCAD launch (disabled by default; auto-start is never inherited from the
   legacy add-on's settings)
-* **Show Auth Token** — local dialog showing the endpoint and bearer token
-  with a copy button
+* **Remote Connections** — checkable opt-in that rebinds the server to all
+  interfaces (`0.0.0.0`) and requires a bearer token; takes effect on the
+  next server start
+* **Configure Allowed IPs** — dialog editing the optional comma-separated
+  peer allow-list (addresses or CIDR subnets); empty means any host may
+  connect
+* **Show Auth Token** — local dialog showing the endpoint and, in remote
+  mode, the bearer token with a copy button
 
 ![start_rpc_server](./assets/start_rpc_server.png)
 
 ## Endpoint and security
 
-The server listens only on the loopback interface — `127.0.0.1` on the
-configured port (default `9876`) — with the single JSON-RPC endpoint
-`POST /mcp`. There is no remote binding, no TLS, and no CORS handling: the
-endpoint is not designed to be reachable from other machines and must never be
-forwarded, proxied, or exposed through a tunnel.
+Two access modes:
 
-Every request must present the bearer token. The token is generated on first
-start and stored with the rest of the server settings in
-`freecad_mcp_settings.json` inside FreeCAD's user application data directory
-(together with `port`, `auto_start`, `allowed_ips` and `allowed_roots`). Use
-the **Show Auth Token** dialog to display and copy it.
+**Local only (default).** The server listens on `127.0.0.1` (port `9876`
+by default) and no token is required — local tools just connect. Only
+loopback peers are accepted, and the loopback Host/Origin checks reject
+browser-borne cross-origin requests. There is no TLS and no CORS handling.
+
+**Remote (opt-in via Remote Connections).** The server rebinds to all
+interfaces (`0.0.0.0`) and a bearer token becomes mandatory on every
+request; it is generated automatically when remote mode is first enabled.
+`allowed_ips` defaults to empty — any host that has the token may connect.
+To lock down beyond the token, populate the list with addresses or CIDR
+subnets via **Configure Allowed IPs**. There is still no TLS — traffic is
+plaintext — so enable remote access only on networks you trust, and never
+forward, proxy, or tunnel the endpoint to untrusted networks.
+
+Settings live in `freecad_mcp_settings.json` inside FreeCAD's user
+application data directory (`port`, `token`, `auto_start`, `remote_enabled`,
+`allowed_ips`, `allowed_roots`). The **Show Auth Token** dialog displays the
+endpoint and, in remote mode, the token with a copy button.
 
 **The bearer token is full local code-execution authority.** The
 `run_script` tool executes arbitrary Python with the FreeCAD user's
-privileges and is deliberately not restricted by `allowed_roots`. Do not put
-the token in logs, URLs, or shared documents, and do not install this add-on
-on a machine you would not give shell access to.
+privileges and is deliberately not restricted by `allowed_roots`. Treat the
+token like a shell on this machine: never put it in logs, URLs, or shared
+documents, and do not install this add-on on a machine you would not give
+shell access to.
 
 `allowed_roots` (default: your home directory) limits which filesystem paths
 the file-taking tools (open/save/export and the working directories of FEM
@@ -107,9 +123,11 @@ are not a sandbox, and they never restrict what `run_script` can do.
 The server speaks the JSON-RPC MCP protocol over streamable HTTP. A client
 must:
 
-1. POST to `http://127.0.0.1:9876/mcp` with
-   `Authorization: Bearer <token>`, `Content-Type: application/json`, and an
-   `Accept` offering both `application/json` and `text/event-stream`.
+1. POST to `http://127.0.0.1:9876/mcp` with `Content-Type: application/json`
+   and an `Accept` offering both `application/json` and
+   `text/event-stream`. In remote mode every request must additionally
+   carry `Authorization: Bearer <token>`; in local-only mode no
+   Authorization header is needed.
 2. Send the `MCP-Protocol-Version` header (`2026-07-28`) and the
    `Mcp-Method`/`Mcp-Name` request-metadata headers, with the matching
    protocol version and client information in each request's `_meta`.

@@ -1,6 +1,6 @@
-"""Authenticated loopback HTTP/SSE transport for the embedded MCP server.
+"""Authenticated HTTP/SSE transport for the embedded MCP server.
 
-Owns transport concerns only: bearer authentication, loopback Host/Origin and
+Owns transport concerns only: bearer authentication, Host/Origin and
 peer-IP restrictions, bounded body/header checks, JSON responses, chunked
 request-thread-owned SSE streams and shutdown. Envelope and routing-header
 validation is delegated to the ``protocol`` module contract; this module
@@ -10,10 +10,11 @@ Construction API::
 
     server = McpHTTPServer(
         dispatch,                    # (message, principal, connection_id) -> dict | StreamResponse
-        token="...",                 # bearer token; required on every request
-        host="127.0.0.1",
+        token="...",                 # bearer token; required in remote mode
+        host="127.0.0.1",            # bind "0.0.0.0" when remote_enabled
         port=9876,                   # 0 binds an OS-assigned port; see .port
-        allowed_ips="127.0.0.1",     # additional peer restriction, not remote enablement
+        allowed_ips="",              # peer allow-list; empty = any peer
+        remote_enabled=False,        # True: token required, loopback Host/Origin skipped
     )
     server.start()                   # daemon thread running serve_forever
     server.port                      # actual bound port (resolves port 0)
@@ -223,10 +224,17 @@ class StreamResponse:
 
 
 class McpHTTPServer(http.server.ThreadingHTTPServer):
-    """Authenticated loopback ThreadingHTTPServer hosting ``POST /mcp``.
+    """Authenticated ThreadingHTTPServer hosting ``POST /mcp``.
 
     Binds in the constructor (so ``port=0`` resolves immediately via
     :attr:`port`) and fails closed on invalid ``allowed_ips``.
+
+    Security model: local mode (default) accepts loopback peers only and
+    needs no token — the loopback Host/Origin checks stay active there.
+    Remote mode (``remote_enabled=True``) requires a non-empty ``token``
+    (bearer auth on every request) and skips the loopback Host/Origin
+    checks; a non-empty ``allowed_ips`` list additionally restricts peers,
+    an empty list accepts any peer.
     """
 
     daemon_threads = True
@@ -235,22 +243,34 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
         self,
         dispatch,
         *,
-        token,
+        token=None,
         host="127.0.0.1",
         port=DEFAULT_PORT,
-        allowed_ips="127.0.0.1",
+        allowed_ips="",
+        remote_enabled=False,
         max_body_bytes=MAX_BODY_BYTES,
         read_timeout=DEFAULT_READ_TIMEOUT,
         keepalive_interval=DEFAULT_KEEPALIVE_INTERVAL,
         service_hook=None,
     ):
-        if not isinstance(token, str) or not token:
-            raise ValueError("token must be a non-empty string")
+        if token is not None and (not isinstance(token, str) or not token.strip()):
+            raise ValueError("token must be None or a non-empty string")
+        if remote_enabled and not (isinstance(token, str) and token.strip()):
+            raise ValueError("remote_enabled requires a token")
         self.dispatch = dispatch
-        self.token = token
+        self.token = token or ""
         # Non-reversible principal fingerprint; never log the token itself.
-        self.principal = "sha256:" + sha256(token.encode("utf-8")).hexdigest()[:32]
+        # Tokenless local mode shares one stable principal so consent
+        # challenges still bind to a single identity.
+        if self.token:
+            self.principal = (
+                "sha256:" + sha256(self.token.encode("utf-8")).hexdigest()[:32]
+            )
+        else:
+            self.principal = "local"
         self.allowed_networks = parse_allowed_networks(allowed_ips)
+        self.remote_enabled = bool(remote_enabled)
+        self.bound_host = host
         self.max_body_bytes = max_body_bytes
         self.read_timeout = read_timeout
         self.keepalive_interval = keepalive_interval
@@ -281,6 +301,23 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
     def port(self):
         """Actual bound port (differs from the requested one when port=0)."""
         return self.server_address[1]
+
+    def peer_allowed(self, ip_text):
+        """Return True when the peer IP may connect under the active mode.
+
+        Remote mode: any peer when ``allowed_ips`` is empty, otherwise only
+        listed addresses/subnets.
+        """
+        try:
+            addr = ipaddress.ip_address(ip_text)
+        except ValueError:
+            return False
+        if not self.remote_enabled:
+            return addr.is_loopback
+        if not self.allowed_networks:
+            return True
+        return any(addr in network for network in self.allowed_networks)
+
 
     def start(self):
         """Serve in a daemon thread; returns the thread."""
@@ -446,13 +483,11 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                 )
             body = b""
 
-        if not peer_in_allowed_networks(
-            self.client_address[0], self.server.allowed_networks
-        ):
+        if not self.server.peer_allowed(self.client_address[0]):
             return self._reject_forbidden("peer address is not allowed")
-        if not self._host_allowed():
+        if not self.server.remote_enabled and not self._host_allowed():
             return self._reject_forbidden("Host header is not the loopback endpoint")
-        if not self._origin_allowed():
+        if not self.server.remote_enabled and not self._origin_allowed():
             return self._reject_forbidden("Origin header is not allowed")
         if not self._authorized():
             return self._reject_unauthorized()
@@ -507,11 +542,15 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
     # ---------------------------------------------------------------- checks
 
     def _header_structure_error(self):
-        """Return ``(code, message)`` for duplicate/illegal headers else None."""
+        """Return ``(code, message)`` for duplicate/illegal/TE-framed headers else None."""
         for name in _SINGLE_VALUE_HEADERS:
             values = self.headers.get_all(name)
             if values is not None and len(values) > 1:
                 return -32600, f"Duplicate {name} header."
+        if self.command == "POST" and self.headers.get("Transfer-Encoding") is not None:
+            # A TE-framed body would disagree with Content-Length framing;
+            # reject before any body byte is read (PLAN section 3).
+            return -32600, "Transfer-Encoding request bodies are not accepted."
         seen_params = {}
         for raw_name, value in self.headers.items():
             match = _PARAM_HEADER_RE.match(raw_name.lower())
@@ -555,6 +594,9 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         return origin.strip().lower() in allowed
 
     def _authorized(self):
+        token = self.server.token
+        if not token:
+            return True  # tokenless local mode; loopback gates apply instead
         auth = self.headers.get("Authorization")
         if not isinstance(auth, str):
             return False
@@ -563,7 +605,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             return False
         return hmac.compare_digest(
             credentials.strip().encode("utf-8"),
-            self.server.token.encode("utf-8"),
+            token.encode("utf-8"),
         )
 
     def _content_type_is_json(self):

@@ -1,16 +1,17 @@
 """Persistence of embedded MCP server settings.
 
-Schema (v2): ``port``, ``token``, ``auto_start``, ``allowed_ips``,
-``allowed_roots`` stored as JSON under FreeCAD's user app data dir using the
-same filename as the legacy RPC server. FreeCAD is imported lazily inside
-:func:`default_settings_path` so this module stays GUI-independent until the
-default path is actually resolved; tests pass an explicit path instead.
+Schema (v2): ``port``, ``token``, ``auto_start``, ``remote_enabled``,
+``allowed_ips``, ``allowed_roots`` stored as JSON under FreeCAD's user app
+data dir using the same filename as the legacy RPC server. FreeCAD is
+imported lazily inside :func:`default_settings_path` so this module stays
+GUI-independent until the default path is actually resolved; tests pass an
+explicit path instead.
 
 Failures are strict: an unreadable or invalid settings file raises
 :class:`SettingsError` so startup fails closed instead of silently weakening
-access restrictions. Legacy ``remote_enabled``/``auto_start_rpc`` keys are
-removed and are never interpreted as v2 auto-start consent. Secrets are
-written atomically (temp file + ``os.replace``) with user-only permissions.
+access restrictions. The legacy ``auto_start_rpc`` key is removed and is
+never interpreted as v2 auto-start consent. Secrets are written atomically
+(temp file + ``os.replace``) with user-only permissions.
 """
 
 import json
@@ -23,11 +24,11 @@ from .ip_parse import validate_allowed_ips
 SETTINGS_FILENAME = "freecad_mcp_settings.json"
 
 DEFAULT_PORT = 9876
-DEFAULT_ALLOWED_IPS = "127.0.0.1"
+DEFAULT_ALLOWED_IPS = ""
 
-LEGACY_KEYS = frozenset({"remote_enabled", "auto_start_rpc"})
+LEGACY_KEYS = frozenset({"auto_start_rpc"})
 _SETTINGS_KEYS = frozenset(
-    {"port", "token", "auto_start", "allowed_ips", "allowed_roots"}
+    {"port", "token", "auto_start", "remote_enabled", "allowed_ips", "allowed_roots"}
 )
 
 
@@ -52,8 +53,9 @@ def _default_allowed_roots():
 def _normalize_settings(raw, *, generate_token):
     """Validate a raw settings mapping and return the normalized dict.
 
-    With ``generate_token`` a missing token is replaced by a freshly
-    generated secret; otherwise a missing/blank token is an error.
+    ``token`` is optional: local-only mode needs none. When
+    ``remote_enabled`` is set and the token is missing, a missing token is
+    generated (``generate_token=True``) or rejected (``False``).
     """
     if not isinstance(raw, dict):
         raise SettingsError("Settings must be a JSON object.")
@@ -66,11 +68,24 @@ def _normalize_settings(raw, *, generate_token):
     if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
         raise SettingsError(f"Invalid port: {port!r}")
 
+    remote_enabled = raw.get("remote_enabled", False)
+    if not isinstance(remote_enabled, bool):
+        raise SettingsError(f"Invalid remote_enabled: {remote_enabled!r}")
+
     token = raw.get("token")
-    if token is None and generate_token:
-        token = secrets.token_urlsafe(32)
-    if not isinstance(token, str) or not token.strip():
-        raise SettingsError("Invalid token: must be a non-empty string.")
+    if token is None:
+        token = ""
+    if not isinstance(token, str):
+        raise SettingsError(f"Invalid token: {token!r}")
+    if not token.strip():
+        token = ""
+    if remote_enabled and not token:
+        if generate_token:
+            token = secrets.token_urlsafe(32)
+        else:
+            raise SettingsError(
+                "remote_enabled requires a token; none is set."
+            )
 
     auto_start = raw.get("auto_start", False)
     if not isinstance(auto_start, bool):
@@ -98,6 +113,7 @@ def _normalize_settings(raw, *, generate_token):
         "port": port,
         "token": token,
         "auto_start": auto_start,
+        "remote_enabled": remote_enabled,
         "allowed_ips": allowed_ips.strip(),
         "allowed_roots": normalized_roots,
     }
@@ -105,12 +121,12 @@ def _normalize_settings(raw, *, generate_token):
 
 def load_settings(path=None):
     """Load settings from ``path`` (default: FreeCAD user app data dir).
-
-    A missing file is bootstrapped: defaults are generated with a fresh token
-    and persisted atomically so the token survives restarts. Unreadable or
-    invalid content raises :class:`SettingsError`. Legacy keys are dropped
-    and defaults are filled in; the rewritten file is persisted so restarts
-    observe a stable schema.
+    A missing file is bootstrapped: defaults (local-only, no token) are
+    persisted atomically. When loaded settings enable remote access without
+    a token, one is generated and persisted. Unreadable or invalid content
+    raises :class:`SettingsError`. Legacy keys are dropped and defaults are
+    filled in; the rewritten file is persisted so restarts observe a stable
+    schema.
     """
     if path is None:
         path = default_settings_path()

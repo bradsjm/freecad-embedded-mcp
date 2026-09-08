@@ -320,7 +320,6 @@ class _Operation:
     deadline_s: float
     cancel_event: threading.Event = field(default_factory=threading.Event)
     deadline_noted: bool = False
-    progress_token: Any = None
     #: Dispatcher handle for submitted work (task path): lets the
     #: deadline sweep mark a detached job timed out without a waiter.
     future: "concurrent.futures.Future" | None = None
@@ -915,7 +914,6 @@ class Server:
         task_id: str | None,
         principal: str | None,
         deadline_s: float,
-        progress_token: Any = None,
     ) -> _Operation:
         with self._ops_lock:
             if len(self._ops) >= MAX_OPERATIONS:
@@ -932,7 +930,6 @@ class Server:
                 principal=principal,
                 deadline_mono=self._clock() + deadline_s,
                 deadline_s=deadline_s,
-                progress_token=progress_token,
             )
             self._ops[op.op_id] = op
             return op
@@ -1047,7 +1044,6 @@ class Server:
                 task_id=None,
                 principal=principal,
                 deadline_s=deadline_s,
-                progress_token=validated["_meta"].get("progressToken"),
             )
         except ToolError as exc:
             return _rpc_result(request_id, tool_error_result(exc))
@@ -1205,7 +1201,6 @@ class Server:
                 task_id=None,
                 principal=principal,
                 deadline_s=deadline_s,
-                progress_token=validated["_meta"].get("progressToken"),
             )
         except ToolError as exc:
             return _rpc_result(validated["id"], tool_error_result(exc))
@@ -1615,11 +1610,17 @@ class Server:
         try:
             self._capture_static_capabilities()
             gui_dispatch.initialize()
+            remote = bool(self.settings.get("remote_enabled", False))
+            token = self.settings.get("token", "")
+            if remote and not token:
+                raise RuntimeError("remote_enabled requires a token")
             self._http = McpHTTPServer(
                 self.dispatch,
-                token=self.settings["token"],
+                token=token if remote else None,
+                host="0.0.0.0" if remote else "127.0.0.1",
                 port=self.settings["port"],
-                allowed_ips=self.settings.get("allowed_ips", "127.0.0.1"),
+                allowed_ips=self.settings.get("allowed_ips", ""),
+                remote_enabled=remote,
                 service_hook=self._service_actions,
             )
             # Constructor binds; failure above leaves nothing to unwind
@@ -1702,7 +1703,11 @@ class Server:
             "running": state == "running",
             "state": state,
             "port": port,
-            "endpoint": f"http://127.0.0.1:{port}/mcp" if port else None,
+            "endpoint": (
+                f"http://{self._http.bound_host}:{port}/mcp"
+                if self._http is not None and port
+                else None
+            ),
             "pendingOperations": self.pending_operation_count(),
         }
 

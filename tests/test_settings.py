@@ -62,7 +62,8 @@ def test_transport_and_settings_import_without_freecad():
         os.close(fd)
         os.unlink(path)
         loaded = mcp_server.settings.load_settings(path)
-        assert loaded["port"] == 9876 and loaded["token"]
+        assert loaded["port"] == 9876 and loaded["token"] == ""
+        assert loaded["remote_enabled"] is False
         assert "FreeCAD" not in sys.modules, "FreeCAD must stay unimported"
         print("GUI-INDEPENDENT-OK")
         """
@@ -81,16 +82,17 @@ def test_transport_and_settings_import_without_freecad():
 # bootstrap and roundtrip
 
 
-def test_missing_file_bootstraps_defaults_with_persisted_token(tmp_path):
+def test_missing_file_bootstraps_local_defaults(tmp_path):
     path = tmp_path / "settings.json"
     settings = load_settings(str(path))
 
     assert settings["port"] == DEFAULT_PORT
     assert settings["auto_start"] is False
-    assert settings["allowed_ips"] == DEFAULT_ALLOWED_IPS
+    assert settings["remote_enabled"] is False
+    assert settings["allowed_ips"] == DEFAULT_ALLOWED_IPS == ""
     assert settings["allowed_roots"] == [os.path.abspath(os.path.expanduser("~"))]
-    # secrets.token_urlsafe(32) yields a 43-character URL-safe secret.
-    assert isinstance(settings["token"], str) and len(settings["token"]) == 43
+    # Local-only mode needs no token.
+    assert settings["token"] == ""
 
     on_disk = json.loads(path.read_text(encoding="utf-8"))
     assert on_disk == settings
@@ -125,15 +127,34 @@ def test_save_then_load_roundtrip(tmp_path):
     ]
 
 
-def test_missing_token_in_existing_file_is_generated_and_persisted(tmp_path):
+def test_missing_token_in_local_file_stays_empty(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({"port": 9999}), encoding="utf-8")
 
     settings = load_settings(str(path))
 
     assert settings["port"] == 9999
-    assert isinstance(settings["token"], str) and settings["token"]
+    assert settings["remote_enabled"] is False
+    assert settings["token"] == ""
+    assert json.loads(path.read_text(encoding="utf-8"))["token"] == ""
+
+
+def test_remote_without_token_is_generated_and_persisted(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"remote_enabled": True}), encoding="utf-8")
+
+    settings = load_settings(str(path))
+
+    # secrets.token_urlsafe(32) yields a 43-character URL-safe secret.
+    assert len(settings["token"]) == 43
     assert json.loads(path.read_text(encoding="utf-8"))["token"] == settings["token"]
+
+
+def test_remote_save_without_token_fails_closed(tmp_path):
+    with pytest.raises(SettingsError):
+        save_settings(
+            valid_settings(remote_enabled=True, token=""), str(tmp_path / "s.json")
+        )
 
 
 # --------------------------------------------------------------------------
@@ -202,10 +223,17 @@ def test_invalid_port_fails_closed(tmp_path, port):
         save_settings(valid_settings(port=port), str(tmp_path / "settings.json"))
 
 
-@pytest.mark.parametrize("token", ["", "   ", None, 42, b"token", ["x"]])
+@pytest.mark.parametrize("token", [42, b"token", ["x"]])
 def test_invalid_token_fails_closed(tmp_path, token):
     with pytest.raises(SettingsError):
         save_settings(valid_settings(token=token), str(tmp_path / "settings.json"))
+
+
+@pytest.mark.parametrize("token", ["", "   ", None])
+def test_blank_token_is_valid_in_local_mode(tmp_path, token):
+    path = tmp_path / "settings.json"
+    save_settings(valid_settings(token=token), str(path))
+    assert load_settings(str(path))["token"] == ""
 
 
 @pytest.mark.parametrize("auto_start", ["yes", 1, 0, None])
@@ -253,13 +281,13 @@ def test_save_rejects_invalid_settings_and_leaves_file_unchanged(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# legacy keys are dropped, never migrated
+# legacy auto-start key is dropped, never migrated; remote_enabled is real
 
 
 def test_legacy_keys_are_ignored_and_never_migrated(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(
-        json.dumps({"remote_enabled": True, "auto_start_rpc": True}),
+        json.dumps({"auto_start_rpc": True, "remote_enabled": True}),
         encoding="utf-8",
     )
 
@@ -267,12 +295,12 @@ def test_legacy_keys_are_ignored_and_never_migrated(tmp_path):
 
     # Legacy automatic RPC startup must not become v2 auto-start consent.
     assert settings["auto_start"] is False
-    assert "remote_enabled" not in settings
+    # ... but the user's remote-access choice is honored as a v2 setting.
+    assert settings["remote_enabled"] is True
     assert "auto_start_rpc" not in settings
     assert settings["token"]
 
     on_disk = json.loads(path.read_text(encoding="utf-8"))
-    assert "remote_enabled" not in on_disk
     assert "auto_start_rpc" not in on_disk
     assert on_disk == settings
 
@@ -280,12 +308,31 @@ def test_legacy_keys_are_ignored_and_never_migrated(tmp_path):
 def test_legacy_keys_alongside_valid_settings_are_dropped(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(
-        json.dumps({**valid_settings(port=4321), "remote_enabled": True}),
+        json.dumps({**valid_settings(port=4321), "auto_start_rpc": True}),
         encoding="utf-8",
     )
     settings = load_settings(str(path))
     assert settings["port"] == 4321
-    assert "remote_enabled" not in settings
+    assert "auto_start_rpc" not in settings
+
+
+def test_remote_enabled_defaults_false_and_survives_roundtrip(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = load_settings(str(path))
+    assert settings["remote_enabled"] is False
+
+    settings["remote_enabled"] = True
+    settings["token"] = "roundtrip-token"
+    save_settings(settings, str(path))
+    assert load_settings(str(path))["remote_enabled"] is True
+
+
+@pytest.mark.parametrize("bad_remote", [1, "true", None])
+def test_invalid_remote_enabled_fails_closed(tmp_path, bad_remote):
+    path = tmp_path / "settings.json"
+    with pytest.raises(SettingsError):
+        save_settings(valid_settings(remote_enabled=bad_remote), str(path))
+    assert not path.exists()
 
 
 # --------------------------------------------------------------------------
@@ -301,9 +348,17 @@ def test_validate_allowed_ips_accepts_and_reports():
     assert valid == ["127.0.0.1"]
     assert len(errors) == 1
 
+    valid, errors = validate_allowed_ips("")
+    assert valid == []
+    assert errors == []
+
     valid, errors = validate_allowed_ips("   ")
     assert valid == []
-    assert errors
+    assert errors == []
+
+    valid, errors = validate_allowed_ips("nope, 127.0.0.1")
+    assert valid == ["127.0.0.1"]
+    assert len(errors) == 1
 
     valid, errors = validate_allowed_ips("127.0.0.1,,10.0.0.1")
     assert valid == []

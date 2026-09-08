@@ -1555,11 +1555,24 @@ def test_subscription_stream_terminates_after_disconnect_close():
 class FakeHTTP:
     instances: list = []
 
-    def __init__(self, dispatch, *, token, port, allowed_ips, service_hook=None):
+    def __init__(
+        self,
+        dispatch,
+        *,
+        token,
+        host,
+        port,
+        allowed_ips,
+        remote_enabled=False,
+        service_hook=None,
+    ):
         self.dispatch = dispatch
         self.token = token
+        self.host = host
+        self.bound_host = host
         self.port = port
         self.allowed_ips = allowed_ips
+        self.remote_enabled = remote_enabled
         self.service_hook = service_hook
         self.started = False
         self.stopped = False
@@ -1578,6 +1591,7 @@ TEST_SETTINGS = {
     "auto_start": False,
     "allowed_ips": "127.0.0.1",
     "allowed_roots": ["/tmp/fc-test"],
+    "remote_enabled": False,
 }
 
 

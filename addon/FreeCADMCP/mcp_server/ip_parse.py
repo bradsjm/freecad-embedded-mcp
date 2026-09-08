@@ -16,11 +16,13 @@ def validate_allowed_ips(allowed_ips_str):
     Returns a ``(valid, errors)`` tuple. ``valid`` is a list of normalized
     entry strings that passed validation; ``errors`` is a list of
     human-readable error messages (empty when the input is fully valid).
+    An empty or whitespace-only string is valid and means *open*: any peer
+    is accepted (remote mode then relies on the token alone).
     """
     errors = []
 
     if not allowed_ips_str or not allowed_ips_str.strip():
-        return [], ["Input must not be empty."]
+        return [], []
 
     if not _COMMA_SEP_RE.match(allowed_ips_str):
         return [], [
@@ -44,7 +46,8 @@ def parse_allowed_networks(allowed_ips_str):
 
     Returns a list of :class:`ipaddress.ip_network` objects. Raises
     :class:`ValueError` listing every invalid entry — callers must fail
-    closed instead of silently weakening peer restrictions.
+    closed instead of silently weakening peer restrictions. An empty string
+    parses to an empty list (open).
     """
     valid, errors = validate_allowed_ips(allowed_ips_str)
     if errors:

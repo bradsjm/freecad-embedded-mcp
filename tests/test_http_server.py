@@ -392,6 +392,97 @@ def test_construction_fails_closed_on_invalid_allowed_ips():
         McpHTTPServer(echo_dispatch, token=TOKEN, port=0, allowed_ips="nope")
 
 
+def test_remote_mode_accepts_non_loopback_host_and_origin():
+    with running_server(echo_dispatch, remote_enabled=True) as server:
+        status, _, _ = server.post(
+            valid_request(),
+            {
+                **routing_headers(),
+                "Host": "192.168.1.10:9876",
+                "Origin": "http://192.168.1.10:9876",
+            },
+        )
+        assert status == 200
+        assert len(server.dispatch_calls()) == 1
+
+
+def test_remote_mode_still_rejects_peer_outside_allow_list():
+    with running_server(
+        echo_dispatch, remote_enabled=True, allowed_ips="10.0.0.0/8"
+    ) as server:
+        # The test client connects from 127.0.0.1, which is not allowed.
+        status, _, _ = server.post(valid_request(), routing_headers())
+        assert status == 403
+        assert server.dispatch_calls() == []
+
+
+def test_remote_mode_still_requires_bearer_token():
+    with running_server(echo_dispatch, remote_enabled=True) as server:
+        status, _, _ = server.post(
+            valid_request(),
+            {**routing_headers(), "Authorization": None},
+        )
+        assert status == 401
+        assert server.dispatch_calls() == []
+
+
+def test_remote_mode_reports_bound_host():
+    with running_server(echo_dispatch, remote_enabled=True, host="127.0.0.1") as server:
+        assert server.server.remote_enabled is True
+        assert server.server.bound_host == "127.0.0.1"
+
+
+def test_remote_mode_open_list_accepts_loopback_peer():
+    # allowed_ips defaults to empty: any peer may connect; token gates access.
+    with running_server(
+        echo_dispatch, remote_enabled=True, allowed_ips=""
+    ) as server:
+        status, _, _ = server.post(valid_request(), routing_headers())
+        assert status == 200
+
+
+def test_local_mode_without_token_accepts_request():
+    with running_server(echo_dispatch, token=None) as server:
+        status, _, _ = server.post(
+            valid_request(),
+            {**routing_headers(), "Authorization": None},
+        )
+        assert status == 200
+        assert len(server.dispatch_calls()) == 1
+        assert server.dispatch_calls()[0][1] == "local"
+
+
+def test_local_mode_without_token_still_rejects_browser_host():
+    with running_server(echo_dispatch, token=None) as server:
+        status, _, _ = server.post(
+            valid_request(),
+            {**routing_headers(), "Host": "evil.example:1"},
+        )
+        assert status == 403
+        assert server.dispatch_calls() == []
+
+
+def test_local_mode_without_token_still_rejects_peer_outside_loopback():
+    # Local mode consults loopback membership, not allowed_ips: even an
+    # open remote-style list must not widen a loopback-bound server.
+    with running_server(echo_dispatch, token=None, allowed_ips="") as server:
+        assert server.server.peer_allowed("127.0.0.1") is True
+        assert server.server.peer_allowed("192.168.1.5") is False
+        assert server.server.peer_allowed("::1") is True
+        assert server.server.peer_allowed("not-an-ip") is False
+
+    with running_server(
+        echo_dispatch, token=TOKEN, remote_enabled=True, allowed_ips=""
+    ) as server:
+        assert server.server.peer_allowed("192.168.1.5") is True
+
+    with running_server(
+        echo_dispatch, token=TOKEN, remote_enabled=True, allowed_ips="10.0.0.0/8"
+    ) as server:
+        assert server.server.peer_allowed("192.168.1.5") is False
+        assert server.server.peer_allowed("10.1.2.3") is True
+
+
 def test_non_json_content_type_returns_415():
     with running_server(echo_dispatch) as server:
         status, _, _ = server.post(
@@ -493,10 +584,14 @@ def test_duplicate_authorization_is_rejected():
 
 def test_transfer_encoding_request_body_is_rejected():
     with running_server(echo_dispatch) as server:
+        valid = json.dumps(valid_request(rpc_id=7)).encode()
         status, _, body = raw_post(
             server,
-            extra_headers=["Content-Length: 2", "Transfer-Encoding: chunked"],
-            body=b"{}",
+            extra_headers=[
+                f"Content-Length: {len(valid)}",
+                "Transfer-Encoding: chunked",
+            ],
+            body=valid,
         )
         assert status == 400
         assert json.loads(body)["error"]["code"] == -32600

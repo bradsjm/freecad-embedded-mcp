@@ -19,11 +19,14 @@ class FreeCADMCPAddonWorkbench(Workbench):
 
     def Initialize(self):
         from mcp_server import commands
+        commands.register_commands()
 
         command_list = [
             "Start_MCP_Server",
             "Stop_MCP_Server",
             "Toggle_Auto_Start",
+            "Toggle_Remote_Connections",
+            "Configure_Allowed_IPs",
             "Show_Auth_Token",
         ]
         self.appendToolbar("FreeCAD MCP", command_list)
