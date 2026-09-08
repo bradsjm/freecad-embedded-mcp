@@ -11,9 +11,9 @@ Scope contracts (plan section 2):
   message names it via ``MCP-Session-Id``. Session ids never authenticate.
 - Legacy clients receive final tool results, never detached tasks; consent
   travels as native ``elicitation/create`` requests on the request-scoped
-  SSE stream when the client declares form support and as an actionable
-  ``CONSENT_DENIED`` tool result when it does not. No adapter path can
-  fabricate consent: acceptance is only ever relayed to the existing
+  SSE stream when the client declares form support. Clients without form
+  support fall back to unprompted execution (1.0 behavior). No adapter
+  path fabricates consent: acceptance is only ever relayed to the existing
   consent signer via ``requestState``/``inputResponses``.
 - Results are translated at one boundary (:func:`legacy_result`): modern
   envelope metadata is stripped, application payloads pass through.
@@ -48,7 +48,6 @@ from mcp_server.protocol import (
     META_PROTOCOL_VERSION,
     META_SERVER_INFO,
     METHOD_NOT_FOUND,
-    MISSING_REQUIRED_CLIENT_CAPABILITY,
     SERVER_INFO,
     ProtocolError,
     ToolError,
@@ -108,17 +107,14 @@ UNKNOWN_SESSION_MESSAGE = "unknown or expired MCP session"
 INITIALIZER_SESSION_ID_MESSAGE = (
     "MCP-Session-Id must be omitted when initializing a new session"
 )
-FORM_UNSUPPORTED_MESSAGE = (
-    "This operation requires form elicitation, which this client does not "
-    "support."
-)
 CANCELLED_BEFORE_EXECUTION_MESSAGE = "Operation cancelled before execution"
 OPERATION_LIMIT_MESSAGE = "Too many active operations; wait for one to finish"
 
 _DISPATCH_METHODS = ("tools/list", "tools/call", "resources/list", "resources/read")
 
 _SERVER_INSTRUCTIONS = (
-    "Consent-required operations need client form elicitation. Long-running "
+    "Consent prompts use form elicitation when the client supports it; "
+    "clients without form support proceed without the prompt. Long-running "
     "operations return final results; detached tasks and resource "
     "subscriptions are not offered in this session."
 )
@@ -854,9 +850,6 @@ class LegacyProtocol:
                     session.session_id,
                 )
             except ProtocolError as exc:
-                if exc.code == MISSING_REQUIRED_CLIENT_CAPABILITY:
-                    outer.put(_form_unsupported_result(request_id, version))
-                    return
                 outer.put(error_response(exc, request_id))
                 return
             except Exception:
@@ -1122,13 +1115,14 @@ class LegacyProtocol:
                     "malformed envelope: duplicate request id in batch",
                 )
             seen_ids.add(member["id"])
-        # Notifications pass through immediately so a cancellation cannot
-        # wait behind the request it cancels.
-        for member in notifications:
-            self._route_notification(session, member)
         if not requests:
+            # Notifications pass through immediately; nothing can wait.
+            for member in notifications:
+                self._route_notification(session, member)
             return LegacyReply(202, None)
-        # Reserve every request slot before any member executes.
+        # Reserve every request slot BEFORE routing notifications, so a
+        # cancellation in the same batch finds its request registered and
+        # can prevent it from ever starting.
         call_members = [m for m in requests if m["method"] == "tools/call"]
         reserved: list[tuple[dict, _ActiveRequest]] = []
         with self._lock:
@@ -1147,6 +1141,8 @@ class LegacyProtocol:
                 self._inflight += 1
                 reserved.append((member, active))
             overflow = call_members[reservable:]
+        for member in notifications:
+            self._route_notification(session, member)
         inline = [
             (member, None) for member in requests if member["method"] != "tools/call"
         ]
@@ -1298,14 +1294,6 @@ def _consent_denied_result(request_id: Any, version: str, reason: str) -> dict:
             "Consent was not granted before the deadline",
             {"reason": reason},
         ),
-    )
-
-
-def _form_unsupported_result(request_id: Any, version: str) -> dict:
-    return _tool_error_response(
-        request_id,
-        version,
-        ToolError(CONSENT_DENIED, FORM_UNSUPPORTED_MESSAGE),
     )
 
 

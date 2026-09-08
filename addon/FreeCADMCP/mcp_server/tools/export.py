@@ -443,13 +443,28 @@ def _export_step(
 
 
 def _placement_equal(a: Any, b: Any) -> bool:
+    """Tolerant placement comparison for the FCStd readback.
+
+    FreeCAD 1.1 can flip one quaternion rounding bit when re-reading a
+    freshly created origin plane, so exact equality false-rejects faithful
+    copies. Translation must agree to a micrometre and rotation to well
+    under a microradian; a real placement change is orders of magnitude
+    larger.
+    """
+
     placement_a = getattr(a, "Placement", None)
     placement_b = getattr(b, "Placement", None)
     if (placement_a is None) != (placement_b is None):
         return False
     if placement_a is None:
         return True
-    return placement_a == placement_b
+    try:
+        if (placement_a.Base - placement_b.Base).Length > 1e-6:
+            return False
+        relative = placement_a.Rotation.inverted() * placement_b.Rotation
+        return abs(relative.Angle) < 1e-9
+    except Exception:
+        return placement_a == placement_b
 
 
 def _verify_reopened_copy(doc: Any, reopened: Any) -> None:

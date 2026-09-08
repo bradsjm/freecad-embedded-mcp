@@ -340,11 +340,14 @@ if z_edge is None:
     raise RuntimeError("no Z-tangent edge found for the load direction")
 load.Direction = (beam, [z_edge])
 load.Reversed = True
+# NOTE: a bare float here means mm*kg/s^2 (100.0 would be 0.1 N).
+# Always assign a quantity string such as "100 N".
 load.Force = {force!r}
 print("load direction:", z_edge, "force:", load.Force)
 
 mesh = ObjectsFem.makeMeshGmsh(doc, "Mesh")
 mesh.Shape = beam.Shape
+mesh.ElementOrder = "2nd"
 mesh.CharacteristicLengthMax = {mesh_max!r}
 mesh.CharacteristicLengthMin = {mesh_min!r}
 

@@ -1582,3 +1582,27 @@ def test_mutation_never_closes_a_foreign_surviving_transaction() -> None:
     )
 
     assert closed == []  # only our own surviving label is ever closed
+
+
+def test_placement_rows_report_angle_in_degrees() -> None:
+    """The wire field is angle_deg; a 30-degree rotation must read 30."""
+
+    import math
+
+    obj = FakeObj(
+        "Rotated",
+        properties=("Placement",),
+        prop_types={"Placement": "App::PropertyPlacement"},
+        values={
+            "Placement": StubPlacement(
+                StubVector(1, 2, 3),
+                StubRotation(StubVector(0, 0, 1), math.pi / 6),
+            )
+        },
+    )
+    doc = FakeDoc(objects=[obj])
+    result = objects_mod.HANDLERS["inspect_objects"](
+        FakeCtx(doc), {"document": doc.Name, "detail": "compact"}
+    )
+    row = result["objects"][0]
+    assert abs(row["placement"]["angle_deg"] - 30.0) < 1e-9

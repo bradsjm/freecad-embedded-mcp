@@ -216,7 +216,8 @@ def test_initialize_negotiates_each_supported_revision():
             "resources": {"subscribe": False, "listChanged": False},
         }
         assert result["instructions"] == (
-            "Consent-required operations need client form elicitation. "
+            "Consent prompts use form elicitation when the client supports "
+            "it; clients without form support proceed without the prompt. "
             "Long-running operations return final results; detached tasks "
             "and resource subscriptions are not offered in this session."
         )
@@ -454,30 +455,25 @@ def test_discover_capabilities_tool_works_through_legacy():
 # ---------------------------------------------------------------------------
 
 
-def test_consent_without_form_support_is_consent_denied_tool_result():
+def test_consent_without_form_support_falls_back_to_execution():
+    # 1.0 fallback: a client without elicitation support is never blocked
+    # by consent; the operation proceeds unprompted on every revision.
     server = make_server()
     adapter = make_adapter(server)
-    # 2025-03-26 has no elicitation at all.
-    sid = session_of(initialize(adapter, "2025-03-26"))
-    send(adapter, sid, request("notifications/initialized", None))
     PREFLIGHT_RESULTS["new_document"] = {
         "requires_consent": True,
         "message": "Create document?",
         "tool": "new_document",
     }
-    reply = send(adapter, sid, call_tool("new_document", 7))
-    event = final_event(adapter, reply, sid)
-    assert_consent_denied(event, version="2025-03-26")
-    assert "does not support" in event["result"]["content"][0]["text"]
-    assert STUB_CALLS == []
-
-    # A 2025-11-25 client without any elicitation object is identical.
-    sid2 = session_of(initialize(adapter, "2025-11-25", capabilities={}))
-    send(adapter, sid2, request("notifications/initialized", None))
-    reply2 = send(adapter, sid2, call_tool("new_document", 8))
-    event2 = final_event(adapter, reply2, sid2)
-    assert_consent_denied(event2)
-    assert STUB_CALLS == []
+    for version in legacy.LEGACY_PROTOCOL_VERSIONS:
+        sid = session_of(initialize(adapter, version))
+        send(adapter, sid, request("notifications/initialized", None))
+        reply = send(adapter, sid, call_tool("new_document", 7))
+        event = final_event(adapter, reply, sid)
+        assert event["id"] == 7
+        assert event["result"].get("isError") is not True, version
+        assert "elicitation" not in event["result"]["content"][0]["text"]
+    assert len(STUB_CALLS) == 3  # executed once per session, no prompts
 
 
 def test_consent_accept_executes_exactly_once():
@@ -1068,6 +1064,8 @@ def test_batch_cancel_notification_passes_immediately():
     ]
     reply = send(adapter, sid, batch)
     event = next_event(reply.stream)
+    # The cancellation lands before the (now unprompted) execution: the
+    # request is cancelled before any effect.
     assert_consent_denied(event, version="2025-03-26")
     assert STUB_CALLS == []
     assert next_event(reply.stream) is None

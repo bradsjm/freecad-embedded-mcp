@@ -641,45 +641,53 @@ def test_consent_challenge_precedes_any_execution():
     assert not server.has_pending_operations()
 
 
-def test_consent_without_form_capability_is_rejected_before_execution():
+def test_consent_without_form_capability_falls_back_to_execution():
+    # 1.0 fallback: a client without the form capability is never blocked
+    # by consent; the operation proceeds unprompted.
     server = make_server()
     _reset_dispatcher_for_tests()
     PREFLIGHT_RESULTS["close_document"] = dict(CONSENT_TARGET)
-    # Explicit empty capability declaration: neither the MRTR challenge
-    # nor an accepted retry may run without the declared form capability.
-    with pytest.raises(protocol.ProtocolError) as challenge_exc:
-        _call_close(server, rpc_id=1, capabilities={})
-    assert challenge_exc.value.code == protocol.MISSING_REQUIRED_CLIENT_CAPABILITY
-    assert challenge_exc.value.data["requiredCapabilities"] == ELICITATION_FORM_CAPS
-    assert STUB_CALLS == []  # no challenge returned, nothing executed
+    response = _call_close(server, rpc_id=1, capabilities={})
+    assert isinstance(response, server_module.StreamResponse)
+    events = drain_stream(response, 2)
+    result = events[0]["result"]
+    assert result["resultType"] == "complete"
+    assert len(STUB_CALLS) == 1  # executed without any challenge
     assert not server.has_pending_operations()
-    # The same holds for an accepted retry: a signed token without the
-    # per-request capability never reaches execution.
+    # A formless retry carrying a signed token is still verified: the
+    # signer validates it, and the client has voluntarily supplied an
+    # acceptance, so the operation executes exactly once more.
     token = _call_close(server, rpc_id=2)["result"]["requestState"]
     accept = {"confirm": {"action": "accept", "content": {"confirmed": True}}}
-    with pytest.raises(protocol.ProtocolError) as retry_exc:
-        _call_close(
-            server,
-            rpc_id=3,
-            request_state=token,
-            input_responses=accept,
-            capabilities={},
-        )
-    assert retry_exc.value.code == protocol.MISSING_REQUIRED_CLIENT_CAPABILITY
-    assert retry_exc.value.data["requiredCapabilities"] == ELICITATION_FORM_CAPS
-    assert STUB_CALLS == []  # accepted retry never executed
-    assert not server.has_pending_operations()
-    # The gate precedes nonce consumption: the same token still executes
-    # once the capability is declared.
-    accepted = _call_close(
+    retry = _call_close(
+        server,
+        rpc_id=3,
+        request_state=token,
+        input_responses=accept,
+        capabilities={},
+    )
+    events = drain_stream(retry, 2)
+    assert events[0]["result"]["resultType"] == "complete"
+    assert len(STUB_CALLS) == 2
+    # Replay: the same requestState cannot execute a third time.
+    replay = _call_close(
         server,
         rpc_id=4,
         request_state=token,
         input_responses=accept,
+        capabilities={},
     )
-    events = drain_stream(accepted, 2)
-    assert events[0]["result"]["resultType"] == "complete"
-    assert len(STUB_CALLS) == 1
+    replay_result = None
+    if isinstance(replay, server_module.StreamResponse):
+        events = drain_stream(replay, 2)
+        replay_result = events[0]["result"]
+    else:
+        replay_result = replay["result"]
+    assert replay_result["isError"] is True
+    assert (
+        replay_result["structuredContent"]["error"]["code"] == "CONSENT_DENIED"
+    )
+    assert len(STUB_CALLS) == 2
 
 
 def test_accepted_retry_executes_once_and_replay_is_rejected():

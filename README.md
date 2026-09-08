@@ -132,9 +132,11 @@ must:
 2. Send the `MCP-Protocol-Version` header (`2026-07-28`) and the
    `Mcp-Method`/`Mcp-Name` request-metadata headers, with the matching
    protocol version and client information in each request's `_meta`.
-3. Declare the `elicitation.form` capability to support consent prompts, and
-   the `io.modelcontextprotocol/tasks` extension to receive long-running
-   operations as tasks.
+3. Declare the `elicitation.form` capability to receive consent prompts,
+   and the `io.modelcontextprotocol/tasks` extension to receive
+   long-running operations as tasks. Clients without these capabilities
+   are never blocked: consent-gated operations proceed without the
+   prompt, and long-running operations return final results.
 
 Clients that speak the 2025 Streamable HTTP revisions connect without any
 client-side changes: `initialize` with `protocolVersion` `2025-03-26`,
@@ -147,9 +149,9 @@ on legacy messages. Legacy sessions degrade deliberately:
   long-running operations simply block until they finish.
 * Consent prompts travel as native `elicitation/create` requests on the
   request-scoped SSE stream when the client declares form support. A
-  `2025-03-26` client (or any client without form support) receives an
-  explicit `CONSENT_DENIED` tool error for consent-required operations;
-  every other tool works normally.
+  `2025-03-26` client (or any client without form support) falls back to
+  1.0 behavior: consent-required operations proceed without the prompt,
+  and each bypass is noted in the Report view.
 * Resource subscriptions and task methods are not advertised and return
   "unknown method" errors.
 * JSON-RPC batches are accepted only for the `2025-03-26` revision.
@@ -213,10 +215,13 @@ Existing valid dependent solid counts are preserved when their inputs change.
 ### Consent
 
 Destructive or untrusted operations — opening an untrusted FCStd file,
-saving over an existing path, closing or reloading a dirty document — issue
-an MRTR elicitation round trip before taking effect. The client must answer
-the fixed `confirm` boolean form; declining, cancelling, or tampering with
-the signed consent state aborts the operation without any effect.
+saving over an existing path, closing or reloading a dirty document — offer
+an MRTR elicitation round trip before taking effect. A client that
+declares `elicitation.form` must answer the fixed `confirm` boolean form;
+declining, cancelling, or tampering with the signed consent state aborts
+the operation without any effect. A client without form support falls back
+to 1.0 behavior and proceeds without the prompt; each bypass is noted in
+the Report view.
 
 ### Long-running operations and cancellation
 

@@ -211,7 +211,9 @@ def test_legacy_session_flow_delivers_final_results_over_sse(wired_server):
     assert finals[0]["result"]["content"][0]["type"] == "text"
 
 
-def test_legacy_consent_denied_over_http_for_formless_client(wired_server):
+def test_legacy_formless_client_falls_back_to_execution(wired_server):
+    # 1.0 fallback over real HTTP: a formless 2025-03-26 client is never
+    # blocked by consent; the consent-requiring tool runs unprompted.
     _server, http, _waker = wired_server
     response = _post(http, _initialize("2025-03-26"), {})
     _status, _body, headers = _read_json(response)
@@ -240,9 +242,9 @@ def test_legacy_consent_denied_over_http_for_formless_client(wired_server):
     events = _read_sse(response)
     finals = [event for event in events if event.get("id") == 9]
     assert len(finals) == 1
-    assert finals[0]["result"]["isError"] is True
-    assert "does not support" in finals[0]["result"]["content"][0]["text"]
-    assert ts.STUB_CALLS == []  # no effects
+    assert finals[0]["result"].get("isError") is not True
+    assert "elicitation" not in finals[0]["result"]["content"][0]["text"]
+    assert len(ts.STUB_CALLS) == 1  # executed once, without any prompt
 
 
 def test_modern_requests_validate_unchanged_and_skip_legacy_sessions(

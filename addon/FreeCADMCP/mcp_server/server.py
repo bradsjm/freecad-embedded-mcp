@@ -62,7 +62,6 @@ from mcp_server.protocol import (
     consent_input_request,
     error_response,
     input_required_result,
-    require_client_capabilities,
     tool_error_result,
     tool_result,
     validate_schema,
@@ -157,11 +156,21 @@ _RESOURCE_READ_TIMEOUT_S = 10.0
 
 MAX_SCRIPT_SESSIONS = 32
 
-#: Per-request client capability any consent round trip requires (the MRTR
-#: elicitation form). Checked before a challenge is issued and before an
-#: accepted retry executes; absence is a -32021 protocol error whose data
-#: carries exactly this object as ``requiredCapabilities``.
-_CONSENT_REQUIRED_CAPABILITIES = {"elicitation": {"form": {}}}
+def _client_supports_form(client_capabilities: Mapping[str, Any] | None) -> bool:
+    """True when the client can answer a form elicitation round trip.
+
+    Mirrors the legacy adapter's capability normalization: an elicitation
+    object with ``form`` (or the backwards-compatible empty elicitation
+    object) means form support; anything else falls back to unprompted
+    execution.
+    """
+
+    if not isinstance(client_capabilities, Mapping):
+        return False
+    elicitation = client_capabilities.get("elicitation")
+    if not isinstance(elicitation, Mapping):
+        return False
+    return "form" in elicitation or len(elicitation) == 0
 
 #: Released ``CacheableResult`` hints, applied as TOP-LEVEL ``ttlMs`` /
 #: ``cacheScope`` fields on complete discovery/list/resource results (there
@@ -946,21 +955,22 @@ class Server:
         principal: str,
         client_capabilities: Mapping[str, Any] | None,
     ) -> dict | None:
-        """Run preflight and consent for one tool call (plan section 3).
+        """Run preflight and consent for one tool call.
 
-        Runs preflight on the GUI thread (quick, no lock held while waiting
-        for the user), issues a challenge for a consent-requiring target,
-        and on a retry verifies the signed ``requestState`` — even when the
-        target no longer needs consent — before any effect. A changed
-        target gets a fresh challenge; every other consent failure is a
-        ``CONSENT_DENIED`` tool error. The nonce is consumed under the
-        signer lock exactly once, before task creation and mutations.
+        Form-elicitation is offered, never required: a client that
+        declares the ``elicitation.form`` capability gets the full MRTR
+        round trip (challenge, retry, single-use nonce consumption), and
+        a client WITHOUT that capability falls back to 1.0 behavior and
+        proceeds without a prompt. Nothing is fabricated: a fallback
+        execution is an unprompted execution, reported as such in the
+        Report view.
 
-        Every consent round trip — issuing a challenge and consuming an
-        accepted retry — first requires the per-request client capability
-        ``{"elicitation": {"form": {}}}``; absence raises -32021 with
-        ``requiredCapabilities`` in the error data before any challenge is
-        returned or any accepted retry executes.
+        On a retry, the signed ``requestState`` is verified — even when
+        the target no longer needs consent — before any effect. A
+        changed target gets a fresh challenge for form-capable clients;
+        every other consent failure is a ``CONSENT_DENIED`` tool error.
+        The nonce is consumed under the signer lock exactly once, before
+        task creation and mutations.
         """
 
         preflight = self._preflights.get(name)
@@ -976,13 +986,11 @@ class Server:
                 )
             return None
 
+        form_capable = _client_supports_form(client_capabilities)
         target = self._run_preflight(name, arguments)
         identity = _target_identity(target)
 
         if request_state is not None:
-            require_client_capabilities(
-                client_capabilities, _CONSENT_REQUIRED_CAPABILITIES
-            )
             try:
                 self.signer.consume(
                     request_state,
@@ -998,6 +1006,7 @@ class Server:
                     reason == "target_changed"
                     and target
                     and target.get("requires_consent")
+                    and form_capable
                 ):
                     message = target.get("message") or "Confirm this operation."
                     token = self.signer.challenge(
@@ -1012,9 +1021,14 @@ class Server:
             return target
 
         if target is not None and target.get("requires_consent"):
-            require_client_capabilities(
-                client_capabilities, _CONSENT_REQUIRED_CAPABILITIES
-            )
+            if not form_capable:
+                # 1.0 fallback: no elicitation support, no prompt — the
+                # operation proceeds unprompted. Make the bypass visible.
+                FreeCAD.Console.PrintMessage(
+                    f"[MCP] '{name}' proceeded without its consent prompt: "
+                    "the client does not support form elicitation.\n"
+                )
+                return target
             message = target.get("message") or "Confirm this operation."
             token = self.signer.challenge(
                 principal=principal,
@@ -2051,10 +2065,10 @@ def _discover_definition() -> dict:
     return {
         "name": "discover_capabilities",
         "description": (
-            "Private snapshot of FreeCAD/OCC versions, workbenches, a "
-            "supportedTypes sample, exporter and FEM availability, and FreeCAD "
-            "paths, plus GUI dispatch health reported separately without "
-            "waiting for a GUI dispatch."
+            "Private snapshot of FreeCAD/OCC versions, workbenches, complete "
+            "supportedTypes, exporter and FEM availability, and FreeCAD paths, "
+            "plus GUI dispatch health reported separately without waiting for "
+            "a GUI dispatch."
         ),
         "inputSchema": {
             "type": "object",

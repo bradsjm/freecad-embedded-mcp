@@ -1087,7 +1087,7 @@ def _placement_row_value(placement: Any) -> dict | None:
         row = {
             "position": [float(base.x), float(base.y), float(base.z)],
             "axis": [float(axis.x), float(axis.y), float(axis.z)],
-            "angle_deg": float(rotation.Angle),
+            "angle_deg": math.degrees(float(rotation.Angle)),
         }
     except Exception:
         return None
@@ -1176,7 +1176,7 @@ def _jsonify(value: Any) -> Any:
             return {
                 "position": [float(base.x), float(base.y), float(base.z)],
                 "axis": [float(axis.x), float(axis.y), float(axis.z)],
-                "angle_deg": float(value.Rotation.Angle),
+                "angle_deg": math.degrees(float(value.Rotation.Angle)),
             }
         if hasattr(value, "x") and hasattr(value, "y") and hasattr(value, "z"):
             return {"x": float(value.x), "y": float(value.y), "z": float(value.z)}
