@@ -144,6 +144,10 @@ class FakeObject:
     def __post_init__(self) -> None:
         self.Shape = FakeShape(zmin=self.zmin, placement=self.Placement)
 
+    def getGlobalPlacement(self) -> FakePlacement:
+        # No ancestors in these tests: the global placement is the local one.
+        return self.Placement
+
 
 class FakeSolid:
     def __init__(self, volume: float = 1000.0) -> None:

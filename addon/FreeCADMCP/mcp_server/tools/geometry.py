@@ -80,6 +80,60 @@ def _shape_of(obj: Any) -> Any:
     return shape or None
 
 
+def _unresolvable_geometry(obj: Any) -> ToolError:
+    return ToolError(
+        VALIDATION_FAILED,
+        "Cannot resolve document-space geometry",
+        {"object": str(getattr(obj, "Name", ""))},
+    )
+
+
+def placed_shape(obj: Any) -> Any:
+    """Return a copy of ``obj``'s shape in document (global) coordinates.
+
+    The copy's placement is set to ``obj.getGlobalPlacement()`` exactly
+    once: the native getter already accumulates the object's own local
+    placement with every ancestor transform, so multiplying the existing
+    shape placement would double the object's own transform.
+
+    Fail-closed: a null/missing shape or an unavailable/failed
+    global-placement access raises ``VALIDATION_FAILED`` instead of
+    silently returning local coordinates. An ``App::Link`` with a
+    non-identity scale (or an unresolved instance path) is rejected for
+    the same reason until a native transform can represent it; ordinary
+    unscaled links resolve through the native global-placement API.
+    """
+
+    shape = _shape_of(obj)
+    if shape is None:
+        raise _unresolvable_geometry(obj)
+    type_id = str(getattr(obj, "TypeId", "") or "")
+    if type_id.startswith("App::Link"):
+        scale = getattr(obj, "Scale", None)
+        if isinstance(scale, (int, float)) and not isinstance(scale, bool):
+            # App::Link exposes a uniform scalar Scale.
+            components = (float(scale),) * 3
+        else:
+            try:
+                components = (float(scale.x), float(scale.y), float(scale.z))
+            except Exception:
+                raise _unresolvable_geometry(obj) from None
+        if any(abs(component - 1.0) > 1e-9 for component in components):
+            raise _unresolvable_geometry(obj)
+    try:
+        placement = obj.getGlobalPlacement()
+    except Exception:
+        raise _unresolvable_geometry(obj) from None
+    if placement is None:
+        raise _unresolvable_geometry(obj)
+    try:
+        global_shape = shape.copy()
+        global_shape.Placement = placement
+    except Exception:
+        raise _unresolvable_geometry(obj) from None
+    return global_shape
+
+
 def _bbox(shape: Any) -> list[float] | None:
     """Return ``[xmin, ymin, zmin, xmax, ymax, zmax]`` finite floats or None."""
 
@@ -255,11 +309,9 @@ def _resolve_target(ctx: Any, doc: Any, selector: Any) -> tuple[Any, Mapping | N
     obj = ctx.require_object(doc, selector["object"])
     role = selector["role"]
     box = [float(value) for value in selector["box"]]
-    shape = _shape_of(obj)
-    if shape is None:
-        raise ToolError(
-            VALIDATION_FAILED, f"object {obj.Name} has no shape to select a {role} from"
-        )
+    # Selectors and the returned subshape live in document space: match
+    # against the global-coordinate copy (index order is unchanged).
+    shape = placed_shape(obj)
     try:
         subshapes = list(shape.Faces if role == "face" else shape.Edges)
     except Exception as exc:
@@ -299,9 +351,16 @@ def _resolve_target(ctx: Any, doc: Any, selector: Any) -> tuple[Any, Mapping | N
 
 
 def _target_shape(obj: Any, selection: Mapping | None) -> Any:
+    """The measurement target in document coordinates.
+
+    Whole objects resolve through :func:`placed_shape` (global placement
+    applied exactly once); a selected subshape is already a document-space
+    face/edge of the global copy (see ``_resolve_target``).
+    """
+
     if selection is not None:
         return selection["shape"]
-    return _shape_of(obj)
+    return placed_shape(obj)
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +440,6 @@ def _geometry_entry(
         "valid": valid,
     }
 
-
 def _handle_validate_geometry(ctx: Any, arguments: Mapping[str, Any]) -> dict:
     doc = ctx.require_document(arguments["document"])
     expected_solids = arguments.get("expected_solids")
@@ -391,8 +449,14 @@ def _handle_validate_geometry(ctx: Any, arguments: Mapping[str, Any]) -> dict:
     for requested in arguments["objects"]:
         obj = ctx.require_object(doc, requested)
         report = geometry_report(obj, expected_solids)
+        # Reported bounds are document-space: measured against the global
+        # copied shape, never the local serialized placement. Shapeless
+        # objects keep null bounds instead of failing.
+        global_report = dict(report)
+        if _shape_of(obj) is not None:
+            global_report["bounds"] = _bbox(placed_shape(obj))
         entries.append(
-            _geometry_entry(report, expected_solids, expected_bounds, tolerance)
+            _geometry_entry(global_report, expected_solids, expected_bounds, tolerance)
         )
     return {
         "document": {
@@ -980,9 +1044,10 @@ TOOL_DEFINITIONS = [
     {
         "name": "validate_geometry",
         "description": (
-            "Validate object geometry: state, shape validity, solid count, volume,"
-            " bounds, shape.check diagnostics and maximum tolerance. Optional"
-            " expected_solids and per-object expected_bounds (six mm coordinates)"
+            "Validate object geometry in document (global) coordinates: state,"
+            " shape validity, solid count, volume, bounds, shape.check"
+            " diagnostics and maximum tolerance. Optional expected_solids and"
+            " per-object expected_bounds (six document-space mm coordinates)"
             " produce explicit verdicts; nothing is repaired."
         ),
         "inputSchema": _VALIDATE_GEOMETRY_INPUT,
@@ -991,11 +1056,13 @@ TOOL_DEFINITIONS = [
     {
         "name": "measure",
         "description": (
-            "Measure geometry between whole objects or bbox-selected faces/edges:"
-            " distance (distToShape), interference (common volume), planar section"
-            " curves (z plane or normal+point) or face areas with sampled normals."
-            " Subshape results return signed topology references; units are mm,"
-            " mm2 and mm3."
+            "Measure geometry in document (global) coordinates between whole"
+            " objects or bbox-selected faces/edges (selector boxes are"
+            " document-space mm): distance (distToShape), interference (common"
+            " volume), planar section curves (z plane or normal+point in"
+            " document space) or face areas with sampled normals. Subshape"
+            " results return signed topology references; units are mm, mm2"
+            " and mm3."
         ),
         "inputSchema": _MEASURE_INPUT,
         "outputSchema": _MEASURE_OUTPUT,

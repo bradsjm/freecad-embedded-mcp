@@ -436,6 +436,35 @@ def test_one_omitted_side_uses_view_dimension_unclamped(view_module) -> None:
     assert save_call[2] == 1500
 
 
+
+def test_one_omitted_side_clamps_to_schema_maximum(view_module) -> None:
+    ctx = make_ctx(gui_views={"Smoke": FakeView(size=(5120, 2880))})
+    view = ctx.Gui.views["Smoke"]
+    view_module.capture_view(ctx, capture_args(height=1000))
+    save_call = next(call for call in view.calls if isinstance(call, tuple))
+    # The viewport width exceeds the schema limit; the explicit height is
+    # never resized and no aspect ratio is inferred.
+    assert save_call[1] == 4096
+    assert save_call[2] == 1000
+
+
+def test_one_omitted_side_clamps_portrait_viewport(view_module) -> None:
+    ctx = make_ctx(gui_views={"Smoke": FakeView(size=(5120, 5000))})
+    view = ctx.Gui.views["Smoke"]
+    view_module.capture_view(ctx, capture_args(width=1000))
+    save_call = next(call for call in view.calls if isinstance(call, tuple))
+    assert save_call[1] == 1000
+    assert save_call[2] == 4096
+
+
+def test_explicit_4097_fails_before_capture(view_module) -> None:
+    ctx = make_ctx()
+    view = ctx.Gui.views["Smoke"]
+    with pytest.raises(ToolError) as excinfo:
+        view_module.capture_view(ctx, capture_args(height=4097))
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert view.calls == []
+
 def test_explicit_size_beyond_limit_is_rejected(view_module) -> None:
     ctx = make_ctx()
     view = ctx.Gui.views["Smoke"]

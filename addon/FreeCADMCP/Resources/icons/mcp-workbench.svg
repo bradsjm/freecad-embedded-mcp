@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <title>FreeCAD MCP</title>
+  <g stroke="#f4f6f8" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M32 10 51 21v22L32 54 13 43V21Z" fill="#4c9bd6"/><path d="m13 21 19 11 19-11M32 32v22" fill="none"/></g>
+  <g stroke="#263445" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M32 10 51 21v22L32 54 13 43V21Z" fill="#4c9bd6"/><path d="m13 21 19 11 19-11M32 32v22" fill="none"/></g>
+</svg>

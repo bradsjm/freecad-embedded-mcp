@@ -120,6 +120,28 @@ class FakeShape:
         self._common = None
         self._section = None
 
+    def copy(self):
+        copied = FakeShape(
+            volume=self.Volume,
+            bounds=(
+                self.BoundBox.XMin,
+                self.BoundBox.YMin,
+                self.BoundBox.ZMin,
+                self.BoundBox.XMax,
+                self.BoundBox.YMax,
+                self.BoundBox.ZMax,
+            ),
+            solids=len(self.Solids),
+            faces=list(self.Faces),
+            edges=list(self.Edges),
+            check_results=list(self._check),
+            tolerance=self._tolerance,
+        )
+        copied._distance = self._distance
+        copied._common = self._common
+        copied._section = self._section
+        return copied
+
     def isValid(self):
         return True
 
@@ -183,6 +205,11 @@ class FakeObject:
         self.Shape = shape
         self.State = []
         self.validity_error = None
+        # Opaque placement stand-in: global equals local (no ancestors).
+        self.Placement = SimpleNamespace()
+
+    def getGlobalPlacement(self):
+        return self.Placement
 
     def isValid(self):
         return True
@@ -354,6 +381,60 @@ def test_validate_geometry_without_expected_bounds_has_no_verdict():
     )
     assert "bounds" not in result["objects"][0]["verdicts"]
     assert result["objects"][0]["valid"] is True
+
+
+def test_placed_shape_applies_global_placement_exactly_once():
+    local = SimpleNamespace(name="local")
+    global_placement = SimpleNamespace(name="global")
+    shape = FakeShape(bounds=(0.0, 0.0, 0.0, 10.0, 10.0, 10.0))
+    obj = FakeObject("Child", shape)
+    obj.Placement = local
+    obj.getGlobalPlacement = lambda: global_placement
+
+    placed = geometry.placed_shape(obj)
+
+    assert placed is not shape  # a copy, the source is untouched
+    # The copy carries the global placement itself; the local placement was
+    # never multiplied a second time.
+    assert placed.Placement is global_placement
+    assert obj.Placement is local
+    assert obj.Shape is shape
+
+
+def test_placed_shape_failures_are_fail_closed():
+    # Shapeless object.
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.placed_shape(FakeObject("Empty", None))
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.details == {"object": "Empty"}
+
+    # Failed global-placement access.
+    broken = FakeObject("Broken", FakeShape())
+    broken.Placement = SimpleNamespace()
+
+    def _boom():
+        raise RuntimeError("no ancestor chain")
+
+    broken.getGlobalPlacement = _boom
+    with pytest.raises(protocol.ToolError):
+        geometry.placed_shape(broken)
+
+    # App::Link with a non-identity scale is unsupported geometry.
+    link = FakeObject("Link", FakeShape())
+    link.TypeId = "App::Link"
+    link.Placement = SimpleNamespace()
+    link.Scale = FakeVector(2.0, 1.0, 1.0)
+    with pytest.raises(protocol.ToolError):
+        geometry.placed_shape(link)
+
+
+    # An ordinary unscaled link resolves through the native API.
+    plain_link = FakeObject("PlainLink", FakeShape())
+    plain_link.TypeId = "App::Link"
+    plain_link.Placement = SimpleNamespace()
+    plain_link.Scale = FakeVector(1.0, 1.0, 1.0)
+    placed = geometry.placed_shape(plain_link)
+    assert placed.Placement is plain_link.Placement
 
 
 def test_validate_geometry_valid_non_solid():

@@ -41,45 +41,24 @@ MAX_ANGULAR_DEFLECTION = 3.14159
 # ---------------------------------------------------------------------------
 
 
-def _require_format(arguments: dict[str, Any]) -> str:
-    fmt = arguments.get("format")
-    if fmt not in FORMATS:
-        raise ToolError(
-            "VALIDATION_FAILED",
-            f"format must be one of {', '.join(FORMATS)}",
-            {"format": fmt},
-        )
-    return str(fmt)
+def _deflection(arguments: dict[str, Any], key: str, default: float) -> float:
+    """Schema-validated deflection or its default.
 
+    Type/range checks live in the registered input schema (number,
+    exclusiveMinimum 0, bounded maximum) and run at the dispatch
+    boundary; the handler only applies the default when the key is
+    absent.
+    """
 
-def _deflection(
-    arguments: dict[str, Any], key: str, default: float, maximum: float
-) -> float:
     value = arguments.get(key)
-    if value is None:
-        return default
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-        or value > maximum
-    ):
-        raise ToolError(
-            "VALIDATION_FAILED",
-            f"{key} must be a finite number between 0 (exclusive) and {maximum}",
-            {key: value},
-        )
-    return float(value)
+    return default if value is None else float(value)
 
 
 def _bed_align(arguments: dict[str, Any]) -> bool:
-    value = arguments.get("bed_align", False)
-    if not isinstance(value, bool):
-        raise ToolError(
-            "VALIDATION_FAILED", "bed_align must be a boolean", {"bed_align": value}
-        )
-    return value
+    """Schema-validated boolean or its default (absent/None means off)."""
+
+    value = arguments.get("bed_align")
+    return False if value is None else bool(value)
 
 
 # ---------------------------------------------------------------------------
@@ -265,22 +244,21 @@ def _require_export_solid(ctx: Any, doc: Any, name: str) -> Any:
 def _placed_shape_copies(
     ctx: Any, doc: Any, object_names: list[str]
 ) -> list[tuple[str, Any]]:
-    """Placed shape copies of the selected objects, in selection order."""
+    """Document-space shape copies of the selected objects, selection order.
+
+    ``_require_export_solid`` is the one geometry validation per selected
+    object; the global-coordinate copy comes from the shared
+    ``geometry.placed_shape`` helper (native ``getGlobalPlacement`` applied
+    exactly once), so nested/rotated ancestors export where they sit in
+    the document, not where their local placement says.
+    """
+
+    from .geometry import placed_shape
 
     copies: list[tuple[str, Any]] = []
     for name in object_names:
         obj = _require_export_solid(ctx, doc, name)
-        shape = obj.Shape.copy()
-        if shape is None:
-            raise ToolError(
-                "VALIDATION_FAILED",
-                f"object '{name}' has no shape to export",
-                {"object": str(getattr(obj, "Name", name))},
-            )
-        placement = getattr(obj, "Placement", None)
-        if placement is not None and shape.Placement != placement:
-            shape.Placement = placement
-        copies.append((str(obj.Name), shape))
+        copies.append((str(obj.Name), placed_shape(obj)))
     return copies
 
 
@@ -564,7 +542,7 @@ def _export_fcstd(ctx: Any, doc: Any, destination: str) -> dict[str, Any]:
 def export(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     """``export`` handler (GUI thread only)."""
 
-    fmt = _require_format(arguments)
+    fmt = str(arguments["format"])  # schema enum guarantees membership
     doc = ctx.require_document(arguments.get("document"))
     ctx.check_document_idle(doc)
     destination = ctx.canonical_path(arguments.get("path"))
@@ -609,17 +587,9 @@ def export(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             object_names,
             fmt,
             destination,
+            _deflection(arguments, "linear_deflection", DEFAULT_LINEAR_DEFLECTION),
             _deflection(
-                arguments,
-                "linear_deflection",
-                DEFAULT_LINEAR_DEFLECTION,
-                MAX_LINEAR_DEFLECTION,
-            ),
-            _deflection(
-                arguments,
-                "angular_deflection",
-                DEFAULT_ANGULAR_DEFLECTION,
-                MAX_ANGULAR_DEFLECTION,
+                arguments, "angular_deflection", DEFAULT_ANGULAR_DEFLECTION
             ),
             _bed_align(arguments),
         )

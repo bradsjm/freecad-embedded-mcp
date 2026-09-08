@@ -105,6 +105,22 @@ def _stub_resolve_reference(ctx: Any, doc: Any, reference: dict) -> tuple[Any, s
 
 
 _STUB_GEOMETRY.resolve_reference = _stub_resolve_reference
+
+
+def _stub_placed_shape(obj: Any) -> Any:
+    """No-ancestor stand-in for geometry.placed_shape (global == local)."""
+
+    shape = getattr(obj, "Shape", None)
+    if shape is None:
+        raise ToolError(
+            VALIDATION_FAILED,
+            "Cannot resolve document-space geometry",
+            {"object": str(getattr(obj, "Name", ""))},
+        )
+    return shape
+
+
+_STUB_GEOMETRY.placed_shape = _stub_placed_shape
 _STUB_GEOMETRY_INSTALL = ("mcp_server.tools.geometry", _STUB_GEOMETRY)
 
 _STUB_MODULES = (
@@ -1181,12 +1197,18 @@ def test_inspect_returns_sorted_compact_rows() -> None:
         "typeId",
         "state",
         "placement",
+        "globalPlacement",
+        "boundsCoordinateSystem",
         "bounds",
         "shape_valid",
         "solid_count",
         "tip",
         "links",
         "properties",
+        "propertyMetadata",
+        "propertyCount",
+        "nextPropertyOffset",
+        "truncatedProperties",
     }
     assert row["properties"] == {}
     validate_schema(result, objects_mod.TOOL_DEFINITIONS[0]["outputSchema"])
@@ -1378,3 +1400,114 @@ def test_document_objects_are_never_stringified_in_output() -> None:
 
     row = next(r for r in result["objects"] if r["name"] == "Source")
     assert row["properties"]["Link"] == "LinkTarget"
+
+
+# ---------------------------------------------------------------------------
+# Property paging (full detail), metadata and truncation.
+# ---------------------------------------------------------------------------
+
+
+def _paging_doc() -> tuple[FakeDoc, FakeCtx, FakeObj]:
+    obj = FakeObj(
+        "Box",
+        properties=("Visibility", "Length", "Placement", "Type"),
+        prop_types={
+            "Visibility": "App::PropertyBool",
+            "Length": "App::PropertyLength",
+            "Placement": "App::PropertyPlacement",
+            "Type": "App::PropertyEnumeration",
+        },
+        prop_status={"Placement": ["ReadOnly"]},
+        enumerations={"Type": ["Box", "Cylinder", "Sphere"]},
+        values={"Visibility": True, "Length": 10.0, "Type": "Box"},
+    )
+    doc = FakeDoc(objects=[obj])
+    return doc, FakeCtx(doc), obj
+
+
+def test_property_paging_discovers_metadata_without_known_names() -> None:
+    doc, ctx, _obj = _paging_doc()
+
+    first = objects_mod.inspect_objects(
+        ctx, {"document": doc.Name, "detail": "full", "property_limit": 2}
+    )
+    row = first["objects"][0]
+    assert row["propertyCount"] == 4
+    assert list(row["properties"]) == ["Length", "Placement"]
+    assert row["nextPropertyOffset"] == 2
+    # Disclosed mutability and enumeration choices.
+    assert row["propertyMetadata"]["Length"] == {
+        "type": "App::PropertyLength",
+        "readOnly": False,
+        "enumeration": None,
+        "enumerationCount": 0,
+        "enumerationTruncated": False,
+    }
+    assert row["propertyMetadata"]["Placement"]["readOnly"] is True
+
+    second = objects_mod.inspect_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "detail": "full",
+            "property_offset": 2,
+            "property_limit": 2,
+        },
+    )
+    row2 = second["objects"][0]
+    assert list(row2["properties"]) == ["Type", "Visibility"]
+    assert row2["nextPropertyOffset"] is None
+    assert row2["propertyMetadata"]["Type"]["enumeration"] == [
+        "Box",
+        "Cylinder",
+        "Sphere",
+    ]
+    assert row2["propertyMetadata"]["Type"]["enumerationCount"] == 3
+
+
+def test_property_offset_past_end_preserves_total() -> None:
+    doc, ctx, _obj = _paging_doc()
+    result = objects_mod.inspect_objects(
+        ctx, {"document": doc.Name, "detail": "full", "property_offset": 99}
+    )
+    row = result["objects"][0]
+    assert row["properties"] == {}
+    assert row["propertyMetadata"] == {}
+    assert row["propertyCount"] == 4
+    assert row["nextPropertyOffset"] is None
+
+
+def test_overlong_list_value_is_truncated_and_named() -> None:
+    obj = FakeObj(
+        "List",
+        properties=("History",),
+        prop_types={"History": "App::PropertyStringList"},
+        values={"History": [f"step-{index}" for index in range(70)]},
+    )
+    doc = FakeDoc(objects=[obj])
+    result = objects_mod.inspect_objects(
+        ctx := FakeCtx(doc), {"document": doc.Name, "detail": "full"}
+    )
+    row = result["objects"][0]
+    assert len(row["properties"]["History"]) == 64
+    assert row["properties"]["History"][-1] == "step-63"
+    assert row["truncatedProperties"] == ["History"]
+
+
+def test_missing_filtered_property_keeps_null_metadata() -> None:
+    doc, ctx, _obj = _paging_doc()
+    result = objects_mod.inspect_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "detail": "full",
+            "property_filter": ["Length", "DoesNotExist"],
+        },
+    )
+    row = result["objects"][0]
+    assert list(row["properties"]) == ["Length", "DoesNotExist"]
+    assert row["properties"]["DoesNotExist"] == {"unavailable": "no-such-property"}
+    assert row["propertyMetadata"]["DoesNotExist"] is None
+    assert row["propertyMetadata"]["Length"]["type"] == "App::PropertyLength"
+    assert row["propertyCount"] == 2
+    assert row["nextPropertyOffset"] is None

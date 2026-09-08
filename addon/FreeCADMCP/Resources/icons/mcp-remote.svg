@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <title>Remote Connections</title>
+  <g stroke="#f4f6f8" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M32 25v12M14 44v-7h36v7" fill="none"/><rect x="23" y="10" width="18" height="15" rx="3" fill="#4c9bd6"/><rect x="6" y="44" width="16" height="12" rx="3" fill="#4c9bd6"/><rect x="42" y="44" width="16" height="12" rx="3" fill="#4c9bd6"/></g>
+  <g stroke="#263445" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M32 25v12M14 44v-7h36v7" fill="none"/><rect x="23" y="10" width="18" height="15" rx="3" fill="#4c9bd6"/><rect x="6" y="44" width="16" height="12" rx="3" fill="#4c9bd6"/><rect x="42" y="44" width="16" height="12" rx="3" fill="#4c9bd6"/></g>
+</svg>

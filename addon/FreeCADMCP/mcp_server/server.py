@@ -26,6 +26,7 @@ thread)::
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import json
 import os
 import queue
@@ -41,6 +42,7 @@ import FreeCADGui
 from mcp_server import gui_dispatch
 from mcp_server.http_server import McpHTTPServer, StreamResponse
 from mcp_server.protocol import (
+    CONSENT_DENIED,
     DOCUMENT_NOT_FOUND,
     GUI_DISPATCH_FAILED,
     INTERNAL_ERROR,
@@ -429,6 +431,7 @@ class Server:
         self.active_solves: dict[str, dict] = {}
 
         self._static_capabilities: dict | None = None
+        self._capabilities_lock = threading.Lock()
         self._register_tools()
 
     # ------------------------------------------------------------------
@@ -702,22 +705,137 @@ class Server:
     # -- discovery / tools list (GUI independent, cached responses) ------
 
     def _dispatch_discover(self, validated: dict) -> dict:
-        payload = {
-            "supportedVersions": [SUPPORTED_PROTOCOL_VERSION],
-            "capabilities": {
-                "tools": {},
-                "resources": {"subscribe": True},
-                "extensions": {TASKS_EXTENSION_ID: {}},
-            },
+        params = validated.get("params") or {}
+        unknown = set(params) - {"refresh", "document", "_meta"}
+        if unknown:
+            raise ProtocolError(
+                INVALID_PARAMS,
+                f"invalid parameters: unknown discover parameters: {sorted(unknown)}",
+            )
+        refresh = params.get("refresh", False)
+        if not isinstance(refresh, bool):
+            raise ProtocolError(
+                INVALID_PARAMS, "invalid parameters: refresh must be a boolean"
+            )
+        document = params.get("document")
+        if document is not None and (
+            not isinstance(document, str) or not document
+        ):
+            raise ProtocolError(
+                INVALID_PARAMS,
+                "invalid parameters: document must be a non-empty string",
+            )
+        if document is not None and refresh is not True:
+            return _rpc_result(
+                validated["id"],
+                tool_error_result(
+                    ToolError(
+                        VALIDATION_FAILED,
+                        "document requires refresh=true",
+                        {"document": document},
+                    )
+                ),
+            )
+        if refresh is not True:
+            # GUI-independent: the latest successful immutable cache.
+            payload = self._discover_payload(self._capability_snapshot(), None)
+            return _with_caching(
+                _rpc_result(validated["id"], complete_result(payload)),
+                CACHE_PUBLIC,
+            )
+        snapshot, refresh_error = self._refresh_capabilities(document)
+        if refresh_error is None:
+            payload = self._discover_payload(snapshot, None)
+            # Live document data: ttl 0, private scope.
+            return _with_caching(
+                _rpc_result(validated["id"], complete_result(payload)),
+                CACHE_PRIVATE,
+            )
+        payload = self._discover_payload(self._capability_snapshot(), refresh_error)
+        payload["gui"] = _gui_health_snapshot()
+        return _rpc_result(validated["id"], complete_result(payload))
+
+    def _discover_payload(self, snapshot: dict, refresh_error: dict | None) -> dict:
+        capabilities = {
+            key: value
+            for key, value in snapshot.items()
+            if key != "supportedTypesDocument"
         }
-        return _with_caching(
-            _rpc_result(validated["id"], complete_result(payload)), CACHE_PUBLIC
+        return {
+            "supportedVersions": [SUPPORTED_PROTOCOL_VERSION],
+            "capabilities": capabilities,
+            "supportedTypesDocument": snapshot.get("supportedTypesDocument"),
+            "refreshError": refresh_error,
+        }
+
+    def _refresh_capabilities(
+        self, document: str | None
+    ) -> tuple[dict, dict | None]:
+        """Refresh the static capability snapshot on the GUI thread.
+
+        The GUI callable only returns a candidate (or a structured
+        ToolError payload); the waiting caller publishes it under the
+        capabilities lock ONLY after a successful Outcome, so a late
+        result from a timed-out dispatch can never reach the cache. A
+        failed refresh leaves the cache untouched.
+        """
+
+        def _candidate() -> dict:
+            try:
+                if document is not None:
+                    doc = FreeCAD.listDocuments().get(document)
+                    if doc is None:
+                        raise ToolError(
+                            DOCUMENT_NOT_FOUND,
+                            f"no such document: {document}",
+                            {"name": document},
+                        )
+                else:
+                    docs = FreeCAD.listDocuments()
+                    doc = docs[sorted(docs.keys())[0]] if docs else None
+                return _capture_static_capabilities(doc)
+            except ToolError as exc:
+                error: dict = {"code": exc.code, "message": exc.message}
+                if exc.details is not None:
+                    error["details"] = exc.details
+                return {"_refreshError": error}
+
+        outcome = gui_dispatch.dispatch_to_gui(
+            _candidate,
+            timeout=_PREFLIGHT_TIMEOUT_S,
+            operation_name="discover:refresh",
         )
+        if outcome.error is not None:
+            error: dict = {
+                "code": GUI_DISPATCH_FAILED,
+                "message": f"capability refresh failed: {outcome.error}",
+            }
+            if outcome.traceback:
+                error["details"] = {"traceback": outcome.traceback}
+            return {}, error
+        candidate = outcome.value
+        if not isinstance(candidate, dict):
+            return {}, {
+                "code": GUI_DISPATCH_FAILED,
+                "message": "capability refresh returned an invalid snapshot",
+            }
+        refresh_error = candidate.pop("_refreshError", None)
+        if refresh_error is not None:
+            return {}, refresh_error
+        with self._capabilities_lock:
+            self._static_capabilities = candidate
+        return candidate, None
 
     def _capability_snapshot(self) -> dict:
-        """Static startup snapshot; live GUI health is reported separately."""
+        """Static startup snapshot; live GUI health is reported separately.
 
-        return dict(self._static_capabilities or {})
+        A deep copy under the capabilities lock: readers can never observe
+        a half-published refresh, and no lock is held while they use it.
+        """
+
+        with self._capabilities_lock:
+            snapshot = self._static_capabilities
+        return copy.deepcopy(snapshot) if snapshot else {}
 
     def _dispatch_tools_list(self, validated: dict) -> dict:
         payload = {"tools": [dict(d) for d in self._tool_defs]}
@@ -765,6 +883,20 @@ class Server:
                 _rpc_result(request_id, self._validated_tool_result(name, payload)),
                 CACHE_PRIVATE,
             )
+        cancel_event = validated.get("cancel_event")
+        if cancel_event is not None and cancel_event.is_set():
+            # A legacy cancellation that arrived while the request was
+            # queued: no effects, no consent round trip, no registration.
+            return _rpc_result(
+                request_id,
+                tool_error_result(
+                    ToolError(
+                        CONSENT_DENIED,
+                        "Operation cancelled before execution",
+                        {"reason": "cancelled"},
+                    )
+                ),
+            )
         try:
             target = self._consent_phase(
                 name, arguments, params, principal, validated["client_capabilities"]
@@ -774,6 +906,18 @@ class Server:
         except InputRequired as exc:
             return _rpc_result(
                 request_id, input_required_result(exc.input_requests, exc.request_state)
+            )
+        if cancel_event is not None and cancel_event.is_set():
+            # The event may have been set while consent was pending.
+            return _rpc_result(
+                request_id,
+                tool_error_result(
+                    ToolError(
+                        CONSENT_DENIED,
+                        "Operation cancelled before execution",
+                        {"reason": "cancelled"},
+                    )
+                ),
             )
 
         deadline_s = _deadline_for(name, arguments)
@@ -914,6 +1058,7 @@ class Server:
         task_id: str | None,
         principal: str | None,
         deadline_s: float,
+        cancel_event: threading.Event | None = None,
     ) -> _Operation:
         with self._ops_lock:
             if len(self._ops) >= MAX_OPERATIONS:
@@ -930,6 +1075,9 @@ class Server:
                 principal=principal,
                 deadline_mono=self._clock() + deadline_s,
                 deadline_s=deadline_s,
+                cancel_event=(
+                    cancel_event if cancel_event is not None else threading.Event()
+                ),
             )
             self._ops[op.op_id] = op
             return op
@@ -972,23 +1120,35 @@ class Server:
         self._remove_op(op)
 
     def _maybe_finish_draining(self) -> None:
-        """Once a draining server has no work left, dispose the Qt waker.
+        """Once a draining server has no work left, finish into stopped.
 
         Qt/observer cleanup must not happen while any GUI work can still
         call back into the server. BOTH queues must be empty: the server's
         retained operations (an async FEM Future keeps its slot after the
         dispatcher job itself completed) AND the dispatcher's own inflight
         jobs (a stuck GUI callable has not returned yet). Only then is the
-        waker disposal scheduled, safely off the worker finalizer thread.
+        state flipped to stopped — without another Start/Stop click — and
+        the waker disposal scheduled, safely off the worker finalizer
+        thread.
         """
 
         with self._state_lock:
             draining = self._state == "draining"
-        if (
-            draining
-            and self.pending_operation_count() == 0
-            and gui_dispatch.pending_count() == 0
-        ):
+        if not draining:
+            return
+        if self.pending_operation_count() != 0 or gui_dispatch.pending_count() != 0:
+            return
+        with self._state_lock:
+            if (
+                self._state == "draining"
+                and self.pending_operation_count() == 0
+                and gui_dispatch.pending_count() == 0
+            ):
+                self._state = "stopped"
+                finish = True
+            else:
+                finish = False
+        if finish:
             try:
                 gui_dispatch.cleanup_waker()
             except Exception:
@@ -1037,6 +1197,9 @@ class Server:
         """
 
         request_id = validated["id"]
+        # Legacy requests carry a session-owned cancel event and never get
+        # a disconnect hook: an SSE disconnect must not cancel legacy work.
+        is_legacy = validated.get("legacy_session_id") is not None
         try:
             op = self._register_operation(
                 name,
@@ -1044,6 +1207,7 @@ class Server:
                 task_id=None,
                 principal=principal,
                 deadline_s=deadline_s,
+                cancel_event=validated.get("cancel_event"),
             )
         except ToolError as exc:
             return _rpc_result(request_id, tool_error_result(exc))
@@ -1100,7 +1264,7 @@ class Server:
         ).start()
         return StreamResponse(
             events,
-            on_disconnect=on_disconnect,
+            on_disconnect=None if is_legacy else on_disconnect,
         )
 
     def _blocking_result(self, name: str, outcome: Any, op: _Operation) -> dict:
@@ -1591,8 +1755,8 @@ class Server:
     # Static capability capture (GUI thread, never touches user documents)
     # ------------------------------------------------------------------
 
-    def _capture_static_capabilities(self) -> None:
-        self._static_capabilities = _capture_static_capabilities()
+    def _capture_static_capabilities(self, document: Any = None) -> None:
+        self._static_capabilities = _capture_static_capabilities(document)
 
     # ------------------------------------------------------------------
     # Startup / shutdown
@@ -1709,6 +1873,14 @@ class Server:
                 else None
             ),
             "pendingOperations": self.pending_operation_count(),
+            # Token-free fields for the native UI: dispatch health plus the
+            # ACTIVE connection settings copied from this server's settings.
+            "gui": _gui_health_snapshot(),
+            "connection": {
+                "remote_enabled": bool(self.settings.get("remote_enabled", False)),
+                "allowed_ips": str(self.settings.get("allowed_ips", "")),
+                "configured_port": self.settings.get("port"),
+            },
         }
 
 
@@ -1761,26 +1933,51 @@ def _module_available(name: str) -> bool:
         return False
 
 
-def _supported_types_sample() -> Any:
-    """Sample of ``Document.supportedTypes`` without touching user docs.
+def _supported_types_sample(document: Any = None) -> Any:
+    """Complete sorted ``supportedTypes`` of the selected document.
 
-    Read-only from an existing document when one is open; never creates or
-    mutates one.
+    Read-only; never creates or mutates a document. No cut-off: the
+    complete array supplies its own count.
+    """
+
+    if document is None:
+        return {"unavailable": "no open document"}
+    try:
+        return sorted({str(entry) for entry in document.supportedTypes()})
+    except Exception as exc:
+        return {"unavailable": f"{type(exc).__name__}: {exc}"}
+
+
+def _capture_static_capabilities(document: Any = None) -> dict:
+    """Private snapshot of versions, workbenches, types, exporters, FEM and
+    paths from actual FreeCAD getters. ``App.ApplicationDirectories`` is not
+    a directory mapping and is never treated as one.
+
+    ``document`` (or, when None, the first open document by sorted internal
+    name) scopes the supported-types probe; the chosen document's name is
+    reported as ``supportedTypesDocument``.
     """
 
     docs = FreeCAD.listDocuments()
-    if not docs:
-        return {"unavailable": "no open document"}
-    doc = next(iter(docs.values()))
-    types = list(doc.supportedTypes())
-    return types[:64]
+    if document is None and docs:
+        document = docs[sorted(docs.keys())[0]]
+    document_name = None
+    if document is not None:
+        try:
+            document_name = str(document.Name)
+        except Exception:
+            document_name = None
+    try:
+        from mcp_server.tools import fem as _fem_module
 
-
-def _capture_static_capabilities() -> dict:
-    """Private snapshot of versions, workbenches, types, exporters, FEM and
-    paths from actual FreeCAD getters. ``App.ApplicationDirectories`` is not
-    a directory mapping and is never treated as one."""
-
+        availability_getter = getattr(_fem_module, "availability", None)
+        fem_readiness = (
+            _probe(availability_getter)
+            if callable(availability_getter)
+            else {"unavailable": "availability probe missing"}
+        )
+    except Exception as exc:
+        fem_readiness = {"unavailable": f"{type(exc).__name__}: {exc}"}
     version = list(FreeCAD.Version())
     workbenches = _probe(lambda: sorted(FreeCADGui.listWorkbenches()))
     try:
@@ -1796,7 +1993,7 @@ def _capture_static_capabilities() -> dict:
         },
         "occ": {"version": occ_version},
         "workbenches": workbenches,
-        "supportedTypes": _probe(_supported_types_sample),
+        "supportedTypes": _probe(lambda: _supported_types_sample(document)),
         "exporters": {
             "mesh": _module_available("Mesh"),
             "meshPart": _module_available("MeshPart"),
@@ -1808,7 +2005,9 @@ def _capture_static_capabilities() -> dict:
             "module": _module_available("Fem"),
             "objectsFem": _module_available("ObjectsFem"),
             "femsolver": _module_available("femsolver"),
+            "readiness": fem_readiness,
         },
+        "supportedTypesDocument": document_name,
         "paths": {
             "home": _probe(FreeCAD.getHomePath),
             "userAppData": _probe(FreeCAD.getUserAppDataDir),
@@ -1960,5 +2159,13 @@ def server_status() -> dict:
     with _server_lock:
         server = _server
     if server is None:
-        return {"running": False, "state": "stopped"}
+        return {
+            "running": False,
+            "state": "stopped",
+            "port": None,
+            "endpoint": None,
+            "pendingOperations": 0,
+            "gui": _gui_health_snapshot(),
+            "connection": {},
+        }
     return server.status()

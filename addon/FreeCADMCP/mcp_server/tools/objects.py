@@ -22,6 +22,9 @@ from ..protocol import DOMAIN_CURSOR, VALIDATION_FAILED, ToolError
 _MAX_LIMIT = 500
 _MAX_LINKS = 64
 _MAX_FILTER = 64
+_MAX_PROPERTY_PAGE = 64
+_PROPERTY_LIST_LIMIT = 64
+_ENUMERATION_LIMIT = 64
 _MAX_DEPENDENTS_LISTED = 64
 
 # ---------------------------------------------------------------------------
@@ -280,6 +283,8 @@ _OBJECT_ROW = {
         "typeId",
         "state",
         "placement",
+        "globalPlacement",
+        "boundsCoordinateSystem",
         "bounds",
         "shape_valid",
         "solid_count",
@@ -293,6 +298,9 @@ _OBJECT_ROW = {
         "typeId": {"type": "string"},
         "state": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
         "placement": {"$ref": "#/$defs/placement"},
+        "globalPlacement": {"$ref": "#/$defs/placement"},
+        "boundsCoordinateSystem": {"type": "string", "enum": ["document"]},
+        "geometryUnavailable": {"type": "string"},
         "bounds": {
             "type": ["array", "null"],
             "items": {"type": "number"},
@@ -307,9 +315,59 @@ _OBJECT_ROW = {
     },
 }
 
+_PROPERTY_METADATA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "type",
+        "readOnly",
+        "enumeration",
+        "enumerationCount",
+        "enumerationTruncated",
+    ],
+    "properties": {
+        "type": {"type": ["string", "null"]},
+        "readOnly": {"type": ["boolean", "null"]},
+        "enumeration": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "maxItems": _MAX_PROPERTY_PAGE,
+        },
+        "enumerationCount": {"type": "integer", "minimum": 0},
+        "enumerationTruncated": {"type": "boolean"},
+    },
+}
+
+_OBJECT_ROW["required"].extend(
+    [
+        "propertyMetadata",
+        "propertyCount",
+        "nextPropertyOffset",
+        "truncatedProperties",
+    ]
+)
+_OBJECT_ROW["properties"].update(
+    {
+        "propertyMetadata": {
+            "type": "object",
+            "additionalProperties": {
+                "anyOf": [_PROPERTY_METADATA, {"type": "null"}]
+            },
+        },
+        "propertyCount": {"type": "integer", "minimum": 0},
+        "nextPropertyOffset": {"type": ["integer", "null"], "minimum": 0},
+        "truncatedProperties": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": _MAX_PROPERTY_PAGE,
+        },
+    }
+)
+
 _ROW_DEFS = {
     "placement": _PLACEMENT_ROW,
     "objectRow": _OBJECT_ROW,
+    "propertyMetadata": _PROPERTY_METADATA,
 }
 
 _MUTATION_OUTPUT_DEFS = {
@@ -339,6 +397,13 @@ _INSPECT_INPUT = {
             "minimum": 1,
             "maximum": _MAX_LIMIT,
             "default": 100,
+        },
+        "property_offset": {"type": "integer", "minimum": 0, "default": 0},
+        "property_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": _MAX_PROPERTY_PAGE,
+            "default": 64,
         },
     },
 }
@@ -545,6 +610,30 @@ def _number_or_none(value: Any) -> float | None:
     except Exception:
         return None
     return number if math.isfinite(number) else None
+
+
+def _global_geometry(obj: Any) -> tuple[list[float] | None, dict | None, str | None]:
+    """Document-space bounds and global placement row for one object.
+
+    Returns ``(bounds, globalPlacement, geometryUnavailable)``. Shapeless
+    objects report ``(None, None, None)`` — nothing is unavailable, there
+    is simply no geometry. A shape whose global transform cannot be
+    resolved reports nulls plus an explanatory ``geometryUnavailable``
+    message instead of silently publishing local coordinates.
+    """
+
+    from .geometry import placed_shape
+
+    if _shape(obj) is None:
+        return None, None, None
+    try:
+        global_shape = placed_shape(obj)
+    except Exception as exc:
+        message = getattr(exc, "message", None) or f"{type(exc).__name__}: {exc}"
+        return None, None, str(message)
+    return _bounds(global_shape), _placement_row_value(
+        getattr(global_shape, "Placement", None)
+    ), None
 
 
 # ---------------------------------------------------------------------------
@@ -968,9 +1057,8 @@ def _apply_prepared(obj: Any, prepared: list[tuple[str, str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _placement_row(obj: Any) -> dict | None:
+def _placement_row_value(placement: Any) -> dict | None:
     try:
-        placement = obj.Placement
         base = placement.Base
         rotation = placement.Rotation
         axis = rotation.Axis
@@ -990,6 +1078,14 @@ def _placement_row(obj: Any) -> dict | None:
     if _number_or_none(row["angle_deg"]) is None:
         return None
     return row
+
+
+def _placement_row(obj: Any) -> dict | None:
+    try:
+        placement = obj.Placement
+    except Exception:
+        return None
+    return _placement_row_value(placement)
 
 
 def _solid_count(shape: Any) -> int | None:
@@ -1070,7 +1166,7 @@ def _jsonify(value: Any) -> Any:
         return _unavailable(type(value).__name__)
     if isinstance(value, (list, tuple)):
         converted: list[Any] = []
-        for item in value:
+        for item in value[:_PROPERTY_LIST_LIMIT]:
             if isinstance(item, (bool, int, str)) and not isinstance(item, float):
                 converted.append(item)
             elif isinstance(item, float):
@@ -1092,28 +1188,162 @@ def _read_value(obj: Any, prop: str) -> Any:
     return _unavailable("no-such-property")
 
 
-def _row(obj: Any, detail: str, props: list[str]) -> dict:
+def _all_property_names(obj: Any) -> list[str]:
+    """Document property names plus ViewObject names, prefixed and sorted.
+
+    The complete name list drives unfiltered full-detail paging, so no
+    property is silently omitted.
+    """
+
+    doc_props = {
+        str(prop) for prop in (getattr(obj, "PropertiesList", ()) or ())
+    }
+    view = getattr(obj, "ViewObject", None)
+    view_props = {
+        "ViewObject." + str(prop)
+        for prop in (getattr(view, "PropertiesList", ()) or ())
+    } if view is not None else set()
+    return sorted(doc_props | view_props)
+
+
+def _property_metadata(holder: Any, prop: str) -> dict:
+    """Metadata for one property using direct native getters.
+
+    Failures yield null fields rather than false claims about mutability
+    or available choices.
+    """
+
+    property_type = None
+    type_getter = getattr(holder, "getTypeIdOfProperty", None)
+    if callable(type_getter):
+        try:
+            raw_type = type_getter(prop)
+        except Exception:
+            raw_type = None
+        if isinstance(raw_type, str) and raw_type:
+            property_type = raw_type
+    read_only = None
+    status_getter = getattr(holder, "getPropertyStatus", None)
+    if callable(status_getter):
+        try:
+            status = status_getter(prop)
+        except Exception:
+            status = None
+        if status is not None:
+            read_only = "ReadOnly" in list(status or ())
+    enums = _enumerations(holder, prop)
+    if enums is None:
+        enumeration, count, truncated = None, 0, False
+    else:
+        enumeration = enums[:_ENUMERATION_LIMIT]
+        count = len(enums)
+        truncated = count > _ENUMERATION_LIMIT
+    return {
+        "type": property_type,
+        "readOnly": read_only,
+        "enumeration": enumeration,
+        "enumerationCount": count,
+        "enumerationTruncated": truncated,
+    }
+
+
+def _resolve_property_holder(obj: Any, name: str) -> tuple[Any, str] | None:
+    """Where one page property lives, or None when it does not exist.
+
+    ``ViewObject.``-prefixed names resolve only against the ViewObject;
+    unprefixed names keep the document-first lookup with the ViewObject
+    as fallback.
+    """
+
+    if name.startswith("ViewObject."):
+        plain = name[len("ViewObject."):]
+        view = getattr(obj, "ViewObject", None)
+        if view is not None and _property_exists(view, plain):
+            return view, plain
+        return None
+    if _property_exists(obj, name):
+        return obj, name
+    view = getattr(obj, "ViewObject", None)
+    if view is not None and _property_exists(view, name):
+        return view, name
+    return None
+
+
+def _property_page(obj: Any, names: list[str]) -> tuple[dict, dict, list[str]]:
+    """Values, metadata and over-limit list names for one property page."""
+
+    properties: dict[str, Any] = {}
+    metadata: dict[str, Any] = {}
+    truncated: list[str] = []
+    for name in names:
+        resolved = _resolve_property_holder(obj, name)
+        if resolved is None:
+            properties[name] = _unavailable("no-such-property")
+            metadata[name] = None
+            continue
+        holder, plain = resolved
+        try:
+            raw = getattr(holder, plain, None)
+        except Exception:
+            raw = None
+        properties[name] = _jsonify(raw)
+        metadata[name] = _property_metadata(holder, plain)
+        if isinstance(raw, (list, tuple)) and len(raw) > _PROPERTY_LIST_LIMIT:
+            truncated.append(name)
+    return properties, metadata, truncated
+
+
+def _row(
+    obj: Any,
+    detail: str,
+    props: list[str],
+    *,
+    property_offset: int = 0,
+    property_limit: int = _MAX_PROPERTY_PAGE,
+) -> dict:
     shape = _shape(obj)
     properties: dict[str, Any] = {}
+    property_metadata: dict[str, Any] = {}
+    property_count = 0
+    next_property_offset: int | None = None
+    truncated: list[str] = []
+    global_bounds, global_placement, _geometry_unavailable = _global_geometry(obj)
     if detail == "full":
-        seen: list[str] = []
-        for prop in props:
-            if prop not in seen:
-                seen.append(prop)
-        properties = {prop: _read_value(obj, prop) for prop in seen}
-    return {
+        if props:
+            # A filter keeps its own order and de-duplication.
+            names = list(dict.fromkeys(str(prop) for prop in props))
+        else:
+            names = _all_property_names(obj)
+        property_count = len(names)
+        page = names[property_offset : property_offset + property_limit]
+        following = property_offset + property_limit
+        if following < property_count:
+            next_property_offset = following
+        properties, property_metadata, truncated = _property_page(obj, page)
+    row = {
         "name": str(getattr(obj, "Name", "")),
         "label": _label(obj),
         "typeId": str(getattr(obj, "TypeId", "")),
         "state": _states(obj),
+        # Local placement stays the editable property value; bounds and
+        # globalPlacement describe document space.
         "placement": _placement_row(obj),
-        "bounds": _bounds(shape),
+        "globalPlacement": global_placement,
+        "boundsCoordinateSystem": "document",
+        "bounds": global_bounds,
         "shape_valid": _shape_valid(shape),
         "solid_count": _solid_count(shape),
         "tip": _tip_name(obj),
         "links": _link_names(obj),
         "properties": properties,
+        "propertyMetadata": property_metadata,
+        "propertyCount": property_count,
+        "nextPropertyOffset": next_property_offset,
+        "truncatedProperties": truncated,
     }
+    if _geometry_unavailable is not None:
+        row["geometryUnavailable"] = _geometry_unavailable
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -1122,7 +1352,15 @@ def _row(obj: Any, detail: str, props: list[str]) -> dict:
 
 
 def _cursor_payload(
-    ctx: Any, doc: Any, detail: str, limit: int, props: list[str], last: str
+    ctx: Any,
+    doc: Any,
+    detail: str,
+    limit: int,
+    props: list[str],
+    last: str,
+    *,
+    property_offset: int = 0,
+    property_limit: int = _MAX_PROPERTY_PAGE,
 ) -> dict:
     return {
         "kind": "objects-page",
@@ -1131,6 +1369,8 @@ def _cursor_payload(
         "detail": detail,
         "limit": limit,
         "filter": sorted(str(prop) for prop in props),
+        "propertyOffset": property_offset,
+        "propertyLimit": property_limit,
         "last": last,
     }
 
@@ -1144,10 +1384,28 @@ def _stale_cursor() -> ToolError:
 
 
 def _make_cursor(
-    ctx: Any, doc: Any, detail: str, limit: int, props: list[str], last: str
+    ctx: Any,
+    doc: Any,
+    detail: str,
+    limit: int,
+    props: list[str],
+    last: str,
+    *,
+    property_offset: int = 0,
+    property_limit: int = _MAX_PROPERTY_PAGE,
 ) -> str:
     return ctx.signer.sign(
-        DOMAIN_CURSOR, _cursor_payload(ctx, doc, detail, limit, props, last)
+        DOMAIN_CURSOR,
+        _cursor_payload(
+            ctx,
+            doc,
+            detail,
+            limit,
+            props,
+            last,
+            property_offset=property_offset,
+            property_limit=property_limit,
+        ),
     )
 
 
@@ -1158,16 +1416,34 @@ def _open_cursor(
     detail: str,
     limit: int,
     props: list[str],
+    *,
+    property_offset: int = 0,
+    property_limit: int = _MAX_PROPERTY_PAGE,
 ) -> dict:
     payload = ctx.signer.verify(DOMAIN_CURSOR, cursor)
-    expected = _cursor_payload(ctx, doc, detail, limit, props, "")
+    expected = _cursor_payload(
+        ctx,
+        doc,
+        detail,
+        limit,
+        props,
+        "",
+        property_offset=property_offset,
+        property_limit=property_limit,
+    )
     if payload.get("kind") != "objects-page":
         raise _stale_cursor()
     if payload.get("identity") != expected["identity"]:
         raise _stale_cursor()
     if payload.get("generation") != expected["generation"]:
         raise _stale_cursor()
-    for key in ("detail", "limit", "filter"):
+    for key in (
+        "detail",
+        "limit",
+        "filter",
+        "propertyOffset",
+        "propertyLimit",
+    ):
         if payload.get(key) != expected[key]:
             raise _stale_cursor()
     last = payload.get("last")
@@ -1190,11 +1466,28 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
     limit = 100 if limit is None else int(limit)
     limit = max(1, min(_MAX_LIMIT, limit))
     props = [str(prop) for prop in (args.get("property_filter") or [])]
+    property_offset = args.get("property_offset")
+    property_offset = 0 if property_offset is None else int(property_offset)
+    property_offset = max(0, property_offset)
+    property_limit = args.get("property_limit")
+    property_limit = (
+        _MAX_PROPERTY_PAGE if property_limit is None else int(property_limit)
+    )
+    property_limit = max(1, min(_MAX_PROPERTY_PAGE, property_limit))
 
     start_after: str | None = None
     cursor = args.get("cursor")
     if cursor:
-        start_after = _open_cursor(ctx, doc, str(cursor), detail, limit, props)["last"]
+        start_after = _open_cursor(
+            ctx,
+            doc,
+            str(cursor),
+            detail,
+            limit,
+            props,
+            property_offset=property_offset,
+            property_limit=property_limit,
+        )["last"]
 
     objects = sorted(
         list(getattr(doc, "Objects", ()) or ()),
@@ -1206,11 +1499,27 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
             obj for obj in objects if str(getattr(obj, "Name", "")) > start_after
         ]
     page = objects[:limit]
-    rows = [_row(obj, detail, props) for obj in page]
+    rows = [
+        _row(
+            obj,
+            detail,
+            props,
+            property_offset=property_offset,
+            property_limit=property_limit,
+        )
+        for obj in page
+    ]
     next_cursor = None
     if len(objects) > len(page) and page:
         next_cursor = _make_cursor(
-            ctx, doc, detail, limit, props, str(getattr(page[-1], "Name", ""))
+            ctx,
+            doc,
+            detail,
+            limit,
+            props,
+            str(getattr(page[-1], "Name", "")),
+            property_offset=property_offset,
+            property_limit=property_limit,
         )
     return {
         "document": str(getattr(doc, "Name", "")),

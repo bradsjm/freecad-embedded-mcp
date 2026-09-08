@@ -217,6 +217,13 @@ def _install_tool_modules() -> None:
     _module("export", _OTHER_TOOLS["export"], _export_preflight)
     _module("view", _OTHER_TOOLS["view"], None)
     _module("fem", _OTHER_TOOLS["fem"], None)
+    sys.modules["mcp_server.tools.fem"].availability = lambda: {
+        "available": False,
+        "has_frd_to_vtk": False,
+        "vtk_support": False,
+        "calculix_binary": None,
+        "reason": "stub",
+    }
     _module("script", _OTHER_TOOLS["script"], None)
 
 
@@ -410,12 +417,10 @@ def test_discovery_is_gui_independent_and_complete():
         gui_dispatch.dispatch_to_gui = original
     result = response["result"]
     assert result["supportedVersions"] == ["2026-07-28"]
-    assert result["capabilities"] == {
-        "tools": {},
-        "resources": {"subscribe": True},
-        "extensions": {"io.modelcontextprotocol/tasks": {}},
-    }
-    assert "freecad" not in result["capabilities"]
+    # Default discover returns the latest successful immutable cache.
+    assert result["capabilities"] == {"freecad": {"version": [1, 1, 3]}}
+    assert result["supportedTypesDocument"] is None
+    assert result["refreshError"] is None
     assert "gui" not in result
     assert result["ttlMs"] == 3_600_000
     assert result["cacheScope"] == "public"
@@ -1628,11 +1633,15 @@ def test_bind_failure_unwinds_and_never_reports_running(lifecycle, monkeypatch):
     with pytest.raises(OSError):
         server_module.start_server()
     assert server_module.get_server() is None
-    assert server_module.server_status() == {"running": False, "state": "stopped"}
     assert FC_STATE["observers"] == []  # observer unwound, never registered
     assert gui_dispatch._waker is None  # waker disposed
     assert server_module.server_status()["running"] is False
 
+    status = server_module.server_status()
+    assert status["running"] is False
+    assert status["state"] == "stopped"
+    assert status["pendingOperations"] == 0
+    assert status["connection"] == {}
 
 def test_startup_captures_static_capabilities_and_registers_observer(lifecycle):
     status = server_module.start_server()
@@ -1799,3 +1808,90 @@ def test_canonical_path_and_fingerprint_helpers():
         server.canonical_path("/etc/passwd")
     assert exc.value.code == protocol.PATH_NOT_ALLOWED
     assert server.file_fingerprint("/tmp/fc-test/missing") is None
+
+
+# ---------------------------------------------------------------------------
+# Discover refresh (document-scoped capability snapshot).
+# ---------------------------------------------------------------------------
+
+
+class _TypesDoc:
+    """Read-only document double with a full supportedTypes list."""
+
+    def __init__(self, name: str, types: list[str]) -> None:
+        self.Name = name
+        self.Label = name
+        self._types = types
+
+    def supportedTypes(self) -> list[str]:
+        return list(self._types)
+
+
+def test_discover_refresh_rejects_document_without_refresh_flag():
+    server = make_server()
+    response = dispatch(server, "server/discover", {"document": "Doc"}, rpc_id=3)
+    result = response["result"]
+    # Validation errors for the method are complete tool-style errors.
+    assert result["isError"] is True
+    error = result["structuredContent"]["error"]
+    assert error["code"] == "VALIDATION_FAILED"
+    assert error["message"] == "document requires refresh=true"
+    assert error["details"] == {"document": "Doc"}
+
+
+def test_discover_refresh_requires_known_document():
+    server = make_server()
+    _reset_dispatcher_for_tests()
+    response = dispatch(
+        server, "server/discover", {"refresh": True, "document": "Missing"}
+    )
+    result = response["result"]
+    assert result["refreshError"]["code"] == "DOCUMENT_NOT_FOUND"
+    assert result["refreshError"]["message"] == "no such document: Missing"
+    # A failed refresh leaves the cache untouched.
+    assert result["capabilities"] == {}
+    assert result["supportedTypesDocument"] is None
+    assert "gui" in result
+
+
+def test_discover_refresh_publishes_full_sorted_types_and_scope():
+    server = make_server()
+    waker = _reset_dispatcher_for_tests()
+    types = [f"Test::Type{index:03d}" for index in range(70)]
+    types.append("App::Document")  # duplicate name in native order
+    FC_STATE["documents"] = {"Zed": FakeDoc("Zed"), "Alpha": _TypesDoc("Alpha", types)}
+    try:
+        response = dispatch(server, "server/discover", {"refresh": True})
+        assert wait_until(
+            lambda: server._static_capabilities is not None
+            and server._static_capabilities.get("supportedTypesDocument") == "Alpha"
+        )
+        waker.join()
+        result = response["result"] if isinstance(response, dict) else None
+    finally:
+        FC_STATE["documents"] = {}
+    # Re-read through the published cache (the dispatch thread published it).
+    snapshot = server._capability_snapshot()
+    assert snapshot["supportedTypesDocument"] == "Alpha"
+    supported = snapshot["supportedTypes"]
+    assert isinstance(supported, list)
+    assert len(supported) == len(set(types))  # de-duplicated, complete
+    assert supported == sorted(set(types))
+    assert "Test::Type069" in supported  # beyond the old 64-entry cut-off
+    assert snapshot["fem"]["readiness"]["available"] is False
+
+
+def test_discover_refresh_error_does_not_publish_late_results():
+    server = make_server()
+    waker = _reset_dispatcher_for_tests()
+    before = server._capability_snapshot()
+    FC_STATE["documents"] = {"Ghost": FakeDoc("Ghost")}
+    try:
+        response = dispatch(
+            server, "server/discover", {"refresh": True, "document": "Nope"}
+        )
+        result = response["result"]
+        assert result["refreshError"]["code"] == "DOCUMENT_NOT_FOUND"
+        assert server._capability_snapshot() == before
+    finally:
+        FC_STATE["documents"] = {}

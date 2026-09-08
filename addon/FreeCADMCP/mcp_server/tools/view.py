@@ -70,8 +70,10 @@ def resolve_capture_size(
 
     Both sizes omitted: current viewport, longest edge clamped to
     ``MAX_AUTO_EDGE``. One size omitted: the other side comes from the
-    current viewport unclamped. Explicit sizes are honoured as given; each
-    must be a positive integer no larger than ``MAX_EXPLICIT_EDGE``.
+    current viewport clamped to ``MAX_EXPLICIT_EDGE`` (minimum 1) — the
+    explicit side is never resized and no aspect ratio is inferred.
+    Explicit sizes are honoured as given; each must be a positive integer
+    no larger than ``MAX_EXPLICIT_EDGE``.
     """
 
     for name, value in (("width", width), ("height", height)):
@@ -88,8 +90,12 @@ def resolve_capture_size(
     view_width, view_height = _view_size(view)
     if width is None and height is None:
         return _scale_to_max_edge(view_width, view_height, MAX_AUTO_EDGE)
-    resolved_width = view_width if width is None else width
-    resolved_height = view_height if height is None else height
+    resolved_width = (
+        min(max(1, view_width), MAX_EXPLICIT_EDGE) if width is None else width
+    )
+    resolved_height = (
+        min(max(1, view_height), MAX_EXPLICIT_EDGE) if height is None else height
+    )
     return resolved_width, resolved_height
 
 

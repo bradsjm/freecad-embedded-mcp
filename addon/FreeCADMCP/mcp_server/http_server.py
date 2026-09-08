@@ -39,11 +39,13 @@ import re
 import socket
 import sys
 import threading
+import time
 import traceback
 import uuid
 from hashlib import sha256
 
 from .ip_parse import parse_allowed_networks
+from .legacy_protocol import has_modern_metadata
 from .protocol import ProtocolError, error_response, validate_request
 
 MCP_ENDPOINT = "/mcp"
@@ -64,6 +66,7 @@ _SINGLE_VALUE_HEADERS = frozenset(
         "content-type",
         "transfer-encoding",
         "mcp-protocol-version",
+        "mcp-session-id",
         "mcp-method",
         "mcp-name",
     }
@@ -285,6 +288,11 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
         self._serving = False
         self._stopped = False
         super().__init__((host, port), _McpRequestHandler)
+        # One legacy-era adapter per server, built on the same dispatch
+        # callback (imported locally to avoid an import cycle).
+        from .legacy_protocol import LegacyProtocol
+
+        self.legacy = LegacyProtocol(dispatch, clock=time.monotonic)
 
     def service_actions(self):
         """Called by ``serve_forever`` each poll; runs the hooked sweep."""
@@ -348,6 +356,11 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
             if self._stopped:
                 return
             self._stopped = True
+        # Wake legacy consent waits and refuse new legacy work BEFORE the
+        # transport drains, so producers enqueue their final results and
+        # the drain below still delivers them. Never waits for running
+        # GUI work.
+        self.legacy.shutdown()
         with self._streams_lock:
             streams = tuple(self._active_streams)
         for stream in streams:
@@ -401,18 +414,21 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                 except OSError:
                     pass
 
-    # -------------------------------------------------------------- plumbing
-
     def _send_json(self, status, payload, *, close=False, extra_headers=()):
-        body = (
-            b""
-            if payload is None
-            else json.dumps(payload, allow_nan=False).encode("utf-8")
-        )
+        if status in (204, 304):
+            # RFC 9110: these statuses carry neither body nor framing.
+            body = b""
+        else:
+            body = (
+                b""
+                if payload is None
+                else json.dumps(payload, allow_nan=False).encode("utf-8")
+            )
         self._response_started = True
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
+        if status not in (204, 304):
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
         for name, value in extra_headers:
             self.send_header(name, value)
         if close:
@@ -434,15 +450,16 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             error["data"] = exc.data
         self._send_json(status, error_response(error, request_id))
 
-    def _reject_unauthorized(self):
+    def _reject_unauthorized(self, *, close=False):
         self._send_json(
             401,
             {"error": "unauthorized"},
             extra_headers=(("WWW-Authenticate", 'Bearer realm="freecad-mcp"'),),
+            close=close,
         )
 
-    def _reject_forbidden(self, detail):
-        self._send_json(403, {"error": "forbidden", "detail": detail})
+    def _reject_forbidden(self, detail, *, close=False):
+        self._send_json(403, {"error": "forbidden", "detail": detail}, close=close)
 
     def _lowered_headers(self):
         return {name.lower(): value for name, value in self.headers.items()}
@@ -469,6 +486,29 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                 return self._send_rpc_error(
                     413, -32600, "Request body exceeds the allowed size.", close=True
                 )
+        else:
+            if self._content_length() not in (None, 0):
+                return self._send_rpc_error(
+                    400, -32600, "Unexpected request body.", close=True
+                )
+            length = 0
+
+        # Access gates run before any body byte is read: a rejected request
+        # must never wait on or drain untrusted body bytes. The response
+        # closes the connection so unread bytes cannot be parsed as the
+        # next request.
+        if not self.server.peer_allowed(self.client_address[0]):
+            return self._reject_forbidden("peer address is not allowed", close=True)
+        if not self.server.remote_enabled and not self._host_allowed():
+            return self._reject_forbidden(
+                "Host header is not the loopback endpoint", close=True
+            )
+        if not self.server.remote_enabled and not self._origin_allowed():
+            return self._reject_forbidden("Origin header is not allowed", close=True)
+        if not self._authorized():
+            return self._reject_unauthorized(close=True)
+
+        if self.command == "POST":
             try:
                 body = self.rfile.read(length) if length else b""
             except (OSError, TimeoutError):
@@ -477,22 +517,22 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             # The request thread now owns the connection for the whole exchange.
             self.connection.settimeout(None)
         else:
-            if self._content_length() not in (None, 0):
-                return self._send_rpc_error(
-                    400, -32600, "Unexpected request body.", close=True
-                )
             body = b""
 
-        if not self.server.peer_allowed(self.client_address[0]):
-            return self._reject_forbidden("peer address is not allowed")
-        if not self.server.remote_enabled and not self._host_allowed():
-            return self._reject_forbidden("Host header is not the loopback endpoint")
-        if not self.server.remote_enabled and not self._origin_allowed():
-            return self._reject_forbidden("Origin header is not allowed")
-        if not self._authorized():
-            return self._reject_unauthorized()
-        if self.command != "POST" or self.path.split("?", 1)[0] != MCP_ENDPOINT:
+        path = self.path.split("?", 1)[0]
+        if path != MCP_ENDPOINT:
             return self._send_rpc_error(404, -32601, "Method not found.")
+        if self.command == "GET":
+            # No standalone SSE stream is offered in either era; the 2025
+            # transports explicitly allow GET 405.
+            return self._send_json(
+                405, None, extra_headers=(("Allow", "POST, DELETE"),)
+            )
+        if self.command == "DELETE":
+            return self._handle_delete()
+        if self.command != "POST":
+            return self._send_rpc_error(404, -32601, "Method not found.")
+
         if not self._content_type_is_json():
             return self._send_json(415, {"error": "unsupported media type"})
         if not self._accept_isacceptable():
@@ -504,18 +544,60 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                 parse_constant=_reject_json_constant,
             )
         except (UnicodeDecodeError, ValueError):
+            # A body that cannot be parsed is legacy-facing when the client
+            # sent no modern routing header: JSON-RPC 2.0 wants an explicit
+            # null id there instead of an omitted member.
+            lowered = self._lowered_headers()
+            legacy_facing = (
+                lowered.get("mcp-protocol-version") is None
+                and lowered.get("mcp-session-id") is None
+            )
+            if legacy_facing:
+                return self._send_json(
+                    400,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {
+                            "code": -32700,
+                            "message": "Parse error: body is not valid JSON.",
+                        },
+                    },
+                )
             return self._send_rpc_error(
                 400, -32700, "Parse error: body is not valid JSON."
             )
-        if not isinstance(message, dict):
-            return self._send_rpc_error(
-                400, -32600, "Malformed envelope: expected a single JSON object."
-            )
 
-        request_id = self._extract_request_id(message)
-        is_notification = "id" not in message
+        # Era selection happens after authentication and JSON parsing.
+        # Modern metadata keeps its strict validation; anything else is
+        # routed through the legacy adapter (initialize, session lookup or
+        # an actionable initialize-first error).
+        lowered = self._lowered_headers()
+        session_id = lowered.get("mcp-session-id")
+        if isinstance(message, dict) and has_modern_metadata(message):
+            if session_id is not None:
+                return self._send_rpc_error(
+                    400,
+                    -32600,
+                    "MCP-Session-Id is not accepted together with modern "
+                    "protocol metadata.",
+                )
+            return self._run_modern(message, lowered)
+        if isinstance(message, list) and session_id is None:
+            # JSON arrays are only valid as legacy 2025-03-26 batches;
+            # modern validation supplies the envelope error.
+            return self._run_modern(message, lowered)
+        return self._emit_legacy_reply(
+            self.server.legacy.handle(message, lowered, self.server.principal)
+        )
+
+    def _run_modern(self, message, lowered):
+        request_id = (
+            self._extract_request_id(message) if isinstance(message, dict) else None
+        )
+        is_notification = isinstance(message, dict) and "id" not in message
         try:
-            validated = validate_request(message, self._lowered_headers())
+            validated = validate_request(message, lowered)
         except ProtocolError as exc:
             return self._send_protocol_error(exc, request_id)
 
@@ -539,6 +621,27 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             return self._send_rpc_error(500, -32603, "Unexpected server error.")
         self._send_json(200, outcome)
 
+    def _handle_delete(self):
+        """Explicit legacy session termination (204/404/400)."""
+
+        session_id = self._lowered_headers().get("mcp-session-id")
+        if session_id is None:
+            return self._send_rpc_error(
+                400, -32600, "An MCP-Session-Id header is required."
+            )
+        if self.server.legacy.delete_session(session_id, self.server.principal):
+            return self._send_json(204, None)
+        return self._send_rpc_error(
+            404, -32600, "unknown or expired MCP session"
+        )
+
+    def _emit_legacy_reply(self, reply):
+        if reply.stream is not None:
+            return self._send_stream(reply.stream)
+        return self._send_json(
+            reply.status, reply.payload, extra_headers=reply.headers
+        )
+
     # ---------------------------------------------------------------- checks
 
     def _header_structure_error(self):
@@ -547,9 +650,10 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             values = self.headers.get_all(name)
             if values is not None and len(values) > 1:
                 return -32600, f"Duplicate {name} header."
-        if self.command == "POST" and self.headers.get("Transfer-Encoding") is not None:
-            # A TE-framed body would disagree with Content-Length framing;
-            # reject before any body byte is read (PLAN section 3).
+        if self.headers.get("Transfer-Encoding") is not None:
+            # Transfer-Encoding framing disagrees with Content-Length framing
+            # and smuggles bodies on every method; reject before any body
+            # byte is read and without dispatching trailing bytes.
             return -32600, "Transfer-Encoding request bodies are not accepted."
         seen_params = {}
         for raw_name, value in self.headers.items():

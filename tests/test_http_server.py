@@ -598,6 +598,95 @@ def test_transfer_encoding_request_body_is_rejected():
         assert server.dispatch_calls() == []
 
 
+def test_transfer_encoding_is_rejected_for_get_and_delete():
+    with running_server(echo_dispatch) as server:
+        for method in ("GET", "DELETE"):
+            status, headers, _ = raw_post(
+                server,
+                method=method,
+                extra_headers=["Transfer-Encoding: chunked"],
+                body=b"0\r\n\r\ntrailing-bytes",
+            )
+            assert status == 400
+            assert headers.get("connection") == "close"
+        assert server.dispatch_calls() == []
+
+
+def test_unauthorized_post_rejects_without_waiting_for_body_bytes():
+    lines = [
+        "POST /mcp HTTP/1.1",
+        f"Host: 127.0.0.1:{{port}}",
+        "Authorization: Bearer wrong-token",
+        "Content-Type: application/json",
+        "Accept: application/json, text/event-stream",
+        "Content-Length: 50",
+    ]
+
+    def exchange(server):
+        payload = (
+            "\r\n".join(line.replace("{port}", str(server.port)) for line in lines)
+            + "\r\n\r\n"
+        ).encode("latin-1")
+        return raw_exchange(server.port, payload, timeout=5.0)
+
+    with running_server(echo_dispatch) as server:
+        status, headers, _ = exchange(server)
+        assert status == 401
+        assert headers.get("connection") == "close"
+        assert server.dispatch_calls() == []
+
+
+def test_forbidden_post_rejects_without_waiting_for_body_bytes():
+    lines = [
+        "POST /mcp HTTP/1.1",
+        "Host: evil.example.com:1",
+        f"Authorization: Bearer {TOKEN}",
+        "Content-Type: application/json",
+        "Accept: application/json, text/event-stream",
+        "Content-Length: 50",
+    ]
+
+    def exchange(server):
+        payload = (
+            "\r\n".join(line.replace("{port}", str(server.port)) for line in lines)
+            + "\r\n\r\n"
+        ).encode("latin-1")
+        return raw_exchange(server.port, payload, timeout=5.0)
+
+    with running_server(echo_dispatch) as server:
+        status, headers, _ = exchange(server)
+        assert status == 403
+        assert headers.get("connection") == "close"
+        assert server.dispatch_calls() == []
+
+
+def test_malformed_framing_precedes_authentication():
+    lines = [
+        "POST /mcp HTTP/1.1",
+        "Host: 127.0.0.1:{port}",
+        "Authorization: Bearer wrong-token",
+        "Content-Type: application/json",
+        "Accept: application/json, text/event-stream",
+        "Content-Length: 2",
+        "Content-Length: 3",
+    ]
+
+    def exchange(server):
+        payload = (
+            "\r\n".join(line.replace("{port}", str(server.port)) for line in lines)
+            + "\r\n\r\n"
+        ).encode("latin-1")
+        return raw_exchange(server.port, payload, timeout=5.0)
+
+    with running_server(echo_dispatch) as server:
+        status, _, body = exchange(server)
+        assert status == 400
+        parsed = json.loads(body)
+        assert parsed["error"]["code"] == -32600
+        assert "Duplicate content-length header." in parsed["error"]["message"]
+        assert server.dispatch_calls() == []
+
+
 def test_malformed_content_length_is_rejected():
     with running_server(echo_dispatch) as server:
         status, _, body = raw_post(
@@ -641,11 +730,11 @@ def test_unknown_path_returns_404_method_not_found():
         assert server.dispatch_calls() == []
 
 
-def test_get_mcp_returns_404_method_not_found():
+def test_get_mcp_returns_405_with_allow_header():
     with running_server(echo_dispatch) as server:
-        status, _, body = server.post(None, routing_headers(), http_method="GET")
-        assert status == 404
-        assert json.loads(body)["error"]["code"] == -32601
+        status, headers, body = server.post(None, routing_headers(), http_method="GET")
+        assert status == 405
+        assert headers.get("allow") == "POST, DELETE"
         assert server.dispatch_calls() == []
 
 
@@ -667,13 +756,38 @@ def test_non_object_body_returns_400():
         assert server.dispatch_calls() == []
 
 
-def test_missing_metadata_returns_400_invalid_params():
+def test_missing_metadata_without_session_routes_to_legacy_era():
+    # A message with NO modern metadata is era-ambiguous: the era rule
+    # routes it to the legacy adapter, which answers with the
+    # initialize-first guidance (HTTP 400 INVALID_REQUEST).
     with running_server(echo_dispatch) as server:
         message = {
             "jsonrpc": "2.0",
             "id": 5,
             "method": "test/echo",
             "params": {"echo": "hi"},
+        }
+        status, _, body = server.post(message, routing_headers())
+        assert status == 400
+        assert json.loads(body)["error"]["code"] == -32600
+        assert "Initialize a session first." in json.loads(body)["error"]["message"]
+        assert server.dispatch_calls() == []
+
+
+def test_incomplete_modern_metadata_still_returns_invalid_params():
+    # Modern metadata present but incomplete keeps strict modern
+    # validation (unchanged -32602 contract).
+    with running_server(echo_dispatch) as server:
+        message = {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "test/echo",
+            "params": {
+                "echo": "hi",
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+                },
+            },
         }
         status, _, body = server.post(message, routing_headers())
         assert status == 400

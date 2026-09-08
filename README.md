@@ -59,7 +59,7 @@ mkdir -p ~/Library/Application\ Support/FreeCAD/v1-1/Mod/
 ln -s "$(pwd)/addon/FreeCADMCP" ~/Library/Application\ Support/FreeCAD/v1-1/Mod/FreeCADMCP
 ```
 
-Restart FreeCAD after installing. The server requires FreeCAD 1.1.3 or later.
+Restart FreeCAD after installing. The server supports FreeCAD 1.1.3 <= version < 1.2; bundled Python 3.11 or newer.
 
 Select "MCP Addon" from the workbench list to see the add-on UI.
 
@@ -103,8 +103,9 @@ forward, proxy, or tunnel the endpoint to untrusted networks.
 
 Settings live in `freecad_mcp_settings.json` inside FreeCAD's user
 application data directory (`port`, `token`, `auto_start`, `remote_enabled`,
-`allowed_ips`, `allowed_roots`). The **Show Auth Token** dialog displays the
-endpoint and, in remote mode, the token with a copy button.
+`allowed_ips`, `allowed_roots`). The **Connection Details** dialog displays the
+active state, endpoint, bind address, allowed IPs and, in remote mode, the
+masked token with copy buttons.
 
 **The bearer token is full local code-execution authority.** The
 `run_script` tool executes arbitrary Python with the FreeCAD user's
@@ -134,6 +135,24 @@ must:
 3. Declare the `elicitation.form` capability to support consent prompts, and
    the `io.modelcontextprotocol/tasks` extension to receive long-running
    operations as tasks.
+
+Clients that speak the 2025 Streamable HTTP revisions connect without any
+client-side changes: `initialize` with `protocolVersion` `2025-03-26`,
+`2025-06-18`, or `2025-11-25` (an unsupported offered version negotiates
+`2025-11-25`), then address the session with the returned
+`MCP-Session-Id` header. No modern request-metadata headers are required
+on legacy messages. Legacy sessions degrade deliberately:
+
+* Tools always return final results; tasks are never offered, so
+  long-running operations simply block until they finish.
+* Consent prompts travel as native `elicitation/create` requests on the
+  request-scoped SSE stream when the client declares form support. A
+  `2025-03-26` client (or any client without form support) receives an
+  explicit `CONSENT_DENIED` tool error for consent-required operations;
+  every other tool works normally.
+* Resource subscriptions and task methods are not advertised and return
+  "unknown method" errors.
+* JSON-RPC batches are accepted only for the `2025-03-26` revision.
 
 [`examples/cantilever_fem.py`](examples/cantilever_fem.py) is a complete,
 dependency-free client example that shows this handshake and a full FEM run.
