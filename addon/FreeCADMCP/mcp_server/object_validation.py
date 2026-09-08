@@ -288,6 +288,35 @@ def _rollback_failure_details(stage: str, exc: BaseException) -> dict:
     return details
 
 
+def _force_close_surviving_transaction(ctx: Any, doc: Any, label: str) -> None:
+    """Close a just-committed transaction FreeCAD kept on the stack.
+
+    FreeCAD 1.1 can leave an EMPTY transaction (no recorded changes,
+    UndoMode enabled moments earlier) alive through its own
+    ``commitTransaction``; every later mutation would then be refused with
+    "user transaction already active". Only a transaction still carrying
+    this operation's own label is closed, and only through the abort-free
+    commit path — there are no recorded changes to lose.
+    """
+
+    app = getattr(ctx, "App", None)
+    if app is None:
+        return
+    getter = getattr(app, "getActiveTransaction", None)
+    closer = getattr(app, "closeActiveTransaction", None)
+    if not callable(getter) or not callable(closer):
+        return
+    try:
+        active = getter()
+    except Exception:
+        return
+    if isinstance(active, (tuple, list)) and active and str(active[0]) == label:
+        try:
+            closer(True)
+        except Exception:
+            pass  # a wedged cleanup must never mask the committed mutation
+
+
 def _reject_user_transaction(ctx: Any, doc: Any) -> None:
     """Refuse to nest MCP mutations inside a user transaction."""
 
@@ -441,8 +470,12 @@ def mutation(
     # roll back explicitly instead of skipping dependents.
     pre_targets: list[Any] | None = None
     baseline: dict[str, int] = {}
+    pre_target_names: set[str] = set()
     if not callable(objects):
         pre_targets = list(objects)
+        pre_target_names = {
+            str(getattr(obj, "Name", "")) for obj in pre_targets
+        }
         pre_dependents, exceeded = _dependents_of(pre_targets)
         if exceeded:
             raise ToolError(
@@ -493,10 +526,47 @@ def mutation(
                     f"{_MAX_DEPENDENTS} dependent objects; rolled back",
                     {"reason": "too_many_dependents"},
                 )
+            target_names = {
+                str(getattr(obj, "Name", "")) for obj in targets
+            }
+
+            # A removal inside the body kills its wrapper's Name, so the
+            # reported names were captured at entry for pre-known targets.
+            target_names = pre_target_names or {
+                str(getattr(obj, "Name", "")) for obj in targets
+            }
 
             doc.recompute()
+            # A removed object's Python wrapper can survive the removal with
+            # a dead Name; it is no longer document content and must not be
+            # validated (its Touched state would roll every deletion back).
+            live_names: set[str] = set()
+            for entry in getattr(doc, "Objects", None) or ():
+                try:
+                    name = entry.Name
+                except Exception:
+                    continue
+                if name:
+                    live_names.add(str(name))
+            if not live_names:
+                # A document double without an Objects list cannot report
+                # liveness; keep every target under validation.
+                live_names = {
+                    str(getattr(obj, "Name", "")) for obj in targets
+                } | {
+                    str(getattr(dep, "Name", "")) for dep in dependents
+                }
+            targets = [
+                obj
+                for obj in targets
+                if str(getattr(obj, "Name", "") or "") in live_names
+            ]
+            dependents = [
+                dep
+                for dep in dependents
+                if str(getattr(dep, "Name", "") or "") in live_names
+            ]
             errors: list[str] = []
-            target_names = {str(getattr(obj, "Name", "")) for obj in targets}
             for obj in targets:
                 problem = object_validity_error(obj)
                 if problem is not None:
@@ -527,6 +597,7 @@ def mutation(
                     {"errors": errors[:_MAX_DIAGNOSTICS]},
                 )
             doc.commitTransaction()
+            _force_close_surviving_transaction(ctx, doc, label)
         except BaseException as exc:
             applied.clear()
             try:
@@ -562,4 +633,4 @@ def mutation(
     finally:
         doc.UndoMode = undo_mode
 
-    applied.extend(sorted({str(getattr(obj, "Name", "")) for obj in targets}))
+    applied.extend(sorted(target_names - {""}))

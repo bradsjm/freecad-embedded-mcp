@@ -156,6 +156,7 @@ def _uninstall_stubs() -> None:
 _install_stubs()
 try:
     from mcp_server.tools import objects as objects_mod  # noqa: E402
+    from mcp_server.tools import parameters as parameters_mod  # noqa: E402
     from mcp_server import object_validation as ov  # noqa: E402
 finally:
     _uninstall_stubs()
@@ -1511,3 +1512,73 @@ def test_missing_filtered_property_keeps_null_metadata() -> None:
     assert row["propertyMetadata"]["Length"]["type"] == "App::PropertyLength"
     assert row["propertyCount"] == 2
     assert row["nextPropertyOffset"] is None
+
+
+class _ExprBox(FakeObj):
+    def setExpression(self, prop: str, expression: str) -> None:
+        self.history.append(("setExpression", prop, expression))
+
+
+def test_mutation_force_closes_surviving_empty_transaction() -> None:
+    """FreeCAD 1.1 leaves an EMPTY transaction alive through its commit.
+
+    The gate must force-close its own surviving label, or every later
+    mutation wedges behind "user transaction already active".
+    """
+
+    doc = FakeDoc(
+        objects=[_ExprBox("Box", properties=("Length",), prop_types={"Length": "App::PropertyLength"})]
+    )
+    ctx = FakeCtx(doc)
+    closed: list[bool] = []
+    calls = {"n": 0}
+
+    def _active():
+        # Entry check sees a clean stack; after the commit our own label
+        # survived FreeCAD's commit (the observed 1.1.3 quirk).
+        calls["n"] += 1
+        return None if calls["n"] == 1 else ("edit_parameters", 5)
+
+    def _close(commit: bool) -> None:
+        closed.append(bool(commit))
+
+    ctx.App = types.SimpleNamespace(
+        getActiveTransaction=_active, closeActiveTransaction=_close
+    )
+
+    result = parameters_mod.HANDLERS["edit_parameters"](
+        ctx,
+        {"document": doc.Name, "object": "Box", "expressions": {"Length": "1"}},
+    )
+
+    assert result["expressions"] == ["Length"]
+    assert closed == [True]  # the surviving label was force-closed
+
+
+def test_mutation_never_closes_a_foreign_surviving_transaction() -> None:
+    doc = FakeDoc(
+        objects=[_ExprBox("Box", properties=("Length",), prop_types={"Length": "App::PropertyLength"})]
+    )
+    ctx = FakeCtx(doc)
+    closed: list[bool] = []
+    calls = {"n": 0}
+
+    def _active():
+        # Entry check sees a clean stack; after the commit a transaction
+        # from somewhere else is on top. It must never be touched.
+        calls["n"] += 1
+        return None if calls["n"] == 1 else ("someone else's transaction", 9)
+
+    def _close(commit: bool) -> None:
+        closed.append(bool(commit))
+
+    ctx.App = types.SimpleNamespace(
+        getActiveTransaction=_active, closeActiveTransaction=_close
+    )
+
+    parameters_mod.HANDLERS["edit_parameters"](
+        ctx,
+        {"document": doc.Name, "object": "Box", "expressions": {"Length": "1"}},
+    )
+
+    assert closed == []  # only our own surviving label is ever closed

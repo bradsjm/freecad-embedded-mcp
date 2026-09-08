@@ -256,10 +256,32 @@ _PLACEMENT_ROW = {
     },
 }
 
+_PLACEMENT_VALUE = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["position", "axis", "angle_deg"],
+    "properties": {
+        "position": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 3,
+            "maxItems": 3,
+        },
+        "axis": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 3,
+            "maxItems": 3,
+        },
+        "angle_deg": {"type": "number"},
+    },
+}
+
 _PROPERTY_VALUE = {
     "anyOf": _json_scalars()
     + [
         _XYZ,
+        _PLACEMENT_VALUE,
         {
             "type": "array",
             "items": {"anyOf": [{"type": "string"}, {"type": "number"}]},
