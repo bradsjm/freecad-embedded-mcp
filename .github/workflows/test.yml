@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -19,21 +19,49 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - run: uv lock --check
-      - run: uv run python -m compileall src addon
+      - run: uv run python -m compileall addon
       - run: uv run pytest -q
 
-  mcp-sdk-compatibility:
+  addon-wheel-content:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        mcp-requirement:
-          - "mcp[cli]>=1.12.2,<2"
-          - "mcp[cli]>=2,<3"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.12"
+          python-version: "3.11"
           enable-cache: true
-      - run: uv run --with '${{ matrix.mcp-requirement }}' freecad-mcp --help
+      - run: uv build --wheel
+      - name: Assert wheel contains the FreeCAD add-on and nothing else
+        run: |
+          uv run python - <<'PY'
+          import glob
+          import zipfile
+
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, f"expected exactly one wheel, found: {wheels}"
+          names = set(zipfile.ZipFile(wheels[0]).namelist())
+
+          required = {
+              "FreeCADMCP/Init.py",
+              "FreeCADMCP/InitGui.py",
+              "FreeCADMCP/mcp_server/__init__.py",
+              "FreeCADMCP/mcp_server/server.py",
+              "FreeCADMCP/mcp_server/http_server.py",
+              "FreeCADMCP/mcp_server/protocol.py",
+              "FreeCADMCP/mcp_server/settings.py",
+              "FreeCADMCP/mcp_server/tasks.py",
+          }
+          missing = required - names
+          assert not missing, f"missing add-on modules in wheel: {sorted(missing)}"
+
+          leaked = [n for n in names if n.startswith("freecad_mcp/")]
+          assert not leaked, f"deleted client package present in wheel: {leaked}"
+
+          dist_info = [n for n in names if n.endswith(".dist-info/")]
+          assert dist_info, names
+          entry_points = [n for n in names if n.endswith("entry_points.txt")]
+          assert not entry_points, f"console script metadata present in wheel: {entry_points}"
+          scripts = [n for n in names if "/.data/scripts/" in n or n.startswith("scripts/")]
+          assert not scripts, f"installed scripts present in wheel: {scripts}"
+          print(f"wheel contents OK: {len(names)} entries")
+          PY

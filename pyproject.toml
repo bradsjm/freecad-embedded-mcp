@@ -1,20 +1,14 @@
 [project]
-name = "freecad-mcp"
-version = "0.1.22"
-description = "Add your description here"
+name = "freecad-mcp-addon"
+version = "2.0.0"
+description = "FreeCAD add-on embedding a loopback Model Context Protocol server"
 readme = "README.md"
 authors = [
     { name = "neka-nat", email = "nekanat.stock@gmail.com" }
 ]
 license = { text = "MIT" }
-requires-python = ">=3.12"
-dependencies = [
-    "mcp[cli]>=1.12.2,<3",
-    "validators>=0.34.0",
-]
-
-[project.scripts]
-freecad-mcp = "freecad_mcp.server:main"
+requires-python = ">=3.11"
+dependencies = []
 
 [dependency-groups]
 dev = [
@@ -24,8 +18,11 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.hatch.build.targets.wheel]
+packages = ["addon/FreeCADMCP"]
+
 [tool.hatch.build.targets.sdist]
-exclude = ["assets", "results"]
+only-include = ["addon", "tests"]
 
 [build-system]
 requires = ["hatchling"]

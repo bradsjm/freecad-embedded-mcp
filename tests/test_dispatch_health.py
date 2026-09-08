@@ -6,7 +6,7 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from rpc_server.dispatch_health import DispatchHealth, stuck_failure
+from mcp_server.dispatch_health import DispatchHealth, stuck_failure
 
 
 class FakeClock:

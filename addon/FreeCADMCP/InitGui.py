@@ -1,10 +1,14 @@
 import sys as _sys
 import os as _os
+
 try:
     _addon_dir = _os.path.dirname(_os.path.abspath(__file__))
 except NameError:
     import inspect as _inspect
-    _addon_dir = _os.path.dirname(_os.path.abspath(_inspect.getfile(_inspect.currentframe())))
+
+    _addon_dir = _os.path.dirname(
+        _os.path.abspath(_inspect.getfile(_inspect.currentframe()))
+    )
 if _addon_dir not in _sys.path:
     _sys.path.insert(0, _addon_dir)
 
@@ -14,17 +18,16 @@ class FreeCADMCPAddonWorkbench(Workbench):
     ToolTip = "Addon for MCP Communication"
 
     def Initialize(self):
-        from rpc_server import rpc_server
+        from mcp_server import commands
 
-        commands = [
-            "Start_RPC_Server",
-            "Stop_RPC_Server",
+        command_list = [
+            "Start_MCP_Server",
+            "Stop_MCP_Server",
             "Toggle_Auto_Start",
-            "Toggle_Remote_Connections",
-            "Configure_Allowed_IPs",
+            "Show_Auth_Token",
         ]
-        self.appendToolbar("FreeCAD MCP", commands)
-        self.appendMenu("FreeCAD MCP", commands)
+        self.appendToolbar("FreeCAD MCP", command_list)
+        self.appendMenu("FreeCAD MCP", command_list)
 
     def Activated(self):
         pass
@@ -44,14 +47,16 @@ Gui.addWorkbench(FreeCADMCPAddonWorkbench())
 
 def _auto_start_mcp():
     try:
-        from rpc_server import rpc_server
+        from mcp_server import server as mcp_server_module
+        from mcp_server.settings import load_settings
 
-        settings = rpc_server.load_settings()
-        if not settings.get("auto_start_rpc", False):
+        if not load_settings().get("auto_start", False):
             return
 
-        msg = rpc_server.start_rpc_server()
-        FreeCAD.Console.PrintMessage(f"[MCP] Auto-start: {msg}\n")
+        status = mcp_server_module.start_server()
+        FreeCAD.Console.PrintMessage(
+            f"[MCP] Auto-start: {status.get('state')} at {status.get('endpoint')}\n"
+        )
     except Exception as e:
         FreeCAD.Console.PrintWarning(f"[MCP] Auto-start failed: {e}\n")
 
