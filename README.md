@@ -1,7 +1,8 @@
-# FreeCAD MCP
+# FreeCAD Embedded MCP
 
 FreeCAD add-on that embeds a Model Context Protocol server inside FreeCAD,
-letting MCP clients drive FreeCAD directly over a local HTTP connection.
+letting MCP clients drive FreeCAD directly over a local or remote HTTP connection 
+(remote connections are optional and require a token).
 
 This version is a full rewrite of the original freecad-mcp as an embedded
 MCP server, built on the great work in the original project.
@@ -11,7 +12,7 @@ MCP server, built on the great work in the original project.
 The original [freecad-mcp](https://github.com/neka-nat/freecad-mcp) ran as
 two processes: an MCP proxy installed from PyPI (`uvx freecad-mcp`) that an
 MCP client such as Claude Desktop launched over stdio, and an XML-RPC
-server inside FreeCAD on port `9875` that the proxy relayed tool calls to.
+server inside FreeCAD that the proxy relayed tool calls to.
 This rewrite embeds the MCP server in FreeCAD's own process, so clients
 connect to FreeCAD directly. The GUI-thread architecture and the workflow
 concepts listed below carry over from the original.
