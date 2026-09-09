@@ -100,10 +100,24 @@ concepts listed below carry over from the original.
 
 ## Install the add-on
 
-The add-on is installed into FreeCAD's `Mod` directory — either by copying
-`addon/FreeCADMCP` there or by creating a symlink to it. It is not installed
-with pip and does not run in a separate Python environment; the server executes
-inside FreeCAD's own bundled Python (3.11 or newer).
+Install through FreeCAD's Add-on Manager (recommended) or by copying the
+add-on folder into FreeCAD's `Mod` directory. The add-on does not run in a
+separate Python environment; the server executes inside FreeCAD's own
+bundled Python (3.11 or newer).
+
+### Install with the Add-on Manager
+
+1. Open **Edit → Preferences → Addon Manager** and find **Custom
+   repositories**.
+2. Click **Add** and fill in the **Custom Repository** dialog:
+   * Repository URL: `https://github.com/bradsjm/freecad-embedded-mcp`
+   * Branch: `v2.0-embedded-mcp`
+3. Confirm with **OK** and close the preferences.
+4. Open **Tools → Addon Manager**, search for `FreeCAD MCP`, and click
+   **Install**. If it does not appear in the list, select your custom
+   repository in the source filter.
+
+### Install manually (clone, copy, or symlink)
 
 FreeCAD user addon directories:
 
