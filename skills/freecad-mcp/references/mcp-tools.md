@@ -100,7 +100,7 @@ Application failures are complete tool results with `isError: true` and a struct
 
 ## Security and network boundary
 
-There are exactly two modes. Local (default): the server binds `127.0.0.1`, accepts only loopback peers, checks Host/Origin, and needs no token. Remote (opt-in via the Remote Connections toggle): the server binds `0.0.0.0`, the bearer token becomes mandatory on every request, and `allowed_ips` (empty means any host) restricts peers further. There is no TLS in either mode; never forward or tunnel the endpoint to an untrusted network.
+There are exactly two modes. Local (default): the server binds `127.0.0.1`, accepts only loopback peers, checks Host/Origin, and needs no token. Network access (opt-in in MCP Settings): the server binds `0.0.0.0`, the bearer token becomes mandatory on every request, and `allowed_ips` (empty means any host) restricts peers further. There is no TLS in either mode; never forward or tunnel the endpoint to an untrusted network.
 
 The bearer token is full local code-execution authority: `run_script` is not restricted by `allowed_roots`. Treat the token like a shell on this machine; never log or print it. `allowed_roots` (default: the user's home directory) contains the file-touching tools only — document open/save paths, export destinations, and FEM working directories. It is path containment inside this server, not a sandbox.
 

@@ -16,14 +16,11 @@ _ICON = str(
     / "mcp-workbench.svg"
 )
 
-_COMMANDS = [
-    "Start_MCP_Server",
-    "Stop_MCP_Server",
-    "Toggle_Auto_Start",
-    "Toggle_Remote_Connections",
-    "Configure_Allowed_IPs",
-    "Show_Auth_Token",
-]
+_TOOLBAR_COMMANDS = ["Toggle_MCP_Server"]
+
+# FreeCAD's appendMenu treats a literal "Separator" item as a separator:
+# the lifecycle action is grouped apart from the two dialogs.
+_MENU_COMMANDS = ["Toggle_MCP_Server", "Separator", "Connection_Details", "MCP_Settings"]
 
 
 class FreeCADMCPAddonWorkbench(Workbench):
@@ -33,8 +30,8 @@ class FreeCADMCPAddonWorkbench(Workbench):
 
     def Initialize(self):
         commands.register_commands()
-        self.appendToolbar("FreeCAD MCP", _COMMANDS)
-        self.appendMenu("FreeCAD MCP", _COMMANDS)
+        self.appendToolbar("FreeCAD MCP", _TOOLBAR_COMMANDS)
+        self.appendMenu("FreeCAD MCP", _MENU_COMMANDS)
         commands.initialize_ui()
 
     def Activated(self):

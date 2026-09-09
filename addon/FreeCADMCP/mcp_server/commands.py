@@ -1,12 +1,15 @@
 """Native workbench commands for the embedded MCP v2 add-on.
 
-Six commands with native icons, one GUI-thread :class:`McpUiController`
-that owns the permanent status indicator and refreshes the six actions,
-and a Connection Details dialog. Command state derives from ONE pure
-mapping (:func:`_indicator_state`) shared with the controller, Start and
-Stop show transient status-bar messages plus detailed Report-view output,
-and failures surface through native warning dialogs for user-triggered
-actions. Tokens never appear in status snapshots, tooltips or logs.
+Three commands with native icons: one lifecycle toggle
+(:class:`ToggleMCPServerCommand`) whose text, icon and availability change
+with the confirmed server state, the :class:`ConnectionDetailsCommand`
+dialog, and the :class:`MCPSettingsCommand` dialog. One GUI-thread
+:class:`McpUiController` owns the permanent status indicator, refreshes the
+toggle action from the shared pure mapping, and its button opens only
+Connection Details. Start and stop show transient status-bar messages plus
+detailed Report-view output, and failures surface through native warning
+dialogs for user-triggered actions. Tokens never appear in status
+snapshots, the settings dialog, tooltips or logs.
 """
 
 import os
@@ -20,21 +23,9 @@ from mcp_server import server as mcp_server_module
 from mcp_server.settings import SettingsError, load_settings, save_settings
 from mcp_server.ip_parse import validate_allowed_ips
 
-_COMMAND_NAMES = (
-    "Start_MCP_Server",
-    "Stop_MCP_Server",
-    "Toggle_Auto_Start",
-    "Toggle_Remote_Connections",
-    "Configure_Allowed_IPs",
-    "Show_Auth_Token",
-)
-
-_TOGGLE_ACTIONS = (
-    ("Toggle_Auto_Start", "auto_start"),
-    ("Toggle_Remote_Connections", "remote_enabled"),
-)
-
-_TOGGLE_KEYS = {"Toggle_Auto_Start": "auto_start", "Toggle_Remote_Connections": "remote_enabled"}
+_TOGGLE_COMMAND = "Toggle_MCP_Server"
+_DETAILS_COMMAND = "Connection_Details"
+_SETTINGS_COMMAND = "MCP_Settings"
 
 _STATUSBAR_MESSAGE_MS = 5000
 
@@ -88,10 +79,11 @@ def _warn(message: str) -> None:
 def _indicator_state(status: dict) -> dict:
     """Pure mapping from one server status to indicator and action state.
 
-    Shared by the controller and the command ``IsActive`` implementations
-    so both can never disagree. Start is available only for a fully
-    stopped server with zero retained operations; Stop only while
-    running; both are unavailable during starting and draining.
+    Shared by the controller and the toggle command so both can never
+    disagree. Start is available only for a fully stopped server with
+    zero retained operations; Stop only while running; both are
+    unavailable during starting and draining, and the action copy always
+    matches the confirmed server state.
     """
 
     state = status.get("state")
@@ -103,19 +95,49 @@ def _indicator_state(status: dict) -> dict:
         if gui.get("state") == "stuck":
             text = "MCP: Running — GUI blocked"
         elif remote:
-            text = "MCP: Running (Remote)"
+            text = "MCP: Running (Network enabled)"
         else:
-            text = "MCP: Running (Local)"
+            text = "MCP: Running (Local only)"
     elif state == "starting":
         text = "MCP: Starting"
     elif state == "draining":
         text = f"MCP: Stopping ({pending} operations)"
-    else:
+    elif state == "stopped":
         text = "MCP: Stopped"
+    else:
+        text = "MCP: State unknown"
+    if state == "running":
+        action_text = "Stop MCP Server"
+        action_tooltip = "Stop the embedded MCP server"
+        action_icon = "mcp-stop.svg"
+    elif state == "starting":
+        action_text = "Starting MCP Server…"
+        action_tooltip = "The MCP server is starting; wait for it to finish"
+        action_icon = "mcp-start.svg"
+    elif state == "draining":
+        action_text = "Stopping MCP Server…"
+        action_tooltip = f"MCP is stopping ({pending} operations still active)"
+        action_icon = "mcp-stop.svg"
+    elif state == "stopped":
+        action_text = "Start MCP Server"
+        action_tooltip = "Start the embedded MCP server"
+        action_icon = "mcp-start.svg"
+        if pending:
+            action_tooltip = f"Waiting for {pending} retained operations to finish"
+    else:
+        action_text = "MCP Server State Unknown"
+        action_tooltip = "The MCP server state cannot be determined"
+        action_icon = "mcp-workbench.svg"
+    start_enabled = state == "stopped" and pending == 0
+    stop_enabled = state == "running"
     return {
         "text": text,
-        "start_enabled": state == "stopped" and pending == 0,
-        "stop_enabled": state == "running",
+        "start_enabled": start_enabled,
+        "stop_enabled": stop_enabled,
+        "action_text": action_text,
+        "action_tooltip": action_tooltip,
+        "action_icon": action_icon,
+        "action_enabled": start_enabled or stop_enabled,
     }
 
 
@@ -131,6 +153,7 @@ def _restart_required(saved: dict | None, status: dict) -> bool:
     return (
         bool(saved.get("remote_enabled", False)) != bool(connection.get("remote_enabled"))
         or str(saved.get("allowed_ips", "")) != str(connection.get("allowed_ips", ""))
+        or saved.get("port") != connection.get("configured_port")
     )
 
 
@@ -139,13 +162,16 @@ class McpUiController(QtCore.QObject):
 
     Polls only actual server state every 500 ms; failures already have
     their own native dialog/status message, so no error state is cached
-    here. Saved settings are loaded on initialization, after a successful
-    command save and when Connection Details opens — never in the timer.
+    here. The indicator button opens Connection Details. Saved settings
+    are loaded on initialization, after a successful settings save and
+    when Connection Details opens — never in the timer.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._settings = self._load_settings()
+        self._toggle_action = None
+        self._toggle_icon = None
         self._button = self._build_indicator()
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(500)
@@ -164,7 +190,7 @@ class McpUiController(QtCore.QObject):
             return None
 
     def settings_changed(self) -> None:
-        """Re-read saved settings (after a successful command save)."""
+        """Re-read saved settings (after a successful settings save)."""
 
         self._settings = self._load_settings()
         self.refresh()
@@ -176,7 +202,7 @@ class McpUiController(QtCore.QObject):
         if window is None:
             return None
         button = QtWidgets.QToolButton(window.statusBar())
-        button.setObjectName("FreeCADMCPStatus")
+        button.setObjectName("FreeCAD MCP Status")
         button.setAutoRaise(True)
         button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
         button.setAccessibleName("FreeCAD MCP server status")
@@ -189,17 +215,19 @@ class McpUiController(QtCore.QObject):
         # Invoke the existing command so the dialog works even before the
         # workbench has registered anything special for the button.
         try:
-            FreeCADGui.runCommand("Show_Auth_Token")
+            FreeCADGui.runCommand(_DETAILS_COMMAND)
         except Exception:
-            ShowAuthTokenCommand().Activated()
+            ConnectionDetailsCommand().Activated()
 
     def _tooltip(self, status: dict) -> str:
         connection = status.get("connection") or {}
         gui = status.get("gui") or {}
-        bind_address = "0.0.0.0" if connection.get("remote_enabled") else "127.0.0.1"
+        remote = bool(connection.get("remote_enabled"))
+        bind_address = "0.0.0.0" if remote else "127.0.0.1"
         lines = [
             f"Endpoint: {status.get('endpoint') or 'not listening'}",
             f"Bind address: {bind_address}",
+            f"Access: {'Network enabled' if remote else 'Local only'}",
             f"Dispatch health: {gui.get('state', 'unknown')}",
             f"Pending operations: {int(status.get('pendingOperations') or 0)}",
         ]
@@ -210,10 +238,11 @@ class McpUiController(QtCore.QObject):
     # -- refresh -------------------------------------------------------------
 
     def refresh(self) -> None:
-        """One bounded pass: poll state, then set each action if different.
+        """One bounded pass: poll state, then sync indicator and action.
 
         QAction handles are resolved fresh every pass (no caching of
-        destroyed widgets); programmatic checks are signal-blocked.
+        destroyed widgets); the toggle action's text, icon, tooltip and
+        availability are re-derived from the pure mapping every time.
         """
 
         status = mcp_server_module.server_status()
@@ -224,28 +253,22 @@ class McpUiController(QtCore.QObject):
         window = _main_window()
         if window is None:
             return
-        enabled = {
-            "Start_MCP_Server": state_map["start_enabled"],
-            "Stop_MCP_Server": state_map["stop_enabled"],
-        }
         for action in window.findChildren(QtGui.QAction):
-            name = action.objectName()
-            if name in enabled:
-                if action.isEnabled() != enabled[name]:
-                    action.setEnabled(enabled[name])
-            elif name in _TOGGLE_KEYS:
-                if self._settings is None:
-                    if action.isEnabled():
-                        action.setEnabled(False)
-                    continue
-                if not action.isCheckable():
-                    action.setCheckable(True)
-                checked = bool(self._settings.get(_TOGGLE_KEYS[name], False))
-                if not action.isEnabled():
-                    action.setEnabled(True)
-                if action.isChecked() != checked:
-                    with QtCore.QSignalBlocker(action):
-                        action.setChecked(checked)
+            if action.objectName() != _TOGGLE_COMMAND:
+                continue
+            if action is not self._toggle_action:
+                # A rebuilt action starts from the GetResources defaults.
+                self._toggle_action = action
+                self._toggle_icon = None
+            if action.text() != state_map["action_text"]:
+                action.setText(state_map["action_text"])
+            if state_map["action_icon"] != self._toggle_icon:
+                action.setIcon(QtGui.QIcon(_icon_path(state_map["action_icon"])))
+                self._toggle_icon = state_map["action_icon"]
+            if action.toolTip() != state_map["action_tooltip"]:
+                action.setToolTip(state_map["action_tooltip"])
+            if action.isEnabled() != state_map["action_enabled"]:
+                action.setEnabled(state_map["action_enabled"])
 
     def shutdown(self) -> None:
         """Stop polling; the indicator dies with its parent window."""
@@ -294,12 +317,17 @@ def _controller_settings_changed():
 
 
 # ---------------------------------------------------------------------------
-# Start / Stop.
+# Lifecycle toggle.
 # ---------------------------------------------------------------------------
 
 
-class StartMCPServerCommand:
+class ToggleMCPServerCommand:
+    """One command for both directions: stop while running, start while fully stopped."""
+
     def GetResources(self):
+        # Initial resources describe the stopped state; the controller
+        # refresh rewrites text, icon, tooltip and availability from the
+        # confirmed server state.
         return {
             "MenuText": "Start MCP Server",
             "ToolTip": "Start the embedded MCP server",
@@ -307,6 +335,19 @@ class StartMCPServerCommand:
         }
 
     def Activated(self):
+        state_map = _indicator_state(mcp_server_module.server_status())
+        if state_map["stop_enabled"]:
+            self._stop()
+        elif state_map["start_enabled"]:
+            self._start()
+        else:
+            # The state moved between the last refresh and this click;
+            # report truth instead of forcing an invalid transition.
+            message = state_map["text"]
+            _show_status_bar(message)
+            _report_message(f"[MCP] No action taken: {message}")
+
+    def _start(self):
         try:
             status = mcp_server_module.start_server()
         except (SettingsError, RuntimeError, OSError) as exc:
@@ -324,28 +365,7 @@ class StartMCPServerCommand:
             _report_message(f"[MCP] Server start returned state {state}")
         _controller_refresh()
 
-    def IsActive(self):
-        return _indicator_state(mcp_server_module.server_status())["start_enabled"]
-
-
-class StopMCPServerCommand:
-    def GetResources(self):
-        return {
-            "MenuText": "Stop MCP Server",
-            "ToolTip": "Stop the embedded MCP server",
-            "Pixmap": _icon_path("mcp-stop.svg"),
-        }
-
-    def Activated(self):
-        before = mcp_server_module.server_status()
-        if not before.get("running"):
-            result = mcp_server_module.stop_server()
-            _show_status_bar(f"MCP server is not running (state: {result.get('state')})")
-            _report_message(
-                "[MCP] Server is not running (state: %s).\n" % result.get("state")
-            )
-            _controller_refresh()
-            return
+    def _stop(self):
         try:
             result = mcp_server_module.stop_server()
         except (SettingsError, RuntimeError, OSError) as exc:
@@ -369,173 +389,7 @@ class StopMCPServerCommand:
         _controller_refresh()
 
     def IsActive(self):
-        return _indicator_state(mcp_server_module.server_status())["stop_enabled"]
-
-
-# ---------------------------------------------------------------------------
-# Settings toggles.
-# ---------------------------------------------------------------------------
-
-
-class ToggleAutoStartCommand:
-    def GetResources(self):
-        try:
-            auto_start = bool(load_settings().get("auto_start", False))
-        except SettingsError:
-            auto_start = False
-        return {
-            "MenuText": "Auto-Start Server",
-            "ToolTip": "Automatically start the MCP server when FreeCAD launches.",
-            "Checkable": auto_start,
-            "Pixmap": _icon_path("mcp-autostart.svg"),
-        }
-
-    def Activated(self, checked=0):
-        try:
-            settings = load_settings()
-            settings["auto_start"] = bool(checked)
-            save_settings(settings)
-        except SettingsError as exc:
-            _report_error(f"[MCP] Cannot change auto-start: {exc}")
-            _warn(f"Changing auto-start failed:\n{exc}\nThe saved setting is unchanged.")
-            _controller_settings_changed()
-            return
-        _controller_settings_changed()
-        if settings["auto_start"]:
-            _report_message(
-                "[MCP] Server will start automatically on next FreeCAD launch."
-            )
-        else:
-            _report_message("[MCP] Auto-start disabled.")
-
-    def IsActive(self):
-        return True
-
-
-class ToggleRemoteConnectionsCommand:
-    def GetResources(self):
-        try:
-            remote = bool(load_settings().get("remote_enabled", False))
-        except SettingsError:
-            remote = False
-        return {
-            "MenuText": "Remote Connections",
-            "ToolTip": "Enable or disable non-loopback connections to the MCP server.",
-            "Checkable": remote,
-            "Pixmap": _icon_path("mcp-remote.svg"),
-        }
-
-    def Activated(self, checked=0):
-        try:
-            settings = load_settings()
-            settings["remote_enabled"] = bool(checked)
-            if checked and not settings.get("token"):
-                settings["token"] = secrets.token_urlsafe(32)
-            save_settings(settings)
-        except SettingsError as exc:
-            _report_error(f"[MCP] Cannot change remote access: {exc}")
-            _warn(f"Changing remote access failed:\n{exc}\nThe saved setting is unchanged.")
-            _controller_settings_changed()
-            return
-        _controller_settings_changed()
-        if settings["remote_enabled"]:
-            _report_message(
-                "[MCP] Remote connections enabled. Clients must present the "
-                "bearer token (see Connection Details). Allowed IPs: "
-                f"{settings['allowed_ips'] or '(any host - open)'}\n"
-            )
-        else:
-            _report_message("[MCP] Remote connections disabled.\n")
-        if mcp_server_module.server_status().get("running"):
-            _report_message(
-                "[MCP] Restart the MCP server for changes to take effect."
-            )
-
-    def IsActive(self):
-        return True
-
-
-class ConfigureAllowedIPsCommand:
-    def GetResources(self):
-        return {
-            "MenuText": "Configure Allowed IPs",
-            "ToolTip": "Set which IP addresses or subnets may connect to the MCP server.",
-            "Pixmap": _icon_path("mcp-allowed-ips.svg"),
-        }
-
-    def Activated(self):
-        try:
-            settings = load_settings()
-        except SettingsError as exc:
-            _report_error(f"[MCP] Cannot load settings: {exc}")
-            _warn(f"Loading the saved settings failed:\n{exc}")
-            return
-        current_ips = settings.get("allowed_ips", "")
-        text, ok = QtWidgets.QInputDialog.getText(
-            None,
-            "Allowed IP Addresses",
-            "Enter allowed IP addresses or subnets (comma-separated).\n"
-            "Leave empty to allow any host (the bearer token stays required).\n"
-            "Examples: 192.168.1.0/24, 10.0.0.5",
-            QtWidgets.QLineEdit.Normal,
-            current_ips,
-        )
-        if not ok:
-            _report_message("[MCP] Allowed IPs not changed.")
-            return
-        if not text.strip():
-            settings["allowed_ips"] = ""
-            try:
-                save_settings(settings)
-            except SettingsError as exc:
-                _report_error(f"[MCP] Cannot save allowed IPs: {exc}")
-                _warn(f"Saving the allowed IPs failed:\n{exc}\nSettings are unchanged.")
-                _controller_settings_changed()
-                return
-            _report_message(
-                "[MCP] Allowed IPs cleared: any host may connect "
-                "(token still required).\n"
-            )
-            _controller_settings_changed()
-            if mcp_server_module.server_status().get("running"):
-                _report_message(
-                    "[MCP] Restart the MCP server for changes to take effect."
-                )
-            return
-        valid, errors = validate_allowed_ips(text.strip())
-        if errors:
-            QtWidgets.QMessageBox.warning(
-                None,
-                "Invalid IP Configuration",
-                "The following errors were found:\n\n"
-                + "\n".join(f"- {e}" for e in errors)
-                + ("\n\nOnly valid entries will be saved."
-                   if valid else "\n\nNo valid entries found. Settings not changed."),
-            )
-        if not valid:
-            _report_warning("[MCP] Allowed IPs not changed - no valid entries.")
-            return
-        settings["allowed_ips"] = ", ".join(valid)
-        try:
-            save_settings(settings)
-        except SettingsError as exc:
-            _report_error(f"[MCP] Cannot save allowed IPs: {exc}")
-            _warn(f"Saving the allowed IPs failed:\n{exc}\nSettings are unchanged.")
-            _controller_settings_changed()
-            return
-        _report_message(f"[MCP] Allowed IPs updated to: {settings['allowed_ips']}")
-        _controller_settings_changed()
-        if mcp_server_module.server_status().get("running"):
-            _report_message(
-                "[MCP] Restart the MCP server for changes to take effect."
-            )
-
-    def IsActive(self):
-        return True
-
-
-def _report_warning(message: str) -> None:
-    FreeCAD.Console.PrintWarning(f"{message}\n")
+        return _indicator_state(mcp_server_module.server_status())["action_enabled"]
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +400,7 @@ def _report_warning(message: str) -> None:
 def _connection_details(status: dict, saved: dict | None) -> dict:
     """Pure rows model for the Connection Details dialog.
 
-    The copyable endpoint is always the local loopback form: a remote
+    The copyable endpoint is always the local loopback form: a network
     wildcard listener maps to ``http://127.0.0.1:<actual port>/mcp``; the
     wildcard address is only ever shown as the bind address. Tokens are
     NOT part of the model — the dialog handles them separately and they
@@ -555,14 +409,14 @@ def _connection_details(status: dict, saved: dict | None) -> dict:
 
     state = status.get("state")
     connection = status.get("connection") or {}
-    remote_active = bool(connection.get("remote_enabled"))
+    network_active = bool(connection.get("remote_enabled"))
     actual_port = status.get("port")
     configured_port = connection.get("configured_port")
     running = state in ("running", "starting", "draining")
     if running and actual_port:
         endpoint = (
             f"http://127.0.0.1:{actual_port}/mcp"
-            if remote_active
+            if network_active
             else str(status.get("endpoint"))
         )
         listening = True
@@ -573,11 +427,11 @@ def _connection_details(status: dict, saved: dict | None) -> dict:
             else None
         )
         listening = False
-    mode = "Remote" if remote_active else "Local"
+    mode = "Network enabled" if network_active else "Local only"
     return {
         "state": state or "stopped",
         "mode": mode,
-        "bind_address": "0.0.0.0" if remote_active else "127.0.0.1",
+        "bind_address": "0.0.0.0" if network_active else "127.0.0.1",
         "allowed_ips": str(connection.get("allowed_ips", "") or "(any host - open)"),
         "endpoint": endpoint,
         "listening": listening,
@@ -587,11 +441,11 @@ def _connection_details(status: dict, saved: dict | None) -> dict:
     }
 
 
-class ShowAuthTokenCommand:
+class ConnectionDetailsCommand:
     def GetResources(self):
         return {
-            "MenuText": "Connection Details",
-            "ToolTip": "Show the MCP endpoint and bearer token for connecting clients.",
+            "MenuText": "Connection Details…",
+            "ToolTip": "Show the MCP endpoint, access mode and bearer token for connecting clients.",
             "Pixmap": _icon_path("mcp-connection.svg"),
         }
 
@@ -646,7 +500,7 @@ class ShowAuthTokenCommand:
         token_field.setReadOnly(True)
         token_field.setEchoMode(QtWidgets.QLineEdit.Password)
         if local_only:
-            token_field.setText(_tr("(not required - local connections only)"))
+            token_field.setText(_tr("(not required - Local only)"))
         else:
             token_field.setText(token)
 
@@ -684,11 +538,11 @@ class ShowAuthTokenCommand:
                 _tr("Restart required to apply saved connection settings.")
             )
         lan_note = None
-        if model["mode"] == "Remote":
+        if model["mode"] == "Network enabled":
             lan_note = QtWidgets.QLabel(dialog)
             lan_note.setText(
                 _tr(
-                    "Remote clients connect to this computer's LAN address; "
+                    "Network clients connect to this computer's LAN address; "
                     "the endpoint above is this machine's local loopback form."
                 )
             )
@@ -700,7 +554,7 @@ class ShowAuthTokenCommand:
 
         layout = QtWidgets.QFormLayout(dialog)
         layout.addRow(_tr("State:"), state_field)
-        layout.addRow(_tr("Connection mode:"), mode_field)
+        layout.addRow(_tr("Access:"), mode_field)
         layout.addRow(_tr("Endpoint:"), endpoint_field)
         layout.addRow(_tr("Bind address:"), bind_field)
         layout.addRow(_tr("Allowed IPs:"), allowed_field)
@@ -731,6 +585,167 @@ class ShowAuthTokenCommand:
 
 
 # ---------------------------------------------------------------------------
+# Settings.
+# ---------------------------------------------------------------------------
+
+
+class MCPSettingsCommand:
+    def GetResources(self):
+        return {
+            "MenuText": "MCP Settings…",
+            "ToolTip": "Configure the MCP server port, auto-start, network access, "
+            "allowed IPs and allowed roots.",
+            "Pixmap": _icon_path("mcp-workbench.svg"),
+        }
+
+    def Activated(self):
+        try:
+            settings = load_settings()
+        except SettingsError as exc:
+            _report_error(f"[MCP] Cannot load settings: {exc}")
+            _warn(f"Loading the saved settings failed:\n{exc}")
+            return
+
+        parent = _main_window()
+        dialog = QtWidgets.QDialog(parent)
+        dialog.setWindowTitle(_tr("FreeCAD MCP — Settings"))
+        dialog.setMinimumWidth(460)
+
+        port_field = QtWidgets.QSpinBox(dialog)
+        port_field.setRange(0, 65535)
+        port_field.setValue(int(settings.get("port") or 0))
+
+        auto_start = QtWidgets.QCheckBox(
+            _tr("Start the server automatically when FreeCAD launches"), dialog
+        )
+        auto_start.setChecked(bool(settings.get("auto_start", False)))
+
+        network = QtWidgets.QCheckBox(
+            _tr("Allow network connections (non-loopback clients)"), dialog
+        )
+        network.setChecked(bool(settings.get("remote_enabled", False)))
+        network_note = QtWidgets.QLabel(
+            _tr("Network clients must present the bearer token shown in "
+                "Connection Details."),
+            dialog,
+        )
+        network_note.setWordWrap(True)
+        network_note.setIndent(20)
+
+        ips_field = QtWidgets.QLineEdit(str(settings.get("allowed_ips", "")), dialog)
+        ips_field.setPlaceholderText(
+            _tr("e.g. 192.168.1.0/24, 10.0.0.5 - empty allows any host "
+                "(the token stays required)")
+        )
+        ips_error = QtWidgets.QLabel(dialog)
+        ips_error.setWordWrap(True)
+        ips_error.hide()
+
+        roots_field = QtWidgets.QPlainTextEdit(dialog)
+        roots_field.setPlaceholderText(_tr("One directory per line"))
+        roots_field.setPlainText(
+            "\n".join(str(root) for root in settings.get("allowed_roots", []))
+        )
+        roots_error = QtWidgets.QLabel(dialog)
+        roots_error.setWordWrap(True)
+        roots_error.hide()
+
+        outcome = {}
+
+        def _set_error(label, message: str) -> None:
+            label.setText(message)
+            label.setVisible(bool(message))
+
+        def _save() -> None:
+            _set_error(ips_error, "")
+            _set_error(roots_error, "")
+            valid_ips, ip_errors = validate_allowed_ips(ips_field.text().strip())
+            if ip_errors:
+                _set_error(ips_error, "Allowed IPs: " + "; ".join(ip_errors))
+                return
+            roots = [
+                line.strip() for line in roots_field.toPlainText().splitlines()
+            ]
+            roots = [line for line in roots if line]
+            if not roots:
+                _set_error(roots_error, "Allowed roots: add at least one directory.")
+                return
+            saved = dict(settings)
+            saved["port"] = port_field.value()
+            saved["auto_start"] = auto_start.isChecked()
+            saved["remote_enabled"] = network.isChecked()
+            saved["allowed_ips"] = ", ".join(valid_ips)
+            saved["allowed_roots"] = roots
+            token_generated = False
+            if saved["remote_enabled"] and not saved.get("token"):
+                # save_settings rejects a missing token; generate one here
+                # instead. It is never shown in this dialog — clients read
+                # it from Connection Details.
+                saved["token"] = secrets.token_urlsafe(32)
+                token_generated = True
+            try:
+                save_settings(saved)
+            except SettingsError as exc:
+                _report_error(f"[MCP] Cannot save settings: {exc}")
+                _warn(f"Saving the settings failed:\n{exc}\nSettings are unchanged.")
+                return
+            outcome["saved"] = saved
+            outcome["token_generated"] = token_generated
+            dialog.accept()
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(_save)
+        buttons.rejected.connect(dialog.reject)
+
+        layout = QtWidgets.QFormLayout(dialog)
+        layout.addRow(_tr("Port:"), port_field)
+        layout.addRow("", auto_start)
+        layout.addRow("", network)
+        layout.addRow("", network_note)
+        layout.addRow(_tr("Allowed IPs:"), ips_field)
+        layout.addRow("", ips_error)
+        layout.addRow(_tr("Allowed roots:"), roots_field)
+        layout.addRow("", roots_error)
+        layout.addRow(buttons)
+
+        # Keyboard tab order follows the form.
+        QtWidgets.QWidget.setTabOrder(port_field, auto_start)
+        QtWidgets.QWidget.setTabOrder(auto_start, network)
+        QtWidgets.QWidget.setTabOrder(network, ips_field)
+        QtWidgets.QWidget.setTabOrder(ips_field, roots_field)
+
+        dialog.exec()
+        if "saved" not in outcome:
+            return
+        saved = outcome["saved"]
+        _controller_settings_changed()
+        _report_message(
+            "[MCP] Settings saved: port %s; auto-start %s; network access %s; "
+            "allowed IPs %s; %d allowed root(s)."
+            % (
+                saved["port"],
+                "on" if saved["auto_start"] else "off",
+                "enabled" if saved["remote_enabled"] else "disabled (Local only)",
+                saved["allowed_ips"] or "(any host - open)",
+                len(saved["allowed_roots"]),
+            )
+        )
+        if outcome["token_generated"]:
+            _report_message(
+                "[MCP] A bearer token was generated for network access; "
+                "clients can view it in Connection Details."
+            )
+        if _restart_required(saved, mcp_server_module.server_status()):
+            _report_message("[MCP] Restart the MCP server for changes to take effect.")
+
+    def IsActive(self):
+        return True
+
+
+# ---------------------------------------------------------------------------
 # Registration.
 # ---------------------------------------------------------------------------
 
@@ -741,10 +756,7 @@ def register_commands() -> None:
     global _REGISTERED
     if _REGISTERED:
         return
-    FreeCADGui.addCommand("Start_MCP_Server", StartMCPServerCommand())
-    FreeCADGui.addCommand("Stop_MCP_Server", StopMCPServerCommand())
-    FreeCADGui.addCommand("Toggle_Auto_Start", ToggleAutoStartCommand())
-    FreeCADGui.addCommand("Toggle_Remote_Connections", ToggleRemoteConnectionsCommand())
-    FreeCADGui.addCommand("Configure_Allowed_IPs", ConfigureAllowedIPsCommand())
-    FreeCADGui.addCommand("Show_Auth_Token", ShowAuthTokenCommand())
+    FreeCADGui.addCommand(_TOGGLE_COMMAND, ToggleMCPServerCommand())
+    FreeCADGui.addCommand(_DETAILS_COMMAND, ConnectionDetailsCommand())
+    FreeCADGui.addCommand(_SETTINGS_COMMAND, MCPSettingsCommand())
     _REGISTERED = True

@@ -2,12 +2,10 @@
 
 Shares ``test_server``'s harness for the FreeCAD stubs and the single
 server-module binding, then installs a RICHER fake PySide before loading
-``mcp_server.commands`` under importlib. Covers: the pure status→UI
-mapping shared by the controller and ``IsActive``, controller refresh
-with signal-blocked checks and disabled toggles when settings are
-unreadable, start/stop command UX (status bar, Report view, warning
-dialogs, token-free output), failed settings persistence restoring the
-previous check state, active-vs-saved security settings, the wildcard
+``mcp_server.commands`` under importlib. Covers: the pure status-to-UI
+mapping, contextual lifecycle action synchronization and dispatch,
+transition states, consolidated settings validation and persistence,
+command registration, active-vs-saved connection settings, wildcard
 endpoint mapping, token masking in Connection Details, and the draining
 to stopped transition only after true completion.
 """
@@ -120,9 +118,9 @@ class FakeAction:
     def __init__(self, name: str) -> None:
         self._name = name
         self._enabled = True
-        self._checkable = False
-        self._checked = False
-        self.set_checked_calls: list[bool] = []
+        self._text = ""
+        self._tooltip = ""
+        self._icon = None
         self.set_enabled_calls: list[bool] = []
 
     def objectName(self) -> str:
@@ -135,18 +133,20 @@ class FakeAction:
         self._enabled = bool(value)
         self.set_enabled_calls.append(bool(value))
 
-    def isCheckable(self) -> bool:
-        return self._checkable
+    def text(self) -> str:
+        return self._text
 
-    def setCheckable(self, value: bool) -> None:
-        self._checkable = bool(value)
+    def setText(self, value: str) -> None:
+        self._text = value
 
-    def isChecked(self) -> bool:
-        return self._checked
+    def toolTip(self) -> str:
+        return self._tooltip
 
-    def setChecked(self, value: bool) -> None:
-        self.set_checked_calls.append(bool(value))
-        self._checked = bool(value)
+    def setToolTip(self, value: str) -> None:
+        self._tooltip = value
+
+    def setIcon(self, value) -> None:
+        self._icon = value
 
 
 class FakeToolButton:
@@ -223,6 +223,9 @@ class FakeMessageBox:
 class FakeWidget:
     """Generic widget double; every setter records its argument."""
 
+    instances: list["FakeWidget"] = []
+    auto_accept = False
+
     def __init__(self, *args, **kwargs) -> None:
         self._text = args[0] if args and isinstance(args[0], str) else ""
         self._echo = None
@@ -232,6 +235,7 @@ class FakeWidget:
         self.clicked = FakeSignal()
         self.rejected_signal = FakeSignal()
         self._parent = kwargs.get("parent")
+        FakeWidget.instances.append(self)
 
     def setText(self, text) -> None:
         self._text = text
@@ -256,6 +260,38 @@ class FakeWidget:
 
     def isEnabled(self) -> bool:
         return self._enabled
+    def isChecked(self) -> bool:
+        return self.checked
+
+    def setRange(self, minimum, maximum) -> None:
+        self._range = (minimum, maximum)
+
+    def setValue(self, value) -> None:
+        self._value = value
+
+    def value(self):
+        return self._value
+
+    def setPlainText(self, text) -> None:
+        self._text = text
+
+    def toPlainText(self):
+        return self._text
+
+    def setWordWrap(self, _value) -> None:
+        pass
+
+    def setIndent(self, _value) -> None:
+        pass
+
+    def hide(self) -> None:
+        self._visible = False
+
+    def setVisible(self, value) -> None:
+        self._visible = bool(value)
+
+    def accept(self) -> None:
+        self._accepted = True
 
     def setChecked(self, value) -> None:
         self.checked = bool(value)
@@ -267,7 +303,8 @@ class FakeWidget:
         pass
 
     def exec(self) -> None:
-        pass
+        if self.auto_accept and FakeDialogButtonBox.instances:
+            FakeDialogButtonBox.instances[-1].accepted.emit()
 
     def reject(self) -> None:
         self.rejected_signal.emit()
@@ -293,11 +330,15 @@ class FakeLayout:
 
 
 class FakeDialogButtonBox:
-    Close = "close"
+    Close = 1
+    Ok = 2
+    Cancel = 4
+    instances: list["FakeDialogButtonBox"] = []
 
     def __init__(self, _buttons, parent=None) -> None:
+        self.accepted = FakeSignal()
         self.rejected = FakeSignal()
-
+        FakeDialogButtonBox.instances.append(self)
 
 def _build_fake_pyside():
     qt_core = types.SimpleNamespace(
@@ -319,6 +360,8 @@ def _build_fake_pyside():
         QLabel=FakeWidget,
         QLineEdit=FakeWidget,
         QCheckBox=FakeWidget,
+        QSpinBox=FakeWidget,
+        QPlainTextEdit=FakeWidget,
         QPushButton=FakeWidget,
         QFormLayout=lambda *_a, **_k: FakeLayout(),
         QHBoxLayout=lambda *_a, **_k: FakeLayout(),
@@ -408,6 +451,9 @@ def _clean_commands_state(monkeypatch):
     monkeypatch.setattr(FakeMessageBox, "warnings", [])
     FakeClipboard.calls = []
     FakeTimer.instances = []
+    FakeWidget.instances.clear()
+    FakeWidget.auto_accept = False
+    FakeDialogButtonBox.instances.clear()
     commands._controller = None
     commands._REGISTERED = False
     ts.FakeConsole.messages.clear()
@@ -426,17 +472,25 @@ def _clean_commands_state(monkeypatch):
 
 
 def test_indicator_state_mapping_covers_every_state():
-    stopped = commands._indicator_state(_status(state="stopped"))
-    assert stopped["text"] == "MCP: Stopped"
-    assert stopped["start_enabled"] is True
-    assert stopped["stop_enabled"] is False
+    cases = [
+        ("stopped", 0, "MCP: Stopped", "Start MCP Server", "mcp-start.svg", True),
+        ("starting", 0, "MCP: Starting", "Starting MCP Server…", "mcp-start.svg", False),
+        ("running", 0, "MCP: Running (Local only)", "Stop MCP Server", "mcp-stop.svg", True),
+        ("draining", 3, "MCP: Stopping (3 operations)", "Stopping MCP Server…", "mcp-stop.svg", False),
+        ("unknown", 0, "MCP: State unknown", "MCP Server State Unknown", "mcp-workbench.svg", False),
+    ]
+    for state, pending, text, action_text, icon, enabled in cases:
+        mapping = commands._indicator_state(
+            _status(state=state, pendingOperations=pending)
+        )
+        assert mapping["text"] == text
+        assert mapping["action_text"] == action_text
+        assert mapping["action_icon"] == icon
+        assert mapping["action_enabled"] is enabled
 
-    running_local = commands._indicator_state(_status(state="running"))
-    assert running_local["text"] == "MCP: Running (Local)"
-    assert running_local["start_enabled"] is False
-    assert running_local["stop_enabled"] is True
 
-    running_remote = commands._indicator_state(
+def test_running_network_and_stuck_gui_have_truthful_status():
+    network = commands._indicator_state(
         _status(
             state="running",
             connection={
@@ -446,32 +500,18 @@ def test_indicator_state_mapping_covers_every_state():
             },
         )
     )
-    assert running_remote["text"] == "MCP: Running (Remote)"
-
-    starting = commands._indicator_state(_status(state="starting"))
-    assert starting["text"] == "MCP: Starting"
-    assert starting["start_enabled"] is False
-    assert starting["stop_enabled"] is False
-
-    draining = commands._indicator_state(
-        _status(state="draining", pendingOperations=3)
-    )
-    assert draining["text"] == "MCP: Stopping (3 operations)"
-    assert draining["start_enabled"] is False
-    assert draining["stop_enabled"] is False
-
-
-def test_running_with_stuck_gui_reports_blocked_but_keeps_stop():
-    mapping = commands._indicator_state(
+    assert network["text"] == "MCP: Running (Network enabled)"
+    stuck = commands._indicator_state(
         _status(state="running", gui={"state": "stuck"})
     )
-    assert mapping["text"] == "MCP: Running — GUI blocked"
-    assert mapping["stop_enabled"] is True
+    assert stuck["text"] == "MCP: Running — GUI blocked"
+    assert stuck["action_text"] == "Stop MCP Server"
+    assert stuck["action_enabled"] is True
 
 
 def test_restart_required_distinguishes_active_vs_saved_settings():
     saved = {"remote_enabled": True, "allowed_ips": "", "port": 9876}
-    active_remote = _status(
+    active_network = _status(
         state="running",
         connection={
             "remote_enabled": True,
@@ -479,10 +519,8 @@ def test_restart_required_distinguishes_active_vs_saved_settings():
             "configured_port": 9876,
         },
     )
-    active_local = _status(state="running")
-    assert commands._restart_required(saved, active_remote) is False
-    assert commands._restart_required(saved, active_local) is True
-    # A stopped server has nothing to restart.
+    assert commands._restart_required(saved, active_network) is False
+    assert commands._restart_required(saved, _status(state="running")) is True
     assert commands._restart_required(saved, _status(state="stopped")) is False
 
 
@@ -497,80 +535,48 @@ def _make_window(monkeypatch, actions):
     return window
 
 
-def test_controller_refresh_updates_indicator_and_action_state(monkeypatch):
-    start_action = FakeAction("Start_MCP_Server")
-    stop_action = FakeAction("Stop_MCP_Server")
-    auto_action = FakeAction("Toggle_Auto_Start")
-    remote_action = FakeAction("Toggle_Remote_Connections")
-    window = _make_window(
-        monkeypatch, [start_action, stop_action, auto_action, remote_action]
-    )
+def test_controller_refresh_updates_indicator_and_shared_action(monkeypatch):
+    action = FakeAction("Toggle_MCP_Server")
+    window = _make_window(monkeypatch, [action])
     monkeypatch.setattr(
         server_module,
         "server_status",
         lambda: _status(state="running", pendingOperations=0),
     )
-
     controller = commands.McpUiController(window)
 
-    assert controller._button is not None
-    assert controller._button.text() == "MCP: Running (Local)"
-    assert "FreeCAD MCP server status" == controller._button._accessible
-    assert start_action.isEnabled() is False
-    assert stop_action.isEnabled() is True
-    assert auto_action.isChecked() is False
-    assert remote_action.isChecked() is False
-    # The indicator survives; the polling timer runs at 500 ms.
+    assert controller._button.text() == "MCP: Running (Local only)"
+    assert controller._button._accessible == "FreeCAD MCP server status"
+    assert action.text() == "Stop MCP Server"
+    assert action._icon["icon"].endswith("mcp-stop.svg")
+    assert action.toolTip() == "Stop the embedded MCP server"
+    assert action.isEnabled() is True
     assert controller._timer.interval == 500
-    assert controller._timer.running is True
-    # Tooltips carry health and pending work — never the token.
-    tooltip = controller._button.toolTip()
-    assert "Dispatch health" in tooltip
-    assert SAVED_SETTINGS["token"] not in tooltip
-
-    # Shutdown stops the timer only.
+    assert "Dispatch health" in controller._button.toolTip()
+    assert SAVED_SETTINGS["token"] not in controller._button.toolTip()
     controller.shutdown()
     assert controller._timer.running is False
 
 
-def test_controller_disables_settings_toggles_when_settings_unreadable(
-    monkeypatch,
-):
-    def _explode():
-        raise SettingsError("settings file corrupt")
-
-    monkeypatch.setattr(commands, "load_settings", _explode)
-    auto_action = FakeAction("Toggle_Auto_Start")
-    window = _make_window(monkeypatch, [auto_action])
-    controller = commands.McpUiController(window)
-    controller.refresh()
-    assert auto_action.isEnabled() is False
-
-
-def test_refresh_applies_only_differences_with_blocked_signals(monkeypatch):
-    start_action = FakeAction("Start_MCP_Server")
-    auto_action = FakeAction("Toggle_Auto_Start")
-    auto_action.setCheckable(True)
-    auto_action.setChecked(False)  # already correct: no setChecked call
-    window = _make_window(monkeypatch, [start_action, auto_action])
+def test_controller_disables_contextual_action_during_transition(monkeypatch):
+    action = FakeAction("Toggle_MCP_Server")
+    window = _make_window(monkeypatch, [action])
     monkeypatch.setattr(
-        server_module, "server_status", lambda: _status(state="stopped")
+        server_module,
+        "server_status",
+        lambda: _status(state="draining", pendingOperations=2),
     )
-    controller = commands.McpUiController(window)
-    start_action.set_enabled_calls.clear()
-    auto_action.set_checked_calls.clear()
-    controller.refresh()
-    assert start_action.isEnabled() is True
-    assert start_action.set_enabled_calls == []  # unchanged, untouched
-    assert auto_action.set_checked_calls == []  # already checked
-    assert auto_action._checked is False
+    commands.McpUiController(window)
+    assert action.text() == "Stopping MCP Server…"
+    assert action._icon["icon"].endswith("mcp-stop.svg")
+    assert action.isEnabled() is False
 
 
 def test_initialize_ui_is_idempotent_and_survives_missing_window(monkeypatch):
     monkeypatch.setattr(commands, "_main_window", lambda: None)
     assert commands.initialize_ui() is None
     commands._controller = None
-    window = _make_window(monkeypatch, [])
+    _make_window(monkeypatch, [])
     first = commands.initialize_ui()
     second = commands.initialize_ui()
     assert first is not None and first is second
@@ -579,133 +585,122 @@ def test_initialize_ui_is_idempotent_and_survives_missing_window(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Command UX.
+# Command UX and settings.
 # ---------------------------------------------------------------------------
 
 
-def test_start_command_reports_running_state_and_endpoint(monkeypatch):
+def test_contextual_command_starts_when_stopped(monkeypatch):
     window = _make_window(monkeypatch, [])
+    monkeypatch.setattr(server_module, "server_status", lambda: _status(state="stopped"))
     monkeypatch.setattr(
         server_module,
         "start_server",
         lambda: _status(state="running", endpoint="http://127.0.0.1:9876/mcp"),
     )
-    commands.StartMCPServerCommand().Activated()
-    assert window.status_bar.messages[-1][0] == (
-        "MCP server running at http://127.0.0.1:9876/mcp"
+    monkeypatch.setattr(server_module, "stop_server", lambda: pytest.fail("stop called"))
+    commands.ToggleMCPServerCommand().Activated()
+    assert window.status_bar.messages[-1] == (
+        "MCP server running at http://127.0.0.1:9876/mcp",
+        5000,
     )
-    assert window.status_bar.messages[-1][1] == 5000
 
 
-def test_failed_startup_shows_warning_dialog_and_report_entry(monkeypatch):
+def test_contextual_command_stops_when_running(monkeypatch):
     window = _make_window(monkeypatch, [])
-
-    def _explode():
-        raise OSError("address already in use")
-
-    monkeypatch.setattr(server_module, "start_server", _explode)
-    commands.StartMCPServerCommand().Activated()
-    assert FakeMessageBox.warnings, "user-triggered failure needs a dialog"
-    _parent, title, text = FakeMessageBox.warnings[-1]
-    assert title == "FreeCAD MCP"
-    assert "address already in use" in text
-    assert any("Start failed" in message for message in ts.FakeConsole.messages)
-
-
-def test_stop_command_reports_stopping_with_active_operations(monkeypatch):
-    window = _make_window(monkeypatch, [])
+    monkeypatch.setattr(server_module, "server_status", lambda: _status(state="running"))
+    monkeypatch.setattr(server_module, "start_server", lambda: pytest.fail("start called"))
     monkeypatch.setattr(
         server_module,
-        "server_status",
-        lambda: _status(state="running", running=True),
+        "stop_server",
+        lambda: _status(state="draining", pendingOperations=3),
     )
-
-    def _stop():
-        return _status(state="draining", pendingOperations=3)
-
-    monkeypatch.setattr(server_module, "stop_server", _stop)
-    commands.StopMCPServerCommand().Activated()
+    commands.ToggleMCPServerCommand().Activated()
     assert window.status_bar.messages[-1][0] == (
         "MCP is stopping; 3 operations are still active."
     )
 
 
-def test_stop_command_reports_plain_stop_when_drained(monkeypatch):
-    window = _make_window(monkeypatch, [])
+def test_contextual_command_failure_is_visible(monkeypatch):
+    _make_window(monkeypatch, [])
+    monkeypatch.setattr(server_module, "server_status", lambda: _status(state="stopped"))
+
+    def _explode():
+        raise OSError("address already in use")
+
+    monkeypatch.setattr(server_module, "start_server", _explode)
+    commands.ToggleMCPServerCommand().Activated()
+    assert "address already in use" in FakeMessageBox.warnings[-1][2]
+    assert any("Start failed" in message for message in ts.FakeConsole.messages)
+
+
+def test_contextual_command_is_inactive_during_transitions(monkeypatch):
+    command = commands.ToggleMCPServerCommand()
+    for state in ("starting", "draining", "unknown"):
+        monkeypatch.setattr(
+            server_module, "server_status", lambda state=state: _status(state=state)
+        )
+        assert command.IsActive() is False
+    for state in ("stopped", "running"):
+        monkeypatch.setattr(
+            server_module, "server_status", lambda state=state: _status(state=state)
+        )
+        assert command.IsActive() is True
+
+
+def test_settings_save_uses_existing_owner_and_never_restarts(monkeypatch):
+    settings = dict(SAVED_SETTINGS)
+    settings["token"] = ""
+    settings["remote_enabled"] = True
+    saved = []
+    monkeypatch.setattr(commands, "load_settings", lambda: dict(settings))
+    monkeypatch.setattr(commands, "save_settings", lambda value: saved.append(dict(value)))
+    monkeypatch.setattr(server_module, "start_server", lambda: pytest.fail("implicit start"))
+    monkeypatch.setattr(server_module, "stop_server", lambda: pytest.fail("implicit stop"))
+    monkeypatch.setattr(server_module, "server_status", lambda: _status(state="stopped"))
+    FakeWidget.auto_accept = True
+
+    commands.MCPSettingsCommand().Activated()
+
+    assert len(saved) == 1
+    assert saved[0]["port"] == 9876
+    assert saved[0]["auto_start"] is False
+    assert saved[0]["remote_enabled"] is True
+    assert saved[0]["allowed_ips"] == "127.0.0.1"
+    assert saved[0]["allowed_roots"] == ["/tmp/fc-test"]
+    assert saved[0]["token"]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("allowed_ips", "not-an-ip"), ("allowed_roots", [])],
+)
+def test_settings_refuses_invalid_ip_or_empty_roots(monkeypatch, field, value):
+    settings = dict(SAVED_SETTINGS)
+    settings[field] = value
+    saved = []
+    monkeypatch.setattr(commands, "load_settings", lambda: dict(settings))
+    monkeypatch.setattr(commands, "save_settings", lambda result: saved.append(result))
+    FakeWidget.auto_accept = True
+
+    commands.MCPSettingsCommand().Activated()
+
+    assert saved == []
+
+
+def test_registers_only_the_three_public_ui_commands(monkeypatch):
+    registered = []
     monkeypatch.setattr(
-        server_module,
-        "server_status",
-        lambda: _status(state="running", running=True),
+        commands.FreeCADGui,
+        "addCommand",
+        lambda name, command: registered.append((name, type(command).__name__)),
+        raising=False,
     )
-
-    def _stop():
-        return _status(state="stopped")
-
-    monkeypatch.setattr(server_module, "stop_server", _stop)
-    commands.StopMCPServerCommand().Activated()
-    assert window.status_bar.messages[-1][0] == "MCP server stopped."
-
-
-def test_isactive_uses_the_shared_state_mapping(monkeypatch):
-    monkeypatch.setattr(
-        server_module, "server_status", lambda: _status(state="draining")
-    )
-    assert commands.StartMCPServerCommand().IsActive() is False
-    assert commands.StopMCPServerCommand().IsActive() is False
-    monkeypatch.setattr(
-        server_module, "server_status", lambda: _status(state="stopped")
-    )
-    assert commands.StartMCPServerCommand().IsActive() is True
-    monkeypatch.setattr(
-        server_module, "server_status", lambda: _status(state="running")
-    )
-    assert commands.StartMCPServerCommand().IsActive() is False
-    assert commands.StopMCPServerCommand().IsActive() is True
-
-
-def test_failed_settings_persistence_restores_previous_check_state(
-    monkeypatch,
-):
-    auto_action = FakeAction("Toggle_Auto_Start")
-    window = _make_window(monkeypatch, [auto_action])
-    controller = commands.McpUiController(window)
-
-    def _explode(_settings):
-        raise SettingsError("disk full")
-
-    monkeypatch.setattr(commands, "save_settings", _explode)
-    commands.ToggleAutoStartCommand().Activated(checked=True)
-    # The user sees a native warning; the disk kept the previous value.
-    assert FakeMessageBox.warnings
-    assert any(
-        "Cannot change auto-start" in message
-        for message in ts.FakeConsole.messages
-    )
-    controller.refresh()
-    # Refresh re-read the saved settings (still disabled) and blocks
-    # signals while restoring the previous check state.
-    assert auto_action._checked is False
-
-
-def test_saved_settings_reload_after_successful_toggle(monkeypatch):
-    auto_action = FakeAction("Toggle_Auto_Start")
-    window = _make_window(monkeypatch, [auto_action])
-    controller = commands.McpUiController(window)
-    saved = dict(SAVED_SETTINGS)
-    monkeypatch.setattr(
-        commands,
-        "load_settings",
-        lambda: dict(saved),
-    )
-
-    def _save(settings):
-        saved.update(settings)
-
-    monkeypatch.setattr(commands, "save_settings", _save)
-    commands.ToggleAutoStartCommand().Activated(checked=True)
-    # The re-created controller (initialize_ui) refreshed with the new
-    # saved settings; the stale direct instance never overwrites that.
-    assert auto_action._checked is True
+    commands.register_commands()
+    assert [name for name, _class in registered] == [
+        "Toggle_MCP_Server",
+        "Connection_Details",
+        "MCP_Settings",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +724,7 @@ def test_connection_details_maps_wildcard_bind_to_local_endpoint():
     assert "0.0.0.0" not in model["endpoint"]
     assert model["bind_address"] == "0.0.0.0"
     assert model["endpoint_copyable"] is True
-    assert model["mode"] == "Remote"
+    assert model["mode"] == "Network enabled"
 
 
 def test_connection_details_stopped_reports_configured_endpoint():
@@ -772,7 +767,7 @@ def test_connection_details_dialog_masks_token_and_maps_endpoint(monkeypatch):
     monkeypatch.setattr(server_module, "get_server", lambda: active)
     window = _make_window(monkeypatch, [])
 
-    commands.ShowAuthTokenCommand().Activated()
+    commands.ConnectionDetailsCommand().Activated()
 
     # The local endpoint is the loopback mapping; the wildcard address is
     # only ever the bind address. The active token is never echoed into

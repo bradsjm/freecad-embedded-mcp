@@ -8,7 +8,7 @@ The server exposes 17 tools in a fixed order: `discover_capabilities`, `new_docu
 
 ## Architecture & Data Flow
 
-**Startup (GUI only):** `addon/FreeCADMCP/InitGui.py` (`Init.py` is deliberately empty — console mode gets nothing) registers the "MCP Addon" workbench plus six commands from `mcp_server/commands.py` (`Start_MCP_Server`, `Stop_MCP_Server`, `Toggle_Auto_Start`, `Toggle_Remote_Connections`, `Configure_Allowed_IPs`, `Show_Auth_Token`), then optionally auto-starts via `server.start_server()`: FreeCAD version guard → `load_settings()` (fail closed) → construct `Server` → `gui_dispatch.initialize()` → `ThreadingHTTPServer` on a daemon thread → document observer. `server.py` holds a module-level `_server` singleton; restart is refused while GUI operations are still pending.
+**Startup (GUI only):** `addon/FreeCADMCP/InitGui.py` (`Init.py` is deliberately empty — console mode gets nothing) registers the "MCP Addon" workbench plus three commands from `mcp_server/commands.py` (`Toggle_MCP_Server`, `Connection_Details`, `MCP_Settings`), then optionally auto-starts via `server.start_server()`: FreeCAD version guard → `load_settings()` (fail closed) → construct `Server` → `gui_dispatch.initialize()` → `ThreadingHTTPServer` on a daemon thread → document observer. `server.py` holds a module-level `_server` singleton; restart is refused while GUI operations are still pending.
 
 **Request path (end to end):**
 
@@ -49,7 +49,7 @@ uv lock --check                                          # lockfile sync gate
 
 There is no lint/format gate: ruff (0.16.x cache present locally) has no config in this repo and does not run in CI. Do not rely on it.
 
-Manual run: symlink `addon/FreeCADMCP` into FreeCAD's `Mod/` directory (paths in README), start FreeCAD, select the "MCP Addon" workbench, then **Start MCP Server**. The token is shown by **Show Auth Token** or stored in `freecad_mcp_settings.json` under FreeCAD's user app-data directory.
+Manual run: symlink `addon/FreeCADMCP` into FreeCAD's `Mod/` directory (paths in README), start FreeCAD, select the "MCP Addon" workbench, then use the **Start MCP Server** toolbar action. The token is shown in **Connection Details…** or stored in `freecad_mcp_settings.json` under FreeCAD's user app-data directory.
 
 ## Code Conventions & Common Patterns
 
@@ -90,4 +90,4 @@ Manual run: symlink `addon/FreeCADMCP` into FreeCAD's `Mod/` directory (paths in
 - Tests never import real FreeCAD. Stubbing tiers used across the suite: pure modules imported directly (with `FakeClock`); lazy-import tool modules exercised through `FakeCtx`/`FakeDoc` doubles; FreeCAD/Qt-importing modules loaded via `importlib` under unique names with `sys.modules` stubs; `test_http_server.py` runs a real HTTP server on port 0 through `http.client`/raw sockets; `test_server.py` drives the real `Server.dispatch` over contract-shaped fake tool modules.
 - Zero-sleep discipline: use `FakeClock` and `threading.Event` barriers, never `time.sleep`.
 - CI gates to keep green (`.github/workflows/test.yml`): `uv lock --check`; `uv run python -m compileall addon` on 3.11/3.12/3.13; `uv run pytest -q`.
-- Known thin spots: `commands.py` and `InitGui.py` are untested; `test_script.py` and `test_dispatch_health.py` are small; there is no end-to-end test wiring the real HTTP server into the real `Server.dispatch`.
+- Known thin spots: `InitGui.py` is untested; `test_script.py` and `test_dispatch_health.py` are small; there is no end-to-end test wiring the real HTTP server into the real `Server.dispatch`.

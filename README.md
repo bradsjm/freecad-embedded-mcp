@@ -1,136 +1,81 @@
 # FreeCAD Embedded MCP
 
-FreeCAD add-on that embeds a Model Context Protocol server inside FreeCAD,
-letting MCP clients drive FreeCAD directly over a local or remote HTTP connection 
-(remote connections are optional and require a token).
+FreeCAD add-on that embeds a Model Context Protocol server inside FreeCAD. MCP clients can drive FreeCAD over a local or remote HTTP connection. Remote connections are optional and require a token.
 
-This version is a full rewrite of the original freecad-mcp as an embedded
-MCP server, built on the great work in the original project.
+This project is a full rewrite of the original [freecad-mcp](https://github.com/neka-nat/freecad-mcp), built on the original project's work.
+
+## Contents
+
+- [Demo](#demo)
+- [Install the add-on](#install-the-add-on)
+- [Endpoint and security](#endpoint-and-security)
+- [Connecting an MCP client](#connecting-an-mcp-client)
+- [Agent skill](#agent-skill)
+- [Tools](#tools)
+- [Development](#development)
+- [Rewrite summary](#rewrite-summary)
 
 ## Rewrite summary
 
-The original [freecad-mcp](https://github.com/neka-nat/freecad-mcp) ran as
-two processes: an MCP proxy installed from PyPI (`uvx freecad-mcp`) that an
-MCP client such as Claude Desktop launched over stdio, and an XML-RPC
-server inside FreeCAD that the proxy relayed tool calls to.
-This rewrite embeds the MCP server in FreeCAD's own process, so clients
-connect to FreeCAD directly. The GUI-thread architecture and the workflow
-concepts listed below carry over from the original.
+The original [freecad-mcp](https://github.com/neka-nat/freecad-mcp) used two processes: an MCP proxy installed from PyPI (`uvx freecad-mcp`) that an MCP client such as Claude Desktop launched over stdio, and an XML-RPC server inside FreeCAD that handled tool calls.
 
-### What was rewritten
+This rewrite **embeds the MCP server in FreeCAD's own process**, so clients connect to FreeCAD directly. The GUI-thread architecture and workflow concepts from the original project carry over.
 
-* **Architecture.** The PyPI proxy package (`src/freecad_mcp`, FastMCP over
-  stdio) and the in-FreeCAD XML-RPC server are gone. One embedded server
-  speaks MCP over Streamable HTTP (JSON-RPC + SSE) at
-  `http://127.0.0.1:9876/mcp`; no pip or uvx install and no client config
-  file are needed.
-* **Protocol.** XML-RPC with ad-hoc dictionaries became the MCP JSON-RPC
-  wire protocol, version `2026-07-28`, with request-metadata headers,
-  capability negotiation, and session-based support for the 2025
-  Streamable HTTP revisions.
-* **Tools.** Fifteen loosely typed tools became 17 tools validated against
-  JSON input and output schemas, with structured error codes and paginated
-  results. `execute_code` became `run_script`; `get_view` became
-  `capture_view`; `get_rpc_status` became `discover_capabilities`;
-  `insert_part_from_library` and `get_parts_list` were dropped — the parts
-  library is reachable through `run_script`.
-* **Security.** The IP allow-list alone became two explicit modes: local
-  (loopback bind, Host/Origin checks, no token) and remote (bind to all
-  interfaces, mandatory bearer token, optional CIDR allow-list), plus
-  `allowed_roots` path containment for the file-touching tools.
-* **Document safety.** Unvalidated success/error dictionaries became
-  MCP-owned transactions with prevalidation, rollback, dependent-object
-  checks and solid-count baselines.
-* **Long-running work.** Blocking calls with client-side timeouts became
-  detached tasks under the `io.modelcontextprotocol/tasks` extension, with
-  polling and cooperative cancellation.
-* **Consent.** Operations that touch untrusted or existing data — opening
-  files, saving over paths, closing dirty documents — became explicit
-  elicitation round trips instead of implicit effects.
-* **FEM.** The legacy `SolverCcxTools` auto-create became the modern
-  `Fem::SolverCalculiX` pipeline returning a VTK result summary; legacy
-  solvers are refused with an explicit error.
-* **Testing and packaging.** The original's proxy and RPC tests were
-  replaced with a larger headless suite that runs without a FreeCAD
-  install; CI dropped the MCP SDK compatibility job and now asserts the
-  wheel ships the add-on and nothing else.
-
-### Carried over from the original
-
-* **GUI-thread dispatch.** A queue still ferries every FreeCAD operation to
-  the main thread, woken by a Qt signal with a 500 ms heartbeat fallback,
-  and ticks are still skipped while a mouse button is held so MCP work
-  never interrupts 3D navigation.
-* **Dispatch health.** A GUI operation that overruns its timeout still
-  fails fast and blocks later GUI operations until healthy —
-  `dispatch_health.py` moved across almost unchanged, now reported through
-  `discover_capabilities`.
-* **Persistent script namespace.** `execute_code`'s shared namespace with
-  `FreeCAD`/`App` and `Gui` aliases survives as `run_script` sessions.
-* **Add-on UX.** The "MCP Addon" workbench, the "FreeCAD MCP" toolbar and
-  menu, the Auto-Start toggle, and settings in `freecad_mcp_settings.json`
-  under FreeCAD's user app-data directory.
-* **Remote connections and allowed IPs.** The CIDR allow-list carried over
-  (`ip_parse.py`); enabling remote now additionally requires the bearer
-  token, and the allow-list defaults to "any host" instead of `127.0.0.1`.
-* **CalculiX FEM with a summary result, view screenshots with named
-  orientations, and the cantilever FEM example** all survive in their new
-  tool forms.
-* **The demos below** were produced with the original add-on and still show
-  the workflow this rewrite serves.
-
-## Demo
+## Original Demos
 
 ### Design a flange
 
-![demo](./assets/freecad_mcp4.gif)
+![FreeCAD flange design demo](./assets/freecad_mcp4.gif)
 
 ### Design a toy car
 
-![demo](./assets/make_toycar4.gif)
+![FreeCAD toy car design demo](./assets/make_toycar4.gif)
 
-### Design a part from 2D drawing
+### Design a part from a 2D drawing
 
-#### Input 2D drawing
+#### Input drawing
 
-![input](./assets/b9-1.png)
+![Input 2D drawing](./assets/b9-1.png)
 
 #### Demo
 
-![demo](./assets/from_2ddrawing.gif)
+![2D drawing workflow demo](./assets/from_2ddrawing.gif)
 
 ## Install the add-on
 
-Install through FreeCAD's Add-on Manager (recommended) or by copying the
-add-on folder into FreeCAD's `Mod` directory. The add-on does not run in a
-separate Python environment; the server executes inside FreeCAD's own
-bundled Python (3.11 or newer).
+Install through FreeCAD's Add-on Manager (recommended), or copy the add-on folder into FreeCAD's `Mod` directory. The add-on runs inside FreeCAD's bundled Python (3.11 or newer); it does not use a separate Python environment.
 
 ### Install with the Add-on Manager
 
-1. Open **Edit → Preferences → Addon Manager** and find **Custom
-   repositories**.
-2. Click **Add** and fill in the **Custom Repository** dialog:
-   * Repository URL: `https://github.com/bradsjm/freecad-embedded-mcp`
-   * Branch: `v2.0-embedded-mcp`
-3. Confirm with **OK** and close the preferences.
-4. Open **Tools → Addon Manager**, search for `FreeCAD MCP`, and click
-   **Install**. If it does not appear in the list, select your custom
-   repository in the source filter.
+1. Open **Edit → Preferences → Addon Manager**.
+2. Find **Custom repositories**.
+3. Click **Add**.
+4. Enter the following values:
 
-### Install manually (clone, copy, or symlink)
+   | Field | Value |
+   | --- | --- |
+   | Repository URL | `https://github.com/bradsjm/freecad-embedded-mcp` |
+   | Branch | `v2.0-embedded-mcp` |
 
-FreeCAD user addon directories:
+5. Confirm with **OK** and close Preferences.
+6. Open **Tools → Addon Manager**.
+7. Search for `FreeCAD MCP` and click **Install**.
+8. If it does not appear, select your custom repository in the source filter.
 
-* Windows: `%APPDATA%\FreeCAD\Mod\`
-* Mac:
-  * FreeCAD 1.1: `~/Library/Application\ Support/FreeCAD/v1-1/Mod/`
-  * FreeCAD 1.0: `~/Library/Application\ Support/FreeCAD/v1-0/Mod/`
-* Linux:
-  * Ubuntu: `~/.FreeCAD/Mod/` or `~/snap/freecad/common/Mod/` (if you install FreeCAD from snap)
-  * Debian: `~/.local/share/FreeCAD/Mod`
-  * Arch / CachyOS (FreeCAD 1.1 from `extra/freecad`): `~/.local/share/FreeCAD/v1-1/Mod/`
-  * Flatpak: `~/.var/app/org.freecad.FreeCAD/data/FreeCAD/v1-1/Mod/`
+### Install manually
+
+FreeCAD user add-on directories:
+
+| Platform | Directory |
+| --- | --- |
+| Windows | `%APPDATA%\FreeCAD\Mod\` |
+| macOS, FreeCAD 1.1 | `~/Library/Application Support/FreeCAD/v1-1/Mod/` |
+| macOS, FreeCAD 1.0 | `~/Library/Application Support/FreeCAD/v1-0/Mod/` |
+| Ubuntu | `~/.FreeCAD/Mod/` |
+| Ubuntu snap | `~/snap/freecad/common/Mod/` |
+| Debian | `~/.local/share/FreeCAD/Mod` |
+| Arch / CachyOS (FreeCAD 1.1 from `extra/freecad`) | `~/.local/share/FreeCAD/v1-1/Mod/` |
+| Flatpak | `~/.var/app/org.freecad.FreeCAD/data/FreeCAD/v1-1/Mod/` |
 
 Copy or symlink the add-on directory:
 
@@ -147,112 +92,209 @@ mkdir -p ~/Library/Application\ Support/FreeCAD/v1-1/Mod/
 ln -s "$(pwd)/addon/FreeCADMCP" ~/Library/Application\ Support/FreeCAD/v1-1/Mod/FreeCADMCP
 ```
 
-Restart FreeCAD after installing. The server supports FreeCAD 1.1.3 <= version < 1.2; bundled Python 3.11 or newer.
+Restart FreeCAD after installing. The server supports `1.1.3 <= version < 1.2` and bundled Python 3.11 or newer.
 
-Select "MCP Addon" from the workbench list to see the add-on UI.
+Select **MCP Addon** from the workbench list to see the add-on UI.
 
-![workbench_list](./assets/workbench_list.png)
+![FreeCAD workbench list](./assets/workbench_list.png)
 
-The "FreeCAD MCP" toolbar and menu contain:
+The **FreeCAD MCP** toolbar has one contextual action. Its label, icon, and availability follow the confirmed server state:
 
-* **Start MCP Server** — bind the embedded HTTP server
-* **Stop MCP Server** — stop it cleanly
-* **Auto-Start Server** — persist a setting so the server starts on every
-  FreeCAD launch (disabled by default; auto-start is never inherited from the
-  legacy add-on's settings)
-* **Remote Connections** — checkable opt-in that rebinds the server to all
-  interfaces (`0.0.0.0`) and requires a bearer token; takes effect on the
-  next server start
-* **Configure Allowed IPs** — dialog editing the optional comma-separated
-  peer allow-list (addresses or CIDR subnets); empty means any host may
-  connect
-* **Show Auth Token** — local dialog showing the endpoint and, in remote
-  mode, the bearer token with a copy button
+| Server state | Action |
+| --- | --- |
+| Fully stopped | **Start MCP Server** — bind the embedded HTTP server |
+| Running | **Stop MCP Server** — stop the server cleanly |
+| Starting or stopping | The action is disabled and shows the current transition |
 
-![start_rpc_server](./assets/start_rpc_server.png)
+The menu also provides:
+
+- **Connection Details…** — endpoint, access mode, bind address, allowed IPs, and, when network access is enabled, the masked bearer token with copy buttons.
+- **MCP Settings…** — port, auto-start, network access, allowed IPs, and allowed roots in one dialog. Changes take effect on the next server start and never restart a running server.
+
+A status-bar indicator shows the confirmed state, such as **MCP: Running (Local only)**, and opens **Connection Details…** when clicked.
 
 ## Endpoint and security
 
-Two access modes:
+The server has two access modes:
 
-**Local only (default).** The server listens on `127.0.0.1` (port `9876`
-by default) and no token is required — local tools just connect. Only
-loopback peers are accepted, and the loopback Host/Origin checks reject
-browser-borne cross-origin requests. There is no TLS and no CORS handling.
+| Mode | Bind address | Authentication | Peer restrictions |
+| --- | --- | --- | --- |
+| **Local only** (default) | `127.0.0.1` on port `9876` by default | No token | Loopback peers only; loopback Host/Origin checks reject browser-borne cross-origin requests |
+| **Network access** (opt-in) | `0.0.0.0` | Bearer token required on every request | `allowed_ips` is empty by default (any host with the token); populated addresses and CIDR subnets restrict peers further |
 
-**Remote (opt-in via Remote Connections).** The server rebinds to all
-interfaces (`0.0.0.0`) and a bearer token becomes mandatory on every
-request; it is generated automatically when remote mode is first enabled.
-`allowed_ips` defaults to empty — any host that has the token may connect.
-To lock down beyond the token, populate the list with addresses or CIDR
-subnets via **Configure Allowed IPs**. There is still no TLS — traffic is
-plaintext — so enable remote access only on networks you trust, and never
-forward, proxy, or tunnel the endpoint to untrusted networks.
+There is no TLS or CORS handling. Network access sends plaintext traffic, so enable it only on networks you trust. Never forward, proxy, or tunnel the endpoint to an untrusted network.
 
-Settings live in `freecad_mcp_settings.json` inside FreeCAD's user
-application data directory (`port`, `token`, `auto_start`, `remote_enabled`,
-`allowed_ips`, `allowed_roots`). The **Connection Details** dialog displays the
-active state, endpoint, bind address, allowed IPs and, in remote mode, the
-masked token with copy buttons.
+Settings live in `freecad_mcp_settings.json` inside FreeCAD's user application data directory:
 
-**The bearer token is full local code-execution authority.** The
-`run_script` tool executes arbitrary Python with the FreeCAD user's
-privileges and is deliberately not restricted by `allowed_roots`. Treat the
-token like a shell on this machine: never put it in logs, URLs, or shared
-documents, and do not install this add-on on a machine you would not give
-shell access to.
+- `port`
+- `token`
+- `auto_start`
+- `remote_enabled`
+- `allowed_ips`
+- `allowed_roots`
 
-`allowed_roots` (default: your home directory) limits which filesystem paths
-the file-taking tools (open/save/export and the working directories of FEM
-runs) may touch. These are path-containment checks inside this server — they
-are not a sandbox, and they never restrict what `run_script` can do.
+**Security warning:** The bearer token grants full local code-execution authority. The `run_script` tool executes arbitrary Python with the FreeCAD user's privileges and is deliberately not restricted by `allowed_roots`.
 
 ## Connecting an MCP client
 
-The server speaks the JSON-RPC MCP protocol over streamable HTTP. A client
-must:
+The server speaks the JSON-RPC MCP protocol over Streamable HTTP at `http://127.0.0.1:9876/mcp` by default. Start FreeCAD and start the MCP server before connecting a client. If you enable **Network access**, replace the loopback URL with the configured address and send `Authorization: Bearer <token>` on every request.
 
-1. POST to `http://127.0.0.1:9876/mcp` with `Content-Type: application/json`
-   and an `Accept` offering both `application/json` and
-   `text/event-stream`. In remote mode every request must additionally
-   carry `Authorization: Bearer <token>`; in local-only mode no
-   Authorization header is needed.
-2. Send the `MCP-Protocol-Version` header (`2026-07-28`) and the
-   `Mcp-Method`/`Mcp-Name` request-metadata headers, with the matching
-   protocol version and client information in each request's `_meta`.
-3. Declare the `elicitation.form` capability to receive consent prompts,
-   and the `io.modelcontextprotocol/tasks` extension to receive
-   long-running operations as tasks. Clients without these capabilities
-   are never blocked: consent-gated operations proceed without the
-   prompt, and long-running operations return final results.
+### Claude Code
 
-Clients that speak the 2025 Streamable HTTP revisions connect without any
-client-side changes. Legacy sessions degrade deliberately:
+Add the server with the Claude Code CLI:
 
-* Tools always return final results; tasks are never offered, so
-  long-running operations simply block until they finish.
-* Consent prompts travel as native `elicitation/create` requests on the
-  request-scoped SSE stream when the client declares form support. A
-  `2025-03-26` client (or any client without form support) falls back to
-  1.0 behavior: consent-required operations proceed without the prompt,
-  and each bypass is noted in the Report view.
-* Resource subscriptions and task methods are not advertised and return
-  "unknown method" errors.
-* JSON-RPC batches are accepted only for the `2025-03-26` revision.
+```bash
+claude mcp add --transport http freecad http://127.0.0.1:9876/mcp
+```
 
-[`examples/cantilever_fem.py`](examples/cantilever_fem.py) is a complete,
-dependency-free client example that shows this handshake and a full FEM run.
+For Network access, include the bearer token:
+
+```bash
+claude mcp add --transport http freecad http://HOST:9876/mcp \
+  --header "Authorization: Bearer YOUR_TOKEN"
+```
+
+Run `claude mcp list` to check the connection.
+
+### Codex
+
+Add a Streamable HTTP server to Codex with `config.toml` (`~/.codex/config.toml` or a project-scoped `.codex/config.toml`):
+
+```toml
+[mcp_servers.freecad]
+url = "http://127.0.0.1:9876/mcp"
+```
+
+For Network access, store the token in an environment variable and add:
+
+```toml
+[mcp_servers.freecad]
+url = "http://HOST:9876/mcp"
+bearer_token_env_var = "FREECAD_MCP_TOKEN"
+```
+
+Then run `codex mcp list` to verify the configuration. Codex also shares this configuration with its desktop app and IDE extension.
+
+### Other MCP clients with HTTP support
+
+Choose **Streamable HTTP** (sometimes named `HTTP` or `streamable-http`) and use:
+
+```text
+http://127.0.0.1:9876/mcp
+```
+
+For Network access, configure the request header `Authorization: Bearer YOUR_TOKEN`. A generic client configuration commonly looks like this:
+
+```json
+{
+  "mcpServers": {
+    "freecad": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:9876/mcp"
+    }
+  }
+}
+```
+
+Use the client’s HTTP or Streamable HTTP setting when it provides one. Do not configure this URL as a local command or an SSE endpoint.
+
+### Clients without HTTP support
+
+Use `mcp-remote` to bridge a STDIO-only client to the embedded HTTP server. For example, a client that accepts an `mcpServers` configuration can use:
+
+```json
+{
+  "mcpServers": {
+    "freecad": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:9876/mcp"]
+    }
+  }
+}
+```
+
+For Network access, add the bearer header to the arguments. Keep the token out of the configuration when possible by using an environment variable or `--header-file`:
+
+```json
+{
+  "mcpServers": {
+    "freecad": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote", "http://HOST:9876/mcp",
+        "--header", "Authorization: Bearer ${FREECAD_MCP_TOKEN}"
+      ],
+      "env": {
+        "FREECAD_MCP_TOKEN": "YOUR_TOKEN"
+      }
+    }
+  }
+}
+```
+
+`mcp-remote` is the HTTP-to-STDIO bridge required for this use case. The similarly named `mcp-proxy` package provides the opposite direction: it starts a STDIO server and exposes it over HTTP.
+
+## Tools
+
+The server exposes 17 tools.
+
+| Tool | Purpose |
+| --- | --- |
+| `discover_capabilities` | Report FreeCAD/OCC versions, workbenches, supported types, exporter and FEM availability, and GUI dispatch health. |
+| `new_document` | Create an empty document and return its actual sanitized `Name`, `Label`, and object count. |
+| `open_document` | Open an FCStd file. |
+| `save_document` | Save to the existing path or save as a new path. |
+| `close_document` | Close a document. |
+| `reload_document` | Close and reopen a saved document from its file. |
+| `inspect_objects` | List document objects with placement, bounds, shape validity, and solid counts. Results are paginated with a signed cursor. |
+| `create_object` | Create a supported Part/App type or FEM object through an explicit factory mapping, including modern analysis, `Fem::SolverCalculiX`, materials, and constraints. |
+| `edit_object` | Assign properties with prevalidation so an invalid property leaves earlier properties unchanged. Supports canonical `{object, subelement}` links only. |
+| `delete_object` | Remove an object, refusing objects that still have dependents instead of cascading silently. |
+| `edit_parameters` | Add, rename, and bind expressions on dynamic properties with full validation and rollback. |
+| `validate_geometry` | Report per-object state and shape validity, solid count, volume, bounds, and tolerance diagnostics, optionally against expected bounds. |
+| `measure` | Measure distance, interference, section, and face relationships between objects or their subshapes. |
+| `export` | Write STL, STEP, 3MF, or a native FCStd copy, verifying every file by reading it back. |
+| `capture_view` | Capture a PNG of a document's 3D view with an explicit orientation (Isometric, Front, Top, and more), framed on one existing object while preserving the caller's selection and active document. |
+| `run_fem` | Run a FEM analysis through the modern `Fem::SolverCalculiX` pipeline and return the loaded VTK result summary (`.vtm` and `.vtu` blocks, point/cell counts, and finite result ranges). |
+| `run_script` | Execute arbitrary FreeCAD Python code in a persistent per-session namespace. This is the escape hatch for workflows that structured tools do not cover, such as meshing or the parts library. |
+
+Document creation, opening, and reloading return `name`, `label`, and `objectCount`. Use the returned `name` as the `document` argument in later calls.
+
+Structured object and parameter edits use MCP-owned transactions and refuse to nest inside a user's active transaction. A failed edit aborts and recomputes the restored document; rollback failures are reported separately. New volumetric geometry defaults to one solid unless `expected_solids` specifies otherwise. Existing valid dependent solid counts are preserved when their inputs change.
+
+### Consent
+
+Destructive or untrusted operations—opening an untrusted FCStd file, saving over an existing path, and closing or reloading a dirty document—offer an MRTR elicitation round trip before taking effect.
+
+A client that declares `elicitation.form` must answer the fixed `confirm` boolean form. Declining, cancelling, or tampering with the signed consent state aborts the operation without any effect. A client without form support falls back to 1.0 behavior and proceeds without the prompt; each bypass is noted in the Report view.
+
+### Long-running operations and cancellation
+
+`run_fem`, `run_script`, `export`, and `measure` can run as detached tasks under the `io.modelcontextprotocol/tasks` extension:
+
+1. The tool call returns a task ID immediately.
+2. `tasks/get` polls for the terminal result.
+3. `tasks/cancel` requests cooperative cancellation.
+
+Cancellation is honest about its limits. A running CalculiX solver is never killed by a timeout or cancel request; the tool result reports whether cancellation was requested, but the process keeps running until it finishes. Likewise, a `run_script` deadline that has already started is reported while the code continues running to completion.
+
+### GUI dispatch timeouts
+
+FreeCAD GUI-thread operations cannot be force-cancelled safely. If a GUI-thread operation exceeds its timeout after starting, the server reports a stuck dispatcher and rejects later GUI operations immediately.
+
+Use `discover_capabilities` to inspect dispatch health. Document queries run on the GUI thread alongside modelling operations. If health does not return to normal after the operation finishes, restart FreeCAD.
+
+### `run_script` sessions
+
+`run_script` executes on the GUI thread inside a namespace seeded with `FreeCAD`/`App` and `Gui` aliases. Variables survive between calls to the same `session_id` for the server's lifetime.
+
+At most 32 sessions are kept. New sessions are refused rather than evicting live state. An exception in executed code returns captured stdout, stderr, and the traceback. Code execution still has FreeCAD's full privileges; it is not sandboxed.
 
 ## Agent skill
 
-The repository ships an agent skill in [`skills/freecad-mcp/`](skills/freecad-mcp/SKILL.md). The
-skill teaches coding agents how to drive this server: the 17-tool contract, FreeCAD modeling
-patterns, geometry validation, FEM, and export. It complements the MCP connection — the agent
-still talks to `http://127.0.0.1:9876/mcp`; the skill tells it how to use the tools well.
+The repository ships an [agent skill](skills/freecad-mcp/SKILL.md). It teaches coding agents how to drive this server: the 17-tool contract, FreeCAD modeling patterns, geometry validation, FEM, and export. It complements the MCP connection: the agent still talks to `http://127.0.0.1:9876/mcp`, while the skill explains how to use the tools effectively.
 
-[`npx skills`](https://github.com/vercel-labs/skills) is the official installer for the open
-agent skills ecosystem. It requires Node.js and supports Claude Code, Codex, Cursor, and 75+
-other agents:
+[`npx skills`](https://github.com/vercel-labs/skills) is the official installer for the open agent skills ecosystem. It requires Node.js and supports Claude Code, Codex, Cursor, and more than 75 other agents.
 
 ```bash
 # List the skill without installing
@@ -265,119 +307,56 @@ npx skills add bradsjm/freecad-embedded-mcp
 npx skills add bradsjm/freecad-embedded-mcp --skill freecad-mcp -g -a claude-code -a codex -y
 ```
 
-Project installs land in `./<agent>/skills/` (for example `.claude/skills/`); `-g` installs to
-`~/<agent>/skills/` for all projects. The CLI symlinks to one canonical copy by default; pass
-`--copy` when symlinks are not available. To use the skill once without installing:
+Project installs land in `./<agent>/skills/` (for example `.claude/skills/`). Global installs use `~/<agent>/skills/` for all projects when `-g` is set. The CLI symlinks to one canonical copy by default; pass `--copy` when symlinks are not available.
+
+To use the skill once without installing:
 
 ```bash
 npx skills use bradsjm/freecad-embedded-mcp --skill freecad-mcp --agent claude-code
 ```
 
-Manage an installed skill with `npx skills list`, `npx skills update freecad-mcp`, and
-`npx skills remove freecad-mcp`. Start the server (**Start MCP Server**), connect the agent to
-the endpoint as described above, and the skill supplies the operating procedure.
+Manage an installed skill with:
 
-## Tools
+```bash
+npx skills list
+npx skills update freecad-mcp
+npx skills remove freecad-mcp
+```
 
-The server exposes 17 tools:
-
-* `discover_capabilities`: report the FreeCAD/OCC versions, workbenches,
-  supported types, exporter and FEM availability, plus GUI dispatch health.
-* `new_document`: create an empty document and return its actual sanitized
-  Name, Label and object count.
-* `open_document`: open an FCStd file after consent (opening an untrusted
-  file is never implicit).
-* `save_document`: save to the existing path, or save-as to a new one (saving
-  over an existing target requires consent).
-* `close_document`: close a document; a dirty or unsaved nonempty document
-  requires consent first.
-* `reload_document`: close and reopen a saved document from its file,
-  discarding unsaved changes only after explicit consent.
-* `inspect_objects`: list a document's objects with placement, bounds, shape
-  validity and solid counts; paginated with a signed cursor.
-* `create_object`: create a supported Part/App type or a FEM object through
-  an explicit factory mapping (modern analysis, `Fem::SolverCalculiX`,
-  materials and constraints).
-* `edit_object`: assign properties with prevalidation so an invalid property
-  leaves earlier ones unchanged; canonical `{object, subelement}` links only.
-* `delete_object`: remove an object, refusing objects that still have
-  dependents instead of cascading silently.
-* `edit_parameters`: add, rename and bind expressions on dynamic properties
-  with full validation and rollback.
-* `validate_geometry`: per-object state and shape validity, solid count,
-  volume, bounds and tolerance diagnostics, optionally against expected
-  bounds.
-* `measure`: distance, interference, section and face measurements between
-  objects or their subshapes.
-* `export`: write STL, STEP, 3MF or a native FCStd copy, verifying every
-  file by reading it back.
-* `capture_view`: capture a PNG of a document's 3D view with an explicit
-  orientation (Isometric, Front, Top, ...) framed on one existing object,
-  preserving the caller's selection and active document.
-* `run_fem`: run a FEM analysis through the modern `Fem::SolverCalculiX`
-  pipeline and return the loaded VTK result summary (`.vtm` and `.vtu`
-  blocks, point/cell counts and finite result ranges).
-* `run_script`: execute arbitrary FreeCAD Python code in a persistent
-  per-session namespace — the escape hatch for workflows the structured
-  tools do not cover (e.g. meshing or the parts library).
-
-Document creation, opening and reloading return `name`, `label` and
-`objectCount`; use the returned `name` as the `document` argument in later calls.
-
-Structured object and parameter edits use MCP-owned transactions and refuse to
-nest inside a user's active transaction. A failed edit aborts and recomputes the
-restored document; rollback failures are reported separately. New volumetric
-geometry defaults to one solid unless `expected_solids` specifies otherwise.
-Existing valid dependent solid counts are preserved when their inputs change.
-
-### Consent
-
-Destructive or untrusted operations — opening an untrusted FCStd file,
-saving over an existing path, closing or reloading a dirty document — offer
-an MRTR elicitation round trip before taking effect. A client that
-declares `elicitation.form` must answer the fixed `confirm` boolean form;
-declining, cancelling, or tampering with the signed consent state aborts
-the operation without any effect. A client without form support falls back
-to 1.0 behavior and proceeds without the prompt; each bypass is noted in
-the Report view.
-
-### Long-running operations and cancellation
-
-`run_fem`, `run_script`, `export` and `measure` can run as detached tasks
-under the `io.modelcontextprotocol/tasks` extension: the tool call returns a
-task ID immediately, `tasks/get` polls for the terminal result, and
-`tasks/cancel` requests cooperative cancellation. Cancellation is honest
-about its limits: a running CalculiX solver is never killed by a timeout or
-cancel request; the tool result reports whether cancellation was requested
-but the process keeps running until it finishes. Likewise, a `run_script`
-deadline that has already started is reported while the code continues
-running to completion.
-
-### GUI dispatch timeouts
-
-FreeCAD GUI-thread operations cannot be force-cancelled safely. If a
-GUI-thread operation exceeds its timeout after starting, the server reports
-a stuck dispatcher and rejects later GUI operations immediately. Use
-`discover_capabilities` to inspect the reported dispatch health; document
-queries run on the GUI thread alongside modelling operations. If the health
-does not return to healthy after the operation finishes, restart FreeCAD.
-
-### `run_script` sessions
-
-`run_script` executes on the GUI thread inside a namespace seeded with
-`FreeCAD`/`App` and `Gui` aliases, and variables survive between calls to the
-same `session_id` for the server's lifetime. At most 32 sessions are kept;
-new sessions are refused rather than evicting live state. An exception in
-executed code returns captured stdout, stderr and the traceback. Code
-execution still has FreeCAD's full privileges — it is not sandboxed.
+Start the server then connect the agent to the endpoint described above, and the skill supplies the operating procedure.
 
 ## Development
 
-The Python code lives in `addon/FreeCADMCP/mcp_server` and `tests/`. Tests
-use stubs so they run without a FreeCAD installation:
+The Python code lives in `addon/FreeCADMCP/mcp_server` and `tests/`. Tests use stubs so they run without a FreeCAD installation.
 
 ```bash
 uv run pytest -q
 ```
 
 The project targets Python 3.11+ and has no runtime dependencies.
+
+[`examples/cantilever_fem.py`](examples/cantilever_fem.py) is a complete, dependency-free client example that shows this handshake and a full FEM run.
+
+### What was carried over
+
+- **GUI-thread dispatch:** A queue ferries every FreeCAD operation to the main thread. A Qt signal wakes the queue with a 500 ms heartbeat fallback. Ticks are skipped while a mouse button is held, so MCP work never interrupts 3D navigation.
+- **Dispatch health:** A GUI operation that overruns its timeout fails fast and blocks later GUI operations until the dispatcher is healthy. `dispatch_health.py` moved across almost unchanged and is now reported through `discover_capabilities`.
+- **Persistent script namespace:** `execute_code`'s shared namespace with `FreeCAD`/`App` and `Gui` aliases survives as `run_script` sessions.
+- **Add-on UX:** The “MCP Addon” workbench, the “FreeCAD MCP” toolbar and menu, and settings in `freecad_mcp_settings.json` under FreeCAD's user app-data directory.
+- **Remote connections and allowed IPs:** The CIDR allow-list carried over (`ip_parse.py`). Enabling remote access now also requires a bearer token, and the allow-list defaults to “any host” instead of `127.0.0.1`.
+- **CalculiX FEM, view screenshots, and the cantilever FEM example:** CalculiX FEM with a summary result, view screenshots with named orientations, and the cantilever FEM example all survive in their new tool forms.
+- **Demos:** The demos below were produced with the original add-on and still show the workflow this rewrite serves.
+
+### What was rewritten
+
+| Area | Changes |
+| --- | --- |
+| **Architecture** | The PyPI proxy package (`src/freecad_mcp`, FastMCP over stdio) and the in-FreeCAD XML-RPC server are gone. One embedded server speaks MCP over Streamable HTTP (JSON-RPC + SSE) at `http://127.0.0.1:9876/mcp`. No pip or uvx install and no client config file are needed. |
+| **Protocol** | XML-RPC with ad-hoc dictionaries became the MCP JSON-RPC wire protocol, version `2026-07-28`, with request-metadata headers, capability negotiation, and session-based support for the 2025 Streamable HTTP revisions. |
+| **Tools** | Fifteen loosely typed tools became 17 tools validated against JSON input and output schemas, with structured error codes and paginated results. `execute_code` became `run_script`; `get_view` became `capture_view`; `get_rpc_status` became `discover_capabilities`; `insert_part_from_library` and `get_parts_list` were dropped because the parts library is reachable through `run_script`. |
+| **Security** | The IP allow-list alone became two explicit modes: local (loopback bind, Host/Origin checks, no token) and remote (bind to all interfaces, mandatory bearer token, optional CIDR allow-list), plus `allowed_roots` path containment for file-touching tools. |
+| **Document safety** | Unvalidated success/error dictionaries became MCP-owned transactions with prevalidation, rollback, dependent-object checks, and solid-count baselines. |
+| **Long-running work** | Blocking calls with client-side timeouts became detached tasks under the `io.modelcontextprotocol/tasks` extension, with polling and cooperative cancellation. |
+| **Consent** | Operations that touch untrusted or existing data—opening files, saving over paths, and closing dirty documents—became explicit elicitation round trips instead of implicit effects. |
+| **FEM** | The legacy `SolverCcxTools` auto-create became the modern `Fem::SolverCalculiX` pipeline, which returns a VTK result summary. Legacy solvers are refused with an explicit error. |
+| **Testing and packaging** | The original proxy and RPC tests were replaced with a larger headless suite that runs without a FreeCAD install. CI dropped the MCP SDK compatibility job and now asserts that the wheel ships the add-on and nothing else. |

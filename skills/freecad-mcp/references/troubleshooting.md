@@ -6,7 +6,7 @@ Use the smallest recovery step that addresses the observed failure. Preserve use
 
 ### Connection or server is unavailable
 
-Call `discover_capabilities`. If the client cannot connect, the embedded server may not be running: start it with **Start MCP Server** from the MCP Addon workbench, or enable auto-start. The default endpoint is `http://127.0.0.1:9876/mcp` (port from settings). Local mode needs no token; remote mode requires the bearer token on every request, and `PATH_NOT_ALLOWED` on file tools means the path is outside `allowed_roots`.
+Call `discover_capabilities`. If the client cannot connect, the embedded server may not be running: start it with the **Start MCP Server** toolbar action in the MCP Addon workbench, or enable auto-start in **MCP Settings**. The default endpoint is `http://127.0.0.1:9876/mcp` (port from settings). Local mode needs no token; network-access mode requires the bearer token on every request, and `PATH_NOT_ALLOWED` on file tools means the path is outside `allowed_roots`.
 
 ### Wrong document or object
 
