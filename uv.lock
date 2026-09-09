@@ -12,9 +12,9 @@ wheels = [
 ]
 
 [[package]]
-name = "freecad-mcp-addon"
+name = "freecad-embedded-mcp-addon"
 version = "2.0.0"
-source = { editable = "." }
+source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [

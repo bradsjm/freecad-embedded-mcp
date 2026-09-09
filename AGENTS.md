@@ -45,7 +45,6 @@ uv run pytest tests/test_protocol.py::TestErrorPrecedence -q           # one cla
 uv run pytest -k "consent" -q                            # keyword filter
 uv run python -m compileall addon                        # CI syntax gate
 uv lock --check                                          # lockfile sync gate
-uv build --wheel                                         # packaging check
 ```
 
 There is no lint/format gate: ruff (0.16.x cache present locally) has no config in this repo and does not run in CI. Do not rely on it.
@@ -76,19 +75,19 @@ Manual run: symlink `addon/FreeCADMCP` into FreeCAD's `Mod/` directory (paths in
 - `addon/FreeCADMCP/mcp_server/server.py` (~1950 lines) — orchestrator: tool registry, dispatch, consent choreography, deadlines (default 60 s; export/measure 600 s; `timeout_s` clamped 1–3600; preflight 30 s), the 32-concurrent-operation cap, and the 32 script-session cap (new sessions are refused, never evicted).
 - `mcp_server/http_server.py` — transport, auth, SSE. `protocol.py` — wire contract, error codes, `ConsentSigner`. `gui_dispatch.py` — GUI-thread bridge and dispatch health. `object_validation.py` — mutation gate and geometry reports. `tasks.py` — task store (1024 retained / 32 nonterminal). `subscriptions.py` — connection-scoped 256-event queues. `settings.py` — atomic, fail-closed settings (`port`, `token`, `auto_start`, `remote_enabled`, `allowed_ips`, `allowed_roots`).
 - `mcp_server/tools/` — `documents`, `objects`, `geometry`, `parameters`, `export`, `view`, `fem`, `script`.
-- `pyproject.toml` — pytest config and hatch wheel packaging. `README.md` — install, handshake, and tool docs.
+- `pyproject.toml` — pytest config. `README.md` — install, handshake, and tool docs.
 
 ## Runtime/Tooling Preferences
 
 - Package manager: **uv** (lockfile committed; keep `uv lock --check` green).
 - Python `>= 3.11` (local pin 3.11; CI matrix 3.11/3.12/3.13).
 - **Zero runtime dependencies** — the add-on runs inside FreeCAD's bundled Python. Do not add any. The dev group is pytest only.
-- Packaging contract (CI-enforced): the wheel contains exactly `FreeCADMCP/**` — no leaked `freecad_mcp/` client package, no console scripts, no entry points.
+- Distribution: the add-on ships via git and the FreeCAD Addon Manager (`package.xml`); no wheel is built or published.
 
 ## Testing & QA
 
 - pytest only; `testpaths = ["tests"]`; **no conftest.py** — each test file is self-contained, with its own stubs and its own `ADDON_DIR` sys.path preamble. Follow that convention for new tests.
 - Tests never import real FreeCAD. Stubbing tiers used across the suite: pure modules imported directly (with `FakeClock`); lazy-import tool modules exercised through `FakeCtx`/`FakeDoc` doubles; FreeCAD/Qt-importing modules loaded via `importlib` under unique names with `sys.modules` stubs; `test_http_server.py` runs a real HTTP server on port 0 through `http.client`/raw sockets; `test_server.py` drives the real `Server.dispatch` over contract-shaped fake tool modules.
 - Zero-sleep discipline: use `FakeClock` and `threading.Event` barriers, never `time.sleep`.
-- CI gates to keep green (`.github/workflows/test.yml`): `uv lock --check`; `uv run python -m compileall addon` on 3.11/3.12/3.13; `uv run pytest -q`; wheel-content assertions.
+- CI gates to keep green (`.github/workflows/test.yml`): `uv lock --check`; `uv run python -m compileall addon` on 3.11/3.12/3.13; `uv run pytest -q`.
 - Known thin spots: `commands.py` and `InitGui.py` are untested; `test_script.py` and `test_dispatch_health.py` are small; there is no end-to-end test wiring the real HTTP server into the real `Server.dispatch`.
