@@ -120,8 +120,8 @@ FreeCAD user addon directories:
 Copy or symlink the add-on directory:
 
 ```bash
-git clone https://github.com/neka-nat/freecad-mcp.git
-cd freecad-mcp
+git clone https://github.com/bradsjm/freecad-embedded-mcp.git
+cd freecad-embedded-mcp
 
 # Copy (Linux, Ubuntu/Debian)
 mkdir -p ~/.FreeCAD/Mod/
@@ -241,13 +241,13 @@ other agents:
 
 ```bash
 # List the skill without installing
-npx skills add bradsjm/freecad-mcp --list
+npx skills add bradsjm/freecad-embedded-mcp --list
 
 # Install interactively (auto-detects installed agents; symlinks by default)
-npx skills add bradsjm/freecad-mcp
+npx skills add bradsjm/freecad-embedded-mcp
 
 # Install globally to specific agents, non-interactive
-npx skills add bradsjm/freecad-mcp --skill freecad-mcp -g -a claude-code -a codex -y
+npx skills add bradsjm/freecad-embedded-mcp --skill freecad-mcp -g -a claude-code -a codex -y
 ```
 
 Project installs land in `./<agent>/skills/` (for example `.claude/skills/`); `-g` installs to
@@ -255,7 +255,7 @@ Project installs land in `./<agent>/skills/` (for example `.claude/skills/`); `-
 `--copy` when symlinks are not available. To use the skill once without installing:
 
 ```bash
-npx skills use bradsjm/freecad-mcp --skill freecad-mcp --agent claude-code
+npx skills use bradsjm/freecad-embedded-mcp --skill freecad-mcp --agent claude-code
 ```
 
 Manage an installed skill with `npx skills list`, `npx skills update freecad-mcp`, and

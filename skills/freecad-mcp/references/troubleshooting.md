@@ -61,7 +61,7 @@ Do not force-cancel a running GUI operation or start parallel FEM/GUI calls.
 
 ## FEM failure
 
-Confirm the analysis contains the solid, material, generated Gmsh mesh, fixed constraint, force/pressure constraint, and a modern `Fem::SolverCalculiX` solver; `run_fem` selects or creates the modern solver and refuses legacy `Fem::SolverCcxTools` or ambiguous setups. Missing CalculiX produces an actionable error, never an auto-install. A solver failure reports `SOLVER_FAILED`; report the actual error and working directory. Cancellation is cooperative: a running solve is never killed. Use the dependency-free [client example](https://github.com/neka-nat/freecad-mcp/blob/main/examples/cantilever_fem.py) as the working reference.
+Confirm the analysis contains the solid, material, generated Gmsh mesh, fixed constraint, force/pressure constraint, and a modern `Fem::SolverCalculiX` solver; `run_fem` selects or creates the modern solver and refuses legacy `Fem::SolverCcxTools` or ambiguous setups. Missing CalculiX produces an actionable error, never an auto-install. A solver failure reports `SOLVER_FAILED`; report the actual error and working directory. Cancellation is cooperative: a running solve is never killed. Use the dependency-free [client example](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/examples/cantilever_fem.py) as the working reference.
 
 ## Export mismatch
 
@@ -74,8 +74,8 @@ If a downstream consumer of an exported file reports a scale, placement, hole, o
 
 ## Sources
 
-- [FreeCAD MCP README](https://github.com/neka-nat/freecad-mcp/blob/main/README.md)
-- [Server orchestrator](https://github.com/neka-nat/freecad-mcp/blob/main/addon/FreeCADMCP/mcp_server/server.py)
-- [GUI dispatch](https://github.com/neka-nat/freecad-mcp/blob/main/addon/FreeCADMCP/mcp_server/gui_dispatch.py)
-- [Object validation](https://github.com/neka-nat/freecad-mcp/blob/main/addon/FreeCADMCP/mcp_server/object_validation.py)
+- [FreeCAD MCP README](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/README.md)
+- [Server orchestrator](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/addon/FreeCADMCP/mcp_server/server.py)
+- [GUI dispatch](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/addon/FreeCADMCP/mcp_server/gui_dispatch.py)
+- [Object validation](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/addon/FreeCADMCP/mcp_server/object_validation.py)
 - [Part Check Geometry](https://wiki.freecad.org/Part_CheckGeometry)

@@ -1,6 +1,6 @@
 # FreeCAD MCP tool contract
 
-Use this file for exact tool behavior. The authoritative implementation is the [FreeCAD MCP repository](https://github.com/neka-nat/freecad-mcp) under [`addon/FreeCADMCP/mcp_server/`](https://github.com/neka-nat/freecad-mcp/tree/main/addon/FreeCADMCP/mcp_server): `server.py` (registry, dispatch, deadlines, consent), `protocol.py` (wire contract), `http_server.py` (transport and auth), `gui_dispatch.py` (GUI-thread bridge), and `tools/` (one module per tool domain).
+Use this file for exact tool behavior. The authoritative implementation is the [FreeCAD MCP repository](https://github.com/bradsjm/freecad-embedded-mcp) under [`addon/FreeCADMCP/mcp_server/`](https://github.com/bradsjm/freecad-embedded-mcp/tree/main/addon/FreeCADMCP/mcp_server): `server.py` (registry, dispatch, deadlines, consent), `protocol.py` (wire contract), `http_server.py` (transport and auth), `gui_dispatch.py` (GUI-thread bridge), and `tools/` (one module per tool domain).
 
 ## Architecture
 
@@ -106,8 +106,8 @@ The bearer token is full local code-execution authority: `run_script` is not res
 
 ## Sources
 
-- [FreeCAD MCP README](https://github.com/neka-nat/freecad-mcp/blob/main/README.md)
-- [Server orchestrator](https://github.com/neka-nat/freecad-mcp/blob/main/addon/FreeCADMCP/mcp_server/server.py)
-- [Tool modules](https://github.com/neka-nat/freecad-mcp/tree/main/addon/FreeCADMCP/mcp_server/tools)
-- [GUI dispatch](https://github.com/neka-nat/freecad-mcp/blob/main/addon/FreeCADMCP/mcp_server/gui_dispatch.py)
-- [Dependency-free client example (FEM)](https://github.com/neka-nat/freecad-mcp/blob/main/examples/cantilever_fem.py)
+- [FreeCAD MCP README](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/README.md)
+- [Server orchestrator](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/addon/FreeCADMCP/mcp_server/server.py)
+- [Tool modules](https://github.com/bradsjm/freecad-embedded-mcp/tree/main/addon/FreeCADMCP/mcp_server/tools)
+- [GUI dispatch](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/addon/FreeCADMCP/mcp_server/gui_dispatch.py)
+- [Dependency-free client example (FEM)](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/examples/cantilever_fem.py)

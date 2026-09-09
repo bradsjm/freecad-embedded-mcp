@@ -100,4 +100,4 @@ A structurally adequate bulk-solid simulation does not prove real-world strength
 - [FEM Solver CalculiX](https://wiki.freecad.org/FEM_SolverCalculixCcxtools)
 - [FEM Solver Run](https://wiki.freecad.org/FEM_SolverRun)
 - [CalculiX cantilever example](https://wiki.freecad.org/FEM_CalculiX_Cantilever_3D)
-- [FreeCAD MCP FEM example](https://github.com/neka-nat/freecad-mcp/blob/main/examples/cantilever_fem.py)
+- [FreeCAD MCP FEM example](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/examples/cantilever_fem.py)

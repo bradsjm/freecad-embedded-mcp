@@ -55,4 +55,4 @@ Honor this user's preference: handle complex CAD design and model mutation direc
 
 ## Version and source scope
 
-Target FreeCAD release is 1.1; the add-in fails closed outside `1.1.3 <= version < 1.2`, and the live environment previously reported 1.1.3. The MCP server is embedded in the add-on at `addon/FreeCADMCP/mcp_server/` in the freecad-mcp repository; the default endpoint is `http://127.0.0.1:9876/mcp`. Use English FreeCAD wiki pages only, linked through `https://wiki.freecad.org/`.
+Target FreeCAD release is 1.1; the add-in fails closed outside `1.1.3 <= version < 1.2`, and the live environment previously reported 1.1.3. The MCP server is embedded in the add-on at `addon/FreeCADMCP/mcp_server/` in the freecad-embedded-mcp repository; the default endpoint is `http://127.0.0.1:9876/mcp`. Use English FreeCAD wiki pages only, linked through `https://wiki.freecad.org/`.
