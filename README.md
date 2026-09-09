@@ -1,9 +1,82 @@
-[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/neka-nat-freecad-mcp-badge.png)](https://mseep.ai/app/neka-nat-freecad-mcp)
-
 # FreeCAD MCP
 
 FreeCAD add-on that embeds a Model Context Protocol server inside FreeCAD,
 letting MCP clients drive FreeCAD directly over a local HTTP connection.
+
+This version is a full rewrite of the original freecad-mcp as an embedded
+MCP server, built on the great work in the original project.
+
+## Rewrite summary
+
+The original [freecad-mcp](https://github.com/neka-nat/freecad-mcp) ran as
+two processes: an MCP proxy installed from PyPI (`uvx freecad-mcp`) that an
+MCP client such as Claude Desktop launched over stdio, and an XML-RPC
+server inside FreeCAD on port `9875` that the proxy relayed tool calls to.
+This rewrite embeds the MCP server in FreeCAD's own process, so clients
+connect to FreeCAD directly. The GUI-thread architecture and the workflow
+concepts listed below carry over from the original.
+
+### What was rewritten
+
+* **Architecture.** The PyPI proxy package (`src/freecad_mcp`, FastMCP over
+  stdio) and the in-FreeCAD XML-RPC server are gone. One embedded server
+  speaks MCP over Streamable HTTP (JSON-RPC + SSE) at
+  `http://127.0.0.1:9876/mcp`; no pip or uvx install and no client config
+  file are needed.
+* **Protocol.** XML-RPC with ad-hoc dictionaries became the MCP JSON-RPC
+  wire protocol, version `2026-07-28`, with request-metadata headers,
+  capability negotiation, and session-based support for the 2025
+  Streamable HTTP revisions.
+* **Tools.** Fifteen loosely typed tools became 17 tools validated against
+  JSON input and output schemas, with structured error codes and paginated
+  results. `execute_code` became `run_script`; `get_view` became
+  `capture_view`; `get_rpc_status` became `discover_capabilities`;
+  `insert_part_from_library` and `get_parts_list` were dropped — the parts
+  library is reachable through `run_script`.
+* **Security.** The IP allow-list alone became two explicit modes: local
+  (loopback bind, Host/Origin checks, no token) and remote (bind to all
+  interfaces, mandatory bearer token, optional CIDR allow-list), plus
+  `allowed_roots` path containment for the file-touching tools.
+* **Document safety.** Unvalidated success/error dictionaries became
+  MCP-owned transactions with prevalidation, rollback, dependent-object
+  checks and solid-count baselines.
+* **Long-running work.** Blocking calls with client-side timeouts became
+  detached tasks under the `io.modelcontextprotocol/tasks` extension, with
+  polling and cooperative cancellation.
+* **Consent.** Operations that touch untrusted or existing data — opening
+  files, saving over paths, closing dirty documents — became explicit
+  elicitation round trips instead of implicit effects.
+* **FEM.** The legacy `SolverCcxTools` auto-create became the modern
+  `Fem::SolverCalculiX` pipeline returning a VTK result summary; legacy
+  solvers are refused with an explicit error.
+* **Testing and packaging.** The original's proxy and RPC tests were
+  replaced with a larger headless suite that runs without a FreeCAD
+  install; CI dropped the MCP SDK compatibility job and now asserts the
+  wheel ships the add-on and nothing else.
+
+### Carried over from the original
+
+* **GUI-thread dispatch.** A queue still ferries every FreeCAD operation to
+  the main thread, woken by a Qt signal with a 500 ms heartbeat fallback,
+  and ticks are still skipped while a mouse button is held so MCP work
+  never interrupts 3D navigation.
+* **Dispatch health.** A GUI operation that overruns its timeout still
+  fails fast and blocks later GUI operations until healthy —
+  `dispatch_health.py` moved across almost unchanged, now reported through
+  `discover_capabilities`.
+* **Persistent script namespace.** `execute_code`'s shared namespace with
+  `FreeCAD`/`App` and `Gui` aliases survives as `run_script` sessions.
+* **Add-on UX.** The "MCP Addon" workbench, the "FreeCAD MCP" toolbar and
+  menu, the Auto-Start toggle, and settings in `freecad_mcp_settings.json`
+  under FreeCAD's user app-data directory.
+* **Remote connections and allowed IPs.** The CIDR allow-list carried over
+  (`ip_parse.py`); enabling remote now additionally requires the bearer
+  token, and the allow-list defaults to "any host" instead of `127.0.0.1`.
+* **CalculiX FEM with a summary result, view screenshots with named
+  orientations, and the cantilever FEM example** all survive in their new
+  tool forms.
+* **The demos below** were produced with the original add-on and still show
+  the workflow this rewrite serves.
 
 ## Demo
 
@@ -139,11 +212,7 @@ must:
    prompt, and long-running operations return final results.
 
 Clients that speak the 2025 Streamable HTTP revisions connect without any
-client-side changes: `initialize` with `protocolVersion` `2025-03-26`,
-`2025-06-18`, or `2025-11-25` (an unsupported offered version negotiates
-`2025-11-25`), then address the session with the returned
-`MCP-Session-Id` header. No modern request-metadata headers are required
-on legacy messages. Legacy sessions degrade deliberately:
+client-side changes. Legacy sessions degrade deliberately:
 
 * Tools always return final results; tasks are never offered, so
   long-running operations simply block until they finish.
@@ -158,6 +227,40 @@ on legacy messages. Legacy sessions degrade deliberately:
 
 [`examples/cantilever_fem.py`](examples/cantilever_fem.py) is a complete,
 dependency-free client example that shows this handshake and a full FEM run.
+
+## Agent skill
+
+The repository ships an agent skill in [`skills/freecad-mcp/`](skills/freecad-mcp/SKILL.md). The
+skill teaches coding agents how to drive this server: the 17-tool contract, FreeCAD modeling
+patterns, geometry validation, FEM, and export. It complements the MCP connection — the agent
+still talks to `http://127.0.0.1:9876/mcp`; the skill tells it how to use the tools well.
+
+[`npx skills`](https://github.com/vercel-labs/skills) is the official installer for the open
+agent skills ecosystem. It requires Node.js and supports Claude Code, Codex, Cursor, and 75+
+other agents:
+
+```bash
+# List the skill without installing
+npx skills add bradsjm/freecad-mcp --list
+
+# Install interactively (auto-detects installed agents; symlinks by default)
+npx skills add bradsjm/freecad-mcp
+
+# Install globally to specific agents, non-interactive
+npx skills add bradsjm/freecad-mcp --skill freecad-mcp -g -a claude-code -a codex -y
+```
+
+Project installs land in `./<agent>/skills/` (for example `.claude/skills/`); `-g` installs to
+`~/<agent>/skills/` for all projects. The CLI symlinks to one canonical copy by default; pass
+`--copy` when symlinks are not available. To use the skill once without installing:
+
+```bash
+npx skills use bradsjm/freecad-mcp --skill freecad-mcp --agent claude-code
+```
+
+Manage an installed skill with `npx skills list`, `npx skills update freecad-mcp`, and
+`npx skills remove freecad-mcp`. Start the server (**Start MCP Server**), connect the agent to
+the endpoint as described above, and the skill supplies the operating procedure.
 
 ## Tools
 
@@ -263,11 +366,3 @@ uv run pytest -q
 ```
 
 The project targets Python 3.11+ and has no runtime dependencies.
-
-## Contributors
-
-<a href="https://github.com/neka-nat/freecad-mcp/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=neka-nat/freecad-mcp" />
-</a>
-
-Made with [contrib.rocks](https://contrib.rocks).

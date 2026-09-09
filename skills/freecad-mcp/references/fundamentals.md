@@ -1,0 +1,71 @@
+# FreeCAD fundamentals for MCP
+
+Use this reference when a task involves document state, object types, properties, or the App/GUI boundary.
+
+## App and GUI objects
+
+FreeCAD separates application data from its graphical representation. `App`/`FreeCAD` owns documents, objects, geometry definitions, and properties; `Gui`/`FreeCADGui` owns views and presentation. The [Document structure](https://wiki.freecad.org/Document_structure) and [FreeCAD Scripting Basics](https://wiki.freecad.org/FreeCAD_Scripting_Basics) pages describe this split.
+
+For MCP work:
+
+- Use `inspect_objects` to inspect application objects; request `detail: "full"` when serialized properties are useful.
+- Use the structured tools (`create_object`, `edit_object`, `edit_parameters`, `delete_object`) for covered document mutations; use `run_script` for `FreeCAD`/`App` and `FreeCADGui`/`Gui` operations the tools do not cover.
+- Use `capture_view` for a screenshot rather than trying to treat a screenshot as geometry evidence. It needs an explicit orientation and a focus object and returns PNG image content.
+- All tool execution and `run_script` code run on the GUI thread; there is no asynchronous execution path.
+
+## Documents and object identity
+
+A document contains the objects in a scene and is what FreeCAD saves to disk. It can contain groups and objects from multiple workbenches. Documents may have multiple views and only one active document at a time.
+
+Use this pattern through `run_script` when direct Python is useful:
+
+```python
+import FreeCAD as App
+
+doc = App.ActiveDocument or App.newDocument("BuiltPart")
+print(doc.Name, doc.FileName)
+print([(obj.Name, obj.Label, obj.TypeId) for obj in doc.Objects])
+```
+
+Use MCP `new_document` for a simple new document. There is no list-documents tool; enumerate open documents with `App.listDocuments()` through `run_script`. Use `reload_document` only after an external process edited the associated file; it asks for consent when the document is dirty.
+
+Object `Name` is the internal identifier used for links and MCP follow-up calls. `Label` is display text and may change. FreeCAD sanitizes and de-duplicates names; every create response returns the actual name. Never assume the requested name survived unchanged.
+
+## Object types and properties
+
+FreeCAD modules register document object types. `discover_capabilities` reports the installation's complete `supportedTypes` list. This inspection through `run_script` remains useful during a session:
+
+```python
+print("Part::Box" in App.ActiveDocument.supportedTypes())
+print([t for t in App.ActiveDocument.supportedTypes() if t.startswith(("Part::", "PartDesign::", "Draft::", "Fem::"))])
+```
+
+`create_object` uses `doc.addObject(type, name)` for generic Part/App types and an explicit `ObjectsFem` factory mapping for FEM types. The registered object type determines which properties exist. Inspect `PropertiesList` through `inspect_objects(detail="full")` before editing unfamiliar objects.
+
+A Part feature stores BRep geometry in `Shape`; a mesh feature stores mesh data in `Mesh`; a Body stores a feature history and exposes a `Tip`. Do not assign a mesh to a Shape property or overwrite a parametric feature casually.
+
+## Recompute discipline
+
+FreeCAD marks dependent features for recomputation after a property or geometry change. Recompute explicitly in scripts before inspecting metrics or exporting:
+
+```python
+doc.recompute()
+print(obj.State, obj.Shape.isValid())
+```
+
+`create_object`, `edit_object`, `edit_parameters`, and `delete_object` recompute inside an MCP-owned transaction and validate the edited object, its dependents, and solid-count baselines. A successful tool response is not permission to ignore an invalid state; inspect the returned geometry report.
+
+## Units and quantities
+
+Use millimetres for CAD dimensions and state the unit assumption. FreeCAD quantity properties accept plain numbers through `edit_object` in the property's internal unit, or explicit strings such as `"5 mm"`, `"100 N"`, `"210 GPa"` through `run_script`. STL has no unit metadata; the FreeCAD export guidance assumes millimetres.
+
+## Sources
+
+- [Document structure](https://wiki.freecad.org/Document_structure)
+- [FreeCAD Scripting Basics](https://wiki.freecad.org/FreeCAD_Scripting_Basics)
+- [Property](https://wiki.freecad.org/Property)
+- [Property editor](https://wiki.freecad.org/Property_editor)
+- [Object name](https://wiki.freecad.org/Object_name)
+- [Units](https://wiki.freecad.org/Units)
+- [Quantity](https://wiki.freecad.org/Quantity)
+- [FreeCAD 1.1 release notes](https://wiki.freecad.org/Release_notes_1.1)
