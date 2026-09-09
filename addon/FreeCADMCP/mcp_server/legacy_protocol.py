@@ -32,10 +32,14 @@ import threading
 import time
 import traceback
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any
 
+# Shared envelope helpers reused so the header mirroring rules cannot drift
+# between the modern and legacy validators (plan section 2a).
 from mcp_server.protocol import (
+    _NAME_SOURCES,
     CONSENT_DENIED,
     DEFAULT_CONSENT_TTL_S,
     HEADER_MISMATCH,
@@ -51,16 +55,11 @@ from mcp_server.protocol import (
     SERVER_INFO,
     ProtocolError,
     ToolError,
+    _validate_param_headers,
     error_response,
     header_matches_body,
     header_source_value,
     tool_error_result,
-)
-# Shared envelope helpers reused so the header mirroring rules cannot drift
-# between the modern and legacy validators (plan section 2a).
-from mcp_server.protocol import (  # noqa: F401 - same-package private reuse
-    _NAME_SOURCES,
-    _validate_param_headers,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -99,14 +98,10 @@ INITIALIZE_FIRST_MESSAGE = (
     "2025-03-26, 2025-06-18, 2025-11-25, 2026-07-28."
 )
 NOT_INITIALIZED_MESSAGE = "Session initialization is not complete."
-SESSION_LIMIT_MESSAGE = (
-    "MCP session limit reached; close an existing session and retry."
-)
+SESSION_LIMIT_MESSAGE = "MCP session limit reached; close an existing session and retry."
 TOO_MANY_REQUESTS_MESSAGE = "Too many requests in batch"
 UNKNOWN_SESSION_MESSAGE = "unknown or expired MCP session"
-INITIALIZER_SESSION_ID_MESSAGE = (
-    "MCP-Session-Id must be omitted when initializing a new session"
-)
+INITIALIZER_SESSION_ID_MESSAGE = "MCP-Session-Id must be omitted when initializing a new session"
 CANCELLED_BEFORE_EXECUTION_MESSAGE = "Operation cancelled before execution"
 OPERATION_LIMIT_MESSAGE = "Too many active operations; wait for one to finish"
 
@@ -188,7 +183,7 @@ class LegacyReply:
     status: int
     payload: dict | None
     headers: tuple[tuple[str, str], ...] = ()
-    stream: "StreamResponse | None" = None
+    stream: StreamResponse | None = None
 
 
 @dataclass
@@ -282,9 +277,7 @@ class LegacyProtocol:
             )
         if message.get("method") == "initialize" and not has_modern_metadata(message):
             if session_id is not None:
-                return _error_reply(
-                    400, INVALID_REQUEST, INITIALIZER_SESSION_ID_MESSAGE
-                )
+                return _error_reply(400, INVALID_REQUEST, INITIALIZER_SESSION_ID_MESSAGE)
             return self._handle_initialize(message, lowered, principal)
         if session_id is None:
             return _error_reply(400, INVALID_REQUEST, INITIALIZE_FIRST_MESSAGE)
@@ -331,13 +324,9 @@ class LegacyProtocol:
             for session in sessions:
                 session.closed = True
             actives = [
-                active
-                for session in sessions
-                for active in session.active_requests.values()
+                active for session in sessions for active in session.active_requests.values()
             ]
-            waiters = [
-                waiter for session in sessions for waiter in session.pending.values()
-            ]
+            waiters = [waiter for session in sessions for waiter in session.pending.values()]
         for active in actives:
             active.cancel_event.set()
         for waiter in waiters:
@@ -363,8 +352,7 @@ class LegacyProtocol:
         expired = [
             session_id
             for session_id, session in self._sessions.items()
-            if session.active == 0
-            and now - session.last_activity > SESSION_IDLE_TIMEOUT_S
+            if session.active == 0 and now - session.last_activity > SESSION_IDLE_TIMEOUT_S
         ]
         for session_id in expired:
             session = self._sessions.pop(session_id)
@@ -374,9 +362,7 @@ class LegacyProtocol:
     # Initialize
     # ------------------------------------------------------------------
 
-    def _handle_initialize(
-        self, message: dict, lowered: dict, principal: str
-    ) -> LegacyReply:
+    def _handle_initialize(self, message: dict, lowered: dict, principal: str) -> LegacyReply:
         envelope_error = self._envelope_error(message, require_request=True)
         if envelope_error is not None:
             return envelope_error
@@ -409,9 +395,7 @@ class LegacyProtocol:
                 "invalid parameters: capabilities must be an object",
             )
         negotiated = (
-            offered
-            if offered in LEGACY_PROTOCOL_VERSIONS
-            else LATEST_LEGACY_PROTOCOL_VERSION
+            offered if offered in LEGACY_PROTOCOL_VERSIONS else LATEST_LEGACY_PROTOCOL_VERSION
         )
         session_id = secrets.token_urlsafe(32)
         with self._lock:
@@ -449,9 +433,7 @@ class LegacyProtocol:
     # Per-session routing
     # ------------------------------------------------------------------
 
-    def _route(
-        self, session: _LegacySession, message: dict, lowered: dict
-    ) -> LegacyReply:
+    def _route(self, session: _LegacySession, message: dict, lowered: dict) -> LegacyReply:
         header_error = self._header_error(session, message, lowered)
         if header_error is not None:
             return header_error
@@ -466,9 +448,7 @@ class LegacyProtocol:
             return _error_reply(400, INVALID_REQUEST, NOT_INITIALIZED_MESSAGE)
         method = message["method"]
         if method == "ping":
-            return LegacyReply(
-                200, {"jsonrpc": JSONRPC_VERSION, "id": message["id"], "result": {}}
-            )
+            return LegacyReply(200, {"jsonrpc": JSONRPC_VERSION, "id": message["id"], "result": {}})
         if method == "tools/call":
             param_error = _reject_client_consent_fields(message.get("params", {}))
             if param_error is not None:
@@ -484,9 +464,7 @@ class LegacyProtocol:
             ),
         )
 
-    def _route_client_response(
-        self, session: _LegacySession, message: dict
-    ) -> LegacyReply:
+    def _route_client_response(self, session: _LegacySession, message: dict) -> LegacyReply:
         """Route a client JSON-RPC response to its pending elicitation."""
 
         response_id = message.get("id")
@@ -517,9 +495,7 @@ class LegacyProtocol:
             waiter.event.set()
         return LegacyReply(202, None)
 
-    def _route_notification(
-        self, session: _LegacySession, message: dict
-    ) -> LegacyReply:
+    def _route_notification(self, session: _LegacySession, message: dict) -> LegacyReply:
         method = message["method"]
         if method == "notifications/initialized":
             with self._lock:
@@ -531,8 +507,7 @@ class LegacyProtocol:
             with self._lock:
                 active = (
                     session.active_requests.get(request_id)
-                    if isinstance(request_id, (str, int))
-                    and not isinstance(request_id, bool)
+                    if isinstance(request_id, (str, int)) and not isinstance(request_id, bool)
                     else None
                 )
                 if active is not None:
@@ -552,9 +527,7 @@ class LegacyProtocol:
     @staticmethod
     def _envelope_error(message: dict, *, require_request: bool) -> LegacyReply | None:
         if message.get("jsonrpc") != JSONRPC_VERSION:
-            return _error_reply(
-                400, INVALID_REQUEST, 'malformed envelope: jsonrpc must be "2.0"'
-            )
+            return _error_reply(400, INVALID_REQUEST, 'malformed envelope: jsonrpc must be "2.0"')
         if "method" in message:
             method = message["method"]
             if not isinstance(method, str) or not method:
@@ -582,9 +555,7 @@ class LegacyProtocol:
         return None
 
     @staticmethod
-    def _header_error(
-        session: _LegacySession, message: dict, lowered: dict
-    ) -> LegacyReply | None:
+    def _header_error(session: _LegacySession, message: dict, lowered: dict) -> LegacyReply | None:
         """Validate optional mirror headers against the actual legacy body."""
 
         version_header = lowered.get(PROTOCOL_VERSION_HEADER)
@@ -613,9 +584,7 @@ class LegacyProtocol:
             try:
                 value = header_source_value(method_header)
             except ValueError as exc:
-                return _error_reply(
-                    400, HEADER_MISMATCH, f"header mismatch: Mcp-Method: {exc}"
-                )
+                return _error_reply(400, HEADER_MISMATCH, f"header mismatch: Mcp-Method: {exc}")
             if value != method:
                 return _error_reply(
                     400,
@@ -627,9 +596,7 @@ class LegacyProtocol:
             try:
                 header_source_value(name_header)
             except ValueError as exc:
-                return _error_reply(
-                    400, HEADER_MISMATCH, f"header mismatch: Mcp-Name: {exc}"
-                )
+                return _error_reply(400, HEADER_MISMATCH, f"header mismatch: Mcp-Name: {exc}")
             name_source = _NAME_SOURCES.get(method)
             if name_source is not None and (
                 name_source not in params
@@ -676,9 +643,7 @@ class LegacyProtocol:
                     message["id"],
                 ),
             )
-        return LegacyReply(
-            200, legacy_result(outcome, session.version, message["method"])
-        )
+        return LegacyReply(200, legacy_result(outcome, session.version, message["method"]))
 
     # ------------------------------------------------------------------
     # Streamed tools/call (single request or batch member)
@@ -693,13 +658,9 @@ class LegacyProtocol:
                 return _error_reply(503, INTERNAL_ERROR, "server is shutting down")
             self._prune_locked()
             if request_id in session.active_requests:
-                return _error_reply(
-                    400, INVALID_REQUEST, "duplicate active request id"
-                )
+                return _error_reply(400, INVALID_REQUEST, "duplicate active request id")
             if self._inflight >= MAX_INFLIGHT_LEGACY_REQUESTS:
-                return LegacyReply(
-                    200, self._busy_tool_payload(session, request_id)
-                )
+                return LegacyReply(200, self._busy_tool_payload(session, request_id))
             active = _ActiveRequest(request_id=request_id)
             session.active_requests[request_id] = active
             session.active += 1
@@ -713,7 +674,7 @@ class LegacyProtocol:
     ) -> LegacyReply:
         from mcp_server.http_server import StreamResponse  # local: import cycle
 
-        outer: "queue.SimpleQueue" = queue.SimpleQueue()
+        outer: queue.SimpleQueue = queue.SimpleQueue()
         threading.Thread(
             target=self._produce_members,
             args=(session, members, outer),
@@ -726,7 +687,7 @@ class LegacyProtocol:
         self,
         session: _LegacySession,
         members: list[tuple[dict, _ActiveRequest | None]],
-        outer: "queue.SimpleQueue",
+        outer: queue.SimpleQueue,
     ) -> None:
         try:
             self._produce_member_loop(session, members, outer)
@@ -737,7 +698,7 @@ class LegacyProtocol:
         self,
         session: _LegacySession,
         members: list[tuple[dict, _ActiveRequest | None]],
-        outer: "queue.SimpleQueue",
+        outer: queue.SimpleQueue,
     ) -> None:
         for message, active in members:
             try:
@@ -757,7 +718,7 @@ class LegacyProtocol:
                 )
 
     def _produce_inline_member(
-        self, session: _LegacySession, message: dict, outer: "queue.SimpleQueue"
+        self, session: _LegacySession, message: dict, outer: queue.SimpleQueue
     ) -> None:
         method = message["method"]
         request_id = message.get("id")
@@ -813,7 +774,7 @@ class LegacyProtocol:
         session: _LegacySession,
         active: _ActiveRequest,
         message: dict,
-        outer: "queue.SimpleQueue",
+        outer: queue.SimpleQueue,
     ) -> None:
         try:
             self._run_tool_call(session, active, message, outer)
@@ -829,7 +790,7 @@ class LegacyProtocol:
         session: _LegacySession,
         active: _ActiveRequest,
         message: dict,
-        outer: "queue.SimpleQueue",
+        outer: queue.SimpleQueue,
     ) -> None:
         request_id = message["id"]
         version = session.version
@@ -843,9 +804,7 @@ class LegacyProtocol:
                 return
             try:
                 outcome = self._dispatch(
-                    _normalize_request(
-                        session, request, cancel_event=active.cancel_event
-                    ),
+                    _normalize_request(session, request, cancel_event=active.cancel_event),
                     session.dispatch_principal,
                     session.session_id,
                 )
@@ -891,7 +850,7 @@ class LegacyProtocol:
         request: dict,
         outcome: dict,
         deadline: float,
-        outer: "queue.SimpleQueue",
+        outer: queue.SimpleQueue,
     ) -> dict | None:
         """Run one elicitation round trip; return the retry request or None.
 
@@ -959,16 +918,10 @@ class LegacyProtocol:
                 if active.cancel_event.is_set():
                     outer.put(_cancelled_result(request_id, version))
                 else:
-                    outer.put(
-                        _consent_denied_result(request_id, version, "session closed")
-                    )
+                    outer.put(_consent_denied_result(request_id, version, "session closed"))
                 return None
             if _classify_elicitation(response) == "invalid":
-                outer.put(
-                    _consent_denied_result(
-                        request_id, version, "invalid consent response"
-                    )
-                )
+                outer.put(_consent_denied_result(request_id, version, "invalid consent response"))
                 return None
             retry = dict(request)
             retry_params = dict(request.get("params", {}))
@@ -987,7 +940,7 @@ class LegacyProtocol:
         inner: Any,
         request_id: Any,
         version: str,
-        outer: "queue.SimpleQueue",
+        outer: queue.SimpleQueue,
     ) -> None:
         """Relay the modern blocking stream's single terminal message.
 
@@ -1008,9 +961,7 @@ class LegacyProtocol:
                     inner._finalize(disconnected=True)
                     outer.put(
                         error_response(
-                            ProtocolError(
-                                INTERNAL_ERROR, "tool result stream failed."
-                            ),
+                            ProtocolError(INTERNAL_ERROR, "tool result stream failed."),
                             request_id,
                         )
                     )
@@ -1030,8 +981,7 @@ class LegacyProtocol:
                         error_response(
                             ProtocolError(
                                 INTERNAL_ERROR,
-                                "modern-only result cannot be delivered to a "
-                                "legacy client",
+                                "modern-only result cannot be delivered to a legacy client",
                             ),
                             request_id,
                         )
@@ -1128,9 +1078,7 @@ class LegacyProtocol:
         with self._lock:
             for member in requests:
                 if member["id"] in session.active_requests:
-                    return _error_reply(
-                        400, INVALID_REQUEST, "duplicate active request id"
-                    )
+                    return _error_reply(400, INVALID_REQUEST, "duplicate active request id")
             free = MAX_INFLIGHT_LEGACY_REQUESTS - self._inflight
             overflow: list[dict] = []
             reservable = min(len(call_members), max(0, free))
@@ -1143,9 +1091,7 @@ class LegacyProtocol:
             overflow = call_members[reservable:]
         for member in notifications:
             self._route_notification(session, member)
-        inline = [
-            (member, None) for member in requests if member["method"] != "tools/call"
-        ]
+        inline = [(member, None) for member in requests if member["method"] != "tools/call"]
         if overflow:
             # Excess tools/call members are rejected as SERVER_BUSY tool
             # results; they never reserve state.
@@ -1161,7 +1107,7 @@ class LegacyProtocol:
     ) -> LegacyReply:
         from mcp_server.http_server import StreamResponse  # local: import cycle
 
-        outer: "queue.SimpleQueue" = queue.SimpleQueue()
+        outer: queue.SimpleQueue = queue.SimpleQueue()
 
         def produce() -> None:
             try:
@@ -1234,9 +1180,7 @@ def _normalize_capabilities(capabilities: Mapping[str, Any], version: str) -> di
     elicitation = capabilities.get("elicitation")
     if version == "2025-06-18":
         return {"elicitation": {"form": {}}} if elicitation is not None else {}
-    if isinstance(elicitation, Mapping) and (
-        "form" in elicitation or len(elicitation) == 0
-    ):
+    if isinstance(elicitation, Mapping) and ("form" in elicitation or len(elicitation) == 0):
         return {"elicitation": {"form": {}}}
     return {}
 
@@ -1322,7 +1266,5 @@ def _classify_elicitation(response: Any) -> str:
     return "invalid"
 
 
-def _error_reply(
-    status: int, code: int, message: str, data: Any = None
-) -> LegacyReply:
+def _error_reply(status: int, code: int, message: str, data: Any = None) -> LegacyReply:
     return LegacyReply(status, error_response(ProtocolError(code, message, data)))

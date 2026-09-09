@@ -14,8 +14,53 @@ dependencies = []
 [dependency-groups]
 dev = [
     "pytest>=8,<10",
+    "ruff>=0.16,<0.17",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+# Markdown code fences are illustrative documentation, not code under test.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle errors and warnings, plus line length
+    "E4", "E7", "E9", "E501", "W",
+    # Pyflakes: undefined names, unused imports/variables, redefinitions
+    "F",
+    # import sorting and import hygiene
+    "I",
+    # pyupgrade: modern Python 3.11 syntax
+    "UP",
+    # flake8-bugbear: real logic hazards
+    "B",
+    # flake8-comprehensions and flake8-simplify
+    "C4", "SIM",
+    # Ruff-specific correctness and modernization rules
+    "RUF",
+    # implicit string concatenation in collection literals
+    "ISC",
+    # comparisons, imports, subprocess, and loop-variable correctness
+    "PLR0124", "PLR0402", "PLW1510", "PLW1641", "PLW2901",
+    # stray print statements outside the stdlib-only example client
+    "T20",
+]
+ignore = [
+    # Prefer explicit try/except over contextlib.suppress here: the mutation
+    # gate and transport layers attach diagnostics per branch, and a bare
+    # suppress would hide which native call failed.
+    "SIM105",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The example client is a stdlib-only demo whose whole output is print().
+"examples/*.py" = ["T20"]
+# Tests insert the add-on path before importing mcp_server.*, so imports
+# legitimately follow code. They also use FreeCAD-shaped camelCase doubles
+# and mutable class-level stub state.
+"tests/*.py" = ["E402", "RUF012", "PLW1641"]
 

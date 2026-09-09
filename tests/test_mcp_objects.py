@@ -19,13 +19,12 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server.protocol import (  # noqa: E402
+from mcp_server.protocol import (
     DOCUMENT_NOT_FOUND,
     OBJECT_NOT_FOUND,
     VALIDATION_FAILED,
-    ToolError,
     ConsentSigner,
-    check_schema,
+    ToolError,
     validate_schema,
 )
 
@@ -155,9 +154,9 @@ def _uninstall_stubs() -> None:
 
 _install_stubs()
 try:
-    from mcp_server.tools import objects as objects_mod  # noqa: E402
-    from mcp_server.tools import parameters as parameters_mod  # noqa: E402
-    from mcp_server import object_validation as ov  # noqa: E402
+    from mcp_server import object_validation as ov
+    from mcp_server.tools import objects as objects_mod
+    from mcp_server.tools import parameters as parameters_mod
 finally:
     _uninstall_stubs()
 
@@ -213,7 +212,9 @@ class FakeShape:
     def BoundBox(self) -> Any:
         box = types.SimpleNamespace()
         for name, value in zip(
-            ("XMin", "YMin", "ZMin", "XMax", "YMax", "ZMax"), self._bounds
+            ("XMin", "YMin", "ZMin", "XMax", "YMax", "ZMax"),
+            self._bounds,
+            strict=True,
         ):
             setattr(box, name, value)
         return box
@@ -640,8 +641,7 @@ def test_valid_target_with_invalid_dependent_shape_rolls_back() -> None:
 
     error = expect_tool_error(exc_info, VALIDATION_FAILED)
     assert any(
-        "Broken" in message and "invalid shape" in message
-        for message in error.details["errors"]
+        "Broken" in message and "invalid shape" in message for message in error.details["errors"]
     )
     assert ("abort", None) in doc.calls
     assert ("commit", None) not in doc.calls
@@ -689,8 +689,7 @@ def test_dependent_gaining_solids_during_recompute_rolls_back() -> None:
     # A previously single-solid dependent turning multisolid is a topology
     # change, not a grandfathered multisolid contract.
     assert any(
-        "Split" in message and "expected_solids" in message
-        for message in error.details["errors"]
+        "Split" in message and "expected_solids" in message for message in error.details["errors"]
     )
     assert ("abort", None) in doc.calls
     assert ("commit", None) not in doc.calls
@@ -859,8 +858,7 @@ def test_failed_validation_rollback_recomputes_dependents_stale_state() -> None:
     error = expect_tool_error(exc_info, VALIDATION_FAILED)
     # The original failure and its diagnostics survive the rollback intact.
     assert any(
-        "Multi" in message and "expected_solids" in message
-        for message in error.details["errors"]
+        "Multi" in message and "expected_solids" in message for message in error.details["errors"]
     )
     assert doc.calls == [
         ("open", "edit_object:Box"),
@@ -913,9 +911,7 @@ def test_rollback_recompute_failure_is_explicit_and_preserves_original() -> None
     assert error.details["originalError"] == (
         "ToolError: recompute left the document invalid; the mutation was rolled back"
     )
-    assert any(
-        "Multi" in message for message in error.details["originalDetails"]["errors"]
-    )
+    assert any("Multi" in message for message in error.details["originalDetails"]["errors"])
     assert doc.UndoMode == 0
     assert doc.getObject("Box").Length == 0
 
@@ -1009,9 +1005,7 @@ def test_create_rejects_unsupported_type_without_transaction() -> None:
     ctx = FakeCtx(doc)
 
     with pytest.raises(ToolError) as exc_info:
-        objects_mod.create_object(
-            ctx, {"document": doc.Name, "type": "Part::NotReal", "name": "X"}
-        )
+        objects_mod.create_object(ctx, {"document": doc.Name, "type": "Part::NotReal", "name": "X"})
 
     expect_tool_error(exc_info, VALIDATION_FAILED)
     assert doc.calls == []
@@ -1047,9 +1041,7 @@ def test_create_multisolid_requires_explicit_expected_solids() -> None:
     ctx = FakeCtx(doc)
 
     with pytest.raises(ToolError) as exc_info:
-        objects_mod.create_object(
-            ctx, {"document": doc.Name, "type": "Part::Box", "name": "Fused"}
-        )
+        objects_mod.create_object(ctx, {"document": doc.Name, "type": "Part::Box", "name": "Fused"})
 
     expect_tool_error(exc_info, VALIDATION_FAILED)
     assert "expected_solids" in exc_info.value.details["errors"][0]
@@ -1400,7 +1392,10 @@ def test_document_objects_are_never_stringified_in_output() -> None:
     )
 
     row = next(r for r in result["objects"] if r["name"] == "Source")
-    assert row["properties"]["Link"] == "LinkTarget"
+    assert row["properties"]["Link"] == {
+        "object": "LinkTarget",
+        "subelement": "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1443,6 +1438,7 @@ def test_property_paging_discovers_metadata_without_known_names() -> None:
         "enumeration": None,
         "enumerationCount": 0,
         "enumerationTruncated": False,
+        "expression": None,
     }
     assert row["propertyMetadata"]["Placement"]["readOnly"] is True
 
@@ -1487,7 +1483,7 @@ def test_overlong_list_value_is_truncated_and_named() -> None:
     )
     doc = FakeDoc(objects=[obj])
     result = objects_mod.inspect_objects(
-        ctx := FakeCtx(doc), {"document": doc.Name, "detail": "full"}
+        _ctx := FakeCtx(doc), {"document": doc.Name, "detail": "full"}
     )
     row = result["objects"][0]
     assert len(row["properties"]["History"]) == 64
@@ -1527,7 +1523,9 @@ def test_mutation_force_closes_surviving_empty_transaction() -> None:
     """
 
     doc = FakeDoc(
-        objects=[_ExprBox("Box", properties=("Length",), prop_types={"Length": "App::PropertyLength"})]
+        objects=[
+            _ExprBox("Box", properties=("Length",), prop_types={"Length": "App::PropertyLength"})
+        ]
     )
     ctx = FakeCtx(doc)
     closed: list[bool] = []
@@ -1542,9 +1540,7 @@ def test_mutation_force_closes_surviving_empty_transaction() -> None:
     def _close(commit: bool) -> None:
         closed.append(bool(commit))
 
-    ctx.App = types.SimpleNamespace(
-        getActiveTransaction=_active, closeActiveTransaction=_close
-    )
+    ctx.App = types.SimpleNamespace(getActiveTransaction=_active, closeActiveTransaction=_close)
 
     result = parameters_mod.HANDLERS["edit_parameters"](
         ctx,
@@ -1557,7 +1553,9 @@ def test_mutation_force_closes_surviving_empty_transaction() -> None:
 
 def test_mutation_never_closes_a_foreign_surviving_transaction() -> None:
     doc = FakeDoc(
-        objects=[_ExprBox("Box", properties=("Length",), prop_types={"Length": "App::PropertyLength"})]
+        objects=[
+            _ExprBox("Box", properties=("Length",), prop_types={"Length": "App::PropertyLength"})
+        ]
     )
     ctx = FakeCtx(doc)
     closed: list[bool] = []
@@ -1572,9 +1570,7 @@ def test_mutation_never_closes_a_foreign_surviving_transaction() -> None:
     def _close(commit: bool) -> None:
         closed.append(bool(commit))
 
-    ctx.App = types.SimpleNamespace(
-        getActiveTransaction=_active, closeActiveTransaction=_close
-    )
+    ctx.App = types.SimpleNamespace(getActiveTransaction=_active, closeActiveTransaction=_close)
 
     parameters_mod.HANDLERS["edit_parameters"](
         ctx,
@@ -1606,3 +1602,401 @@ def test_placement_rows_report_angle_in_degrees() -> None:
     )
     row = result["objects"][0]
     assert abs(row["placement"]["angle_deg"] - 30.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: selected-object inspection, cursor binding, expression metadata,
+# native link serialization, mutation deltas and expected-bounds commits.
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_selection_returns_only_requested_sorted_rows() -> None:
+    doc, ctx = _three_box_doc()
+
+    result = objects_mod.inspect_objects(ctx, {"document": doc.Name, "objects": ["B", "A"]})
+
+    assert [row["name"] for row in result["objects"]] == ["A", "B"]
+    assert result["total"] == 2
+    assert result["count"] == 2
+    assert result["nextCursor"] is None
+
+
+def test_inspect_selection_resolves_names_before_rows() -> None:
+    doc, ctx = _three_box_doc()
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.inspect_objects(ctx, {"document": doc.Name, "objects": ["A", "Ghost"]})
+
+    expect_tool_error(exc_info, OBJECT_NOT_FOUND)
+
+
+def test_inspect_selection_rejects_duplicates_and_oversized_lists() -> None:
+    doc, ctx = _three_box_doc()
+
+    with pytest.raises(ToolError) as duplicate:
+        objects_mod.inspect_objects(ctx, {"document": doc.Name, "objects": ["A", "A"]})
+    expect_tool_error(duplicate, VALIDATION_FAILED)
+
+    with pytest.raises(ToolError) as oversized:
+        objects_mod.inspect_objects(
+            ctx,
+            {
+                "document": doc.Name,
+                "objects": [f"Obj{index}" for index in range(65)],
+            },
+        )
+    expect_tool_error(oversized, VALIDATION_FAILED)
+
+
+def test_selection_cursor_paginates_the_selected_objects_only() -> None:
+    doc, ctx = _three_box_doc()
+
+    first = objects_mod.inspect_objects(
+        ctx, {"document": doc.Name, "objects": ["B", "A", "C"], "limit": 2}
+    )
+    assert [row["name"] for row in first["objects"]] == ["A", "B"]
+    assert first["total"] == 3
+    assert first["nextCursor"] is not None
+
+    second = objects_mod.inspect_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "objects": ["B", "A", "C"],
+            "limit": 2,
+            "cursor": first["nextCursor"],
+        },
+    )
+    assert [row["name"] for row in second["objects"]] == ["C"]
+    assert second["nextCursor"] is None
+
+
+def test_cursor_bound_to_a_different_selection_is_stale() -> None:
+    doc, ctx = _three_box_doc()
+
+    first = objects_mod.inspect_objects(
+        ctx, {"document": doc.Name, "objects": ["A", "B"], "limit": 1}
+    )
+
+    # A different selection must not resume the paged selection...
+    with pytest.raises(ToolError) as mismatched:
+        objects_mod.inspect_objects(
+            ctx,
+            {
+                "document": doc.Name,
+                "objects": ["A", "C"],
+                "limit": 1,
+                "cursor": first["nextCursor"],
+            },
+        )
+    expect_tool_error(mismatched, VALIDATION_FAILED)
+
+    # ...and neither may a cursor carrying a selection continue a
+    # selection-less listing.
+    with pytest.raises(ToolError) as unselected:
+        objects_mod.inspect_objects(
+            ctx, {"document": doc.Name, "limit": 1, "cursor": first["nextCursor"]}
+        )
+    expect_tool_error(unselected, VALIDATION_FAILED)
+
+
+def test_expression_metadata_is_disclosed_in_full_detail() -> None:
+    obj = FakeObj(
+        "Box",
+        properties=("Length", "Width"),
+        prop_types={
+            "Length": "App::PropertyLength",
+            "Width": "App::PropertyLength",
+        },
+        values={"Length": 10.0, "Width": 5.0},
+    )
+    # FreeCAD's getExpression returns (expression string, path); the width
+    # property has no expression and the raw getter result is None.
+    object.__setattr__(obj, "_expressions", {"Length": ("Width * 2", "Width")})
+    obj.getExpression = lambda prop: obj._expressions.get(prop)
+    doc = FakeDoc(objects=[obj])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.inspect_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "detail": "full",
+            "property_filter": ["Length", "Width"],
+        },
+    )
+
+    metadata = result["objects"][0]["propertyMetadata"]
+    assert metadata["Length"]["expression"] == "Width * 2"
+    assert metadata["Width"]["expression"] is None
+
+
+def test_link_subelement_pairs_serialize_as_descriptive_references() -> None:
+    doc, ctx = _three_box_doc()
+    linked = box("LinkTarget", shape=None)
+    source = box(
+        "Source",
+        shape=None,
+        properties=("Mount",),
+        prop_types={"Mount": "App::PropertyLinkSub"},
+        values={"Mount": (linked, ["Face1"])},
+    )
+    doc.Objects.append(source)
+    doc._by_name[source.Name] = source
+
+    result = objects_mod.inspect_objects(
+        ctx,
+        {"document": doc.Name, "detail": "full", "property_filter": ["Mount"]},
+    )
+
+    row = next(r for r in result["objects"] if r["name"] == "Source")
+    assert row["properties"]["Mount"] == {
+        "object": "LinkTarget",
+        "subelement": "Face1",
+    }
+
+
+def test_edit_object_reports_property_geometry_and_dependent_deltas() -> None:
+    dependent = FakeObj("Dep", shape=None)
+    obj = box("Box", values={"Length": 4.0}, in_list=(dependent,))
+    doc = FakeDoc(objects=[obj])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.edit_object(
+        ctx,
+        {"document": doc.Name, "object": "Box", "properties": {"Length": 40}},
+    )
+
+    change = result["change"]
+    assert change["properties"] == [{"name": "Length", "before": 4.0, "after": 40.0}]
+    geometry = change["geometry"]
+    assert geometry["solidCountBefore"] == 1
+    assert geometry["solidCountAfter"] == 1
+    assert geometry["volumeBefore"] == 1000.0
+    assert geometry["volumeAfter"] == 1000.0
+    assert geometry["boundsBefore"] == [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]
+    assert geometry["boundsAfter"] == [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]
+    assert change["dependentCount"] == 1
+
+
+def test_create_object_change_uses_null_before_fields() -> None:
+    doc = FakeDoc()
+
+    def add_box(type_id: str, name: str) -> FakeObj:
+        created = box(name)
+        doc.Objects.append(created)
+        doc._by_name[created.Name] = created
+        return created
+
+    doc.addObject = add_box  # type: ignore[method-assign]
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.create_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "type": "Part::Box",
+            "name": "Created",
+            "properties": {"Length": 4},
+        },
+    )
+
+    change = result["change"]
+    assert change["properties"] == [{"name": "Length", "before": None, "after": 4.0}]
+    assert change["geometry"]["solidCountBefore"] is None
+    assert change["geometry"]["volumeBefore"] is None
+    assert change["geometry"]["boundsBefore"] is None
+    assert change["dependentCount"] == 0
+
+
+def test_matching_expected_bounds_commit_the_edit() -> None:
+    obj = box("Box", values={"Length": 4.0})
+    doc = FakeDoc(objects=[obj])
+    ctx = FakeCtx(doc)
+
+    objects_mod.edit_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "Box",
+            "properties": {"Length": 40},
+            "expected_bounds": [0.0, 0.0, 0.0, 10.0, 10.0, 10.0],
+        },
+    )
+
+    assert obj.Length == 40
+    assert [call[0] for call in doc.calls] == ["open", "commit"]
+
+
+def test_incompatible_expected_bounds_roll_the_edit_back() -> None:
+    obj = box("Box", values={"Length": 4.0})
+    doc = FakeDoc(objects=[obj])
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Box",
+                "properties": {"Length": 40},
+                "expected_bounds": [0.0, 0.0, 0.0, 10.0, 10.0, 14.0],
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["operationState"] == "rolled_back"
+    assert error.details["nextAction"] == "retry_from_original_state"
+    assert error.details["reason"] == "expected_bounds"
+    # The rollback restored the original value and no commit happened.
+    assert obj.Length == 4.0
+    assert "abort" in [call[0] for call in doc.calls]
+
+
+def test_prevalidation_failures_stay_without_operation_state() -> None:
+    doc, ctx = _three_box_doc()
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "B",
+                "properties": {"Length": 5, "NotAProperty": 1},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "operationState" not in (error.details or {})
+    assert doc.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: edit_objects atomic batch.
+# ---------------------------------------------------------------------------
+
+
+def _batch_doc() -> tuple[FakeDoc, FakeCtx, FakeObj, FakeObj]:
+    first = box("First", values={"Length": 1.0})
+    second = box("Second", values={"Length": 2.0})
+    doc = FakeDoc(objects=[first, second])
+    return doc, FakeCtx(doc), first, second
+
+
+def test_edit_objects_applies_all_edits_in_one_transaction() -> None:
+    doc, ctx, first, second = _batch_doc()
+
+    result = objects_mod.edit_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "edits": [
+                {"object": "First", "properties": {"Length": 10}},
+                {"object": "Second", "properties": {"Length": 20}},
+            ],
+        },
+    )
+
+    assert first.Length == 10
+    assert second.Length == 20
+    assert [call[0] for call in doc.calls] == ["open", "commit"]
+    assert doc.recompute_count == 1
+    assert [obj["name"] for obj in result["objects"]] == ["First", "Second"]
+    assert result["changes"][0]["properties"] == [{"name": "Length", "before": 1.0, "after": 10.0}]
+    assert result["changes"][1]["properties"] == [{"name": "Length", "before": 2.0, "after": 20.0}]
+    assert result["applied"] == ["First", "Second"]
+
+
+def test_edit_objects_rejects_duplicate_object_names_before_transaction() -> None:
+    doc, ctx, first, _second = _batch_doc()
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_objects(
+            ctx,
+            {
+                "document": doc.Name,
+                "edits": [
+                    {"object": "First", "properties": {"Length": 10}},
+                    {"object": "First", "properties": {"Length": 20}},
+                ],
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "more than once" in error.message
+    assert first.history == []
+    assert doc.calls == []
+
+
+def test_edit_objects_rejects_unknown_expectation_names() -> None:
+    doc, ctx, _first, _second = _batch_doc()
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_objects(
+            ctx,
+            {
+                "document": doc.Name,
+                "edits": [{"object": "First", "properties": {"Length": 10}}],
+                "expectations": {"Ghost": {"expected_solids": 1}},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "not edited" in error.message
+    assert doc.calls == []
+
+
+def test_edit_objects_rolls_back_the_whole_batch_on_expectation_failure() -> None:
+    doc, ctx, first, second = _batch_doc()
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_objects(
+            ctx,
+            {
+                "document": doc.Name,
+                "edits": [
+                    {"object": "First", "properties": {"Length": 10}},
+                    {"object": "Second", "properties": {"Length": 20}},
+                ],
+                "expectations": {"Second": {"expected_bounds": [0.0, 0.0, 0.0, 10.0, 10.0, 14.0]}},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["operationState"] == "rolled_back"
+    assert error.details["reason"] == "expected_bounds"
+    # The first target's property change rolled back with the batch.
+    assert first.Length == 1.0
+    assert second.Length == 2.0
+    assert "abort" in [call[0] for call in doc.calls]
+
+
+def test_edit_objects_per_target_expectations_pass_and_commit() -> None:
+    doc, ctx, first, second = _batch_doc()
+
+    result = objects_mod.edit_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "edits": [
+                {"object": "First", "properties": {"Length": 10}},
+                {"object": "Second", "properties": {"Length": 20}},
+            ],
+            "expectations": {
+                "First": {"expected_solids": 1},
+                "Second": {
+                    "expected_bounds": [0.0, 0.0, 0.0, 10.0, 10.0, 10.0],
+                    "bounds_tolerance": 0.5,
+                },
+            },
+        },
+    )
+
+    assert first.Length == 10
+    assert second.Length == 20
+    assert [call[0] for call in doc.calls] == ["open", "commit"]
+    assert len(result["changes"]) == 2
+    definition = next(
+        entry for entry in objects_mod.TOOL_DEFINITIONS if entry["name"] == "edit_objects"
+    )
+    validate_schema(result, definition["outputSchema"])

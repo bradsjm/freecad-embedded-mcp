@@ -36,7 +36,6 @@ import ipaddress
 import json
 import queue
 import re
-import socket
 import sys
 import threading
 import time
@@ -266,9 +265,7 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
         # Tokenless local mode shares one stable principal so consent
         # challenges still bind to a single identity.
         if self.token:
-            self.principal = (
-                "sha256:" + sha256(self.token.encode("utf-8")).hexdigest()[:32]
-            )
+            self.principal = "sha256:" + sha256(self.token.encode("utf-8")).hexdigest()[:32]
         else:
             self.principal = "local"
         self.allowed_networks = parse_allowed_networks(allowed_ips)
@@ -326,7 +323,6 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
             return True
         return any(addr in network for network in self.allowed_networks)
 
-
     def start(self):
         """Serve in a daemon thread; returns the thread."""
         if self._serving:
@@ -383,7 +379,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         self.connection_id = uuid.uuid4().hex
         self._response_started = False
 
-    def log_message(self, format, *args):  # noqa: A002 - stdlib signature
+    def log_message(self, format, *args):
         pass  # keep the FreeCAD console free of per-request noise
 
     # ----------------------------------------------------------- dispatching
@@ -408,9 +404,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             traceback.print_exc(file=sys.stderr)
             if not self._response_started:
                 try:
-                    self._send_rpc_error(
-                        500, -32603, "Unexpected server error.", close=True
-                    )
+                    self._send_rpc_error(500, -32603, "Unexpected server error.", close=True)
                 except OSError:
                     pass
 
@@ -419,11 +413,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             # RFC 9110: these statuses carry neither body nor framing.
             body = b""
         else:
-            body = (
-                b""
-                if payload is None
-                else json.dumps(payload, allow_nan=False).encode("utf-8")
-            )
+            body = b"" if payload is None else json.dumps(payload, allow_nan=False).encode("utf-8")
         self._response_started = True
         self.send_response(status)
         if status not in (204, 304):
@@ -488,9 +478,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                 )
         else:
             if self._content_length() not in (None, 0):
-                return self._send_rpc_error(
-                    400, -32600, "Unexpected request body.", close=True
-                )
+                return self._send_rpc_error(400, -32600, "Unexpected request body.", close=True)
             length = 0
 
         # Access gates run before any body byte is read: a rejected request
@@ -500,9 +488,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         if not self.server.peer_allowed(self.client_address[0]):
             return self._reject_forbidden("peer address is not allowed", close=True)
         if not self.server.remote_enabled and not self._host_allowed():
-            return self._reject_forbidden(
-                "Host header is not the loopback endpoint", close=True
-            )
+            return self._reject_forbidden("Host header is not the loopback endpoint", close=True)
         if not self.server.remote_enabled and not self._origin_allowed():
             return self._reject_forbidden("Origin header is not allowed", close=True)
         if not self._authorized():
@@ -525,9 +511,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         if self.command == "GET":
             # No standalone SSE stream is offered in either era; the 2025
             # transports explicitly allow GET 405.
-            return self._send_json(
-                405, None, extra_headers=(("Allow", "POST, DELETE"),)
-            )
+            return self._send_json(405, None, extra_headers=(("Allow", "POST, DELETE"),))
         if self.command == "DELETE":
             return self._handle_delete()
         if self.command != "POST":
@@ -564,9 +548,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                         },
                     },
                 )
-            return self._send_rpc_error(
-                400, -32700, "Parse error: body is not valid JSON."
-            )
+            return self._send_rpc_error(400, -32700, "Parse error: body is not valid JSON.")
 
         # Era selection happens after authentication and JSON parsing.
         # Modern metadata keeps its strict validation; anything else is
@@ -579,8 +561,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                 return self._send_rpc_error(
                     400,
                     -32600,
-                    "MCP-Session-Id is not accepted together with modern "
-                    "protocol metadata.",
+                    "MCP-Session-Id is not accepted together with modern protocol metadata.",
                 )
             return self._run_modern(message, lowered)
         if isinstance(message, list) and session_id is None:
@@ -592,9 +573,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _run_modern(self, message, lowered):
-        request_id = (
-            self._extract_request_id(message) if isinstance(message, dict) else None
-        )
+        request_id = self._extract_request_id(message) if isinstance(message, dict) else None
         is_notification = isinstance(message, dict) and "id" not in message
         try:
             validated = validate_request(message, lowered)
@@ -606,9 +585,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             return self._send_json(202, None)
 
         try:
-            outcome = self.server.dispatch(
-                validated, self.server.principal, self.connection_id
-            )
+            outcome = self.server.dispatch(validated, self.server.principal, self.connection_id)
         except ProtocolError as exc:
             return self._send_protocol_error(exc, request_id)
         except Exception:
@@ -626,21 +603,15 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
 
         session_id = self._lowered_headers().get("mcp-session-id")
         if session_id is None:
-            return self._send_rpc_error(
-                400, -32600, "An MCP-Session-Id header is required."
-            )
+            return self._send_rpc_error(400, -32600, "An MCP-Session-Id header is required.")
         if self.server.legacy.delete_session(session_id, self.server.principal):
             return self._send_json(204, None)
-        return self._send_rpc_error(
-            404, -32600, "unknown or expired MCP session"
-        )
+        return self._send_rpc_error(404, -32600, "unknown or expired MCP session")
 
     def _emit_legacy_reply(self, reply):
         if reply.stream is not None:
             return self._send_stream(reply.stream)
-        return self._send_json(
-            reply.status, reply.payload, extra_headers=reply.headers
-        )
+        return self._send_json(reply.status, reply.payload, extra_headers=reply.headers)
 
     # ---------------------------------------------------------------- checks
 
@@ -786,9 +757,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                 if event is _KEEPALIVE:
                     payload = b": keepalive\n\n"
                 else:
-                    data = json.dumps(
-                        event, allow_nan=False, separators=(",", ":")
-                    ).encode("utf-8")
+                    data = json.dumps(event, allow_nan=False, separators=(",", ":")).encode("utf-8")
                     payload = b"data: " + data + b"\n\n"
                 self._write_chunk(payload)
             if completed:

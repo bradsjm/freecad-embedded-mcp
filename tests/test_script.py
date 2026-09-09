@@ -3,13 +3,14 @@
 Loaded in isolation with FreeCAD stubs: no FreeCAD import on the host.
 """
 
-from contextlib import contextmanager
 import importlib.util
-from pathlib import Path
 import sys
 import threading
 import types
-from typing import Any, Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -62,6 +63,8 @@ def test_success_captures_stdout_and_persists_the_namespace() -> None:
             "session_id": "default",
             "stdout": "42\n",
             "stderr": "",
+            "stdoutTruncated": False,
+            "stderrTruncated": False,
             "executed": True,
         }
         namespace = ctx.script_namespaces["default"]
@@ -121,9 +124,7 @@ def test_namespace_cap_rejects_new_sessions_without_eviction() -> None:
         assert excinfo.value.details["limit"] == 32
         assert "overflow" not in excinfo.value.details["sessions"]
         # Full, but every stored session is still usable.
-        assert (
-            call(script, "print(value)", ctx=ctx, session_id="s31")["stdout"] == "31\n"
-        )
+        assert call(script, "print(value)", ctx=ctx, session_id="s31")["stdout"] == "31\n"
         assert len(ctx.script_namespaces) == 32
 
 
@@ -153,6 +154,68 @@ def test_cancelled_before_execution_never_runs_the_code() -> None:
             "session_id": "default",
             "stdout": "",
             "stderr": "",
+            "stdoutTruncated": False,
+            "stderrTruncated": False,
             "executed": False,
         }
         assert "executed_marker" not in ctx.script_namespaces["default"]
+
+
+def test_output_of_exactly_the_limit_is_not_flagged() -> None:
+    with load_script() as script:
+        ctx = FakeCtx()
+        # 65535 characters plus the trailing newline is exactly the cap.
+        result = call(script, "print('x' * 65535)", ctx=ctx)
+
+        assert result["stdout"] == "x" * 65535 + "\n"
+        assert result["stdoutTruncated"] is False
+        assert result["stderrTruncated"] is False
+
+
+def test_output_over_the_limit_keeps_the_head_and_sets_the_flag() -> None:
+    with load_script() as script:
+        ctx = FakeCtx()
+        result = call(script, "print('x' * 65536)", ctx=ctx)
+
+        assert result["stdout"] == "x" * script.OUTPUT_LIMIT_CHARS
+        assert result["stdoutTruncated"] is True
+
+
+def test_failure_details_are_capped_and_report_may_have_changed() -> None:
+    with load_script() as script:
+        ctx = FakeCtx()
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                script,
+                "print('y' * 70000)\npartial_marker = 1\nraise ValueError('boom')",
+                ctx=ctx,
+            )
+
+        details = excinfo.value.details
+        assert details["stdout"] == "y" * script.OUTPUT_LIMIT_CHARS
+        assert details["stdoutTruncated"] is True
+        assert details["stderrTruncated"] is False
+        assert details["operationState"] == "may_have_changed"
+        # The mutation before the raise really happened; the state is
+        # reported truthfully as may-have-changed, not rolled back.
+        assert ctx.script_namespaces["default"]["partial_marker"] == 1
+
+
+def test_traceback_keeps_only_the_tail_when_over_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with load_script() as script:
+        ctx = FakeCtx()
+        monkeypatch.setattr(
+            script.traceback,
+            "format_exc",
+            lambda: "head\n" + "Z" * (script.TRACEBACK_LIMIT_CHARS + 100),
+        )
+
+        with pytest.raises(ToolError) as excinfo:
+            call(script, "raise ValueError('boom')", ctx=ctx)
+
+        details = excinfo.value.details
+        assert details["traceback"] == "Z" * script.TRACEBACK_LIMIT_CHARS
+        assert details["tracebackTruncated"] is True
+        assert details["operationState"] == "may_have_changed"

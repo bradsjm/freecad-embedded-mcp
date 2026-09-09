@@ -1,7 +1,7 @@
 """Isolated tests for the v2 server orchestration (mcp_server/server).
 
 Runs the real server module against stubbed FreeCAD/PySide and stubbed tool
-modules (contract-shaped), defending: the exact 17-tool registry and plan
+modules (contract-shaped), defending: the exact 23-tool registry and plan
 order, GUI-independent discovery/list, wire result envelopes, task creation
 and lifecycle, the Tasks capability gate, consent preflight ordering and
 single-use nonces, the shared 32-operation cap, blocking deadline
@@ -13,12 +13,12 @@ No sockets: requests are driven through ``protocol.validate_request`` +
 """
 
 import queue
-from concurrent.futures import Future
-from pathlib import Path
 import sys
 import threading
 import time
 import types
+from concurrent.futures import Future
+from pathlib import Path
 
 import pytest
 
@@ -78,7 +78,11 @@ def _install_freeCAD_stubs() -> None:
         "getTempPath",
         "getResourceDir",
     ):
-        setattr(freecad, getter, lambda _g=getter: f"/tmp/fc-stub/{getter}")
+        setattr(
+            freecad,
+            getter,
+            lambda _getter=getter: f"/tmp/fc-stub/{_getter}",
+        )
 
     freecad_gui = types.ModuleType("FreeCADGui")
     freecad_gui.listWorkbenches = lambda: {"Part": object(), "Mesh": object()}
@@ -97,13 +101,9 @@ def _install_freeCAD_stubs() -> None:
             },
         )(),
         Qt=types.SimpleNamespace(QueuedConnection=0, NoButton=0, WaitCursor=0),
-        QEventLoop=types.SimpleNamespace(
-            ExcludeUserInputEvents=1, ExcludeSocketNotifiers=2
-        ),
+        QEventLoop=types.SimpleNamespace(ExcludeUserInputEvents=1, ExcludeSocketNotifiers=2),
         QThread=types.SimpleNamespace(msleep=lambda _d: None),
-        QTimer=types.SimpleNamespace(
-            singleShot=lambda delay, cb: timer_calls.append((delay, cb))
-        ),
+        QTimer=types.SimpleNamespace(singleShot=lambda delay, cb: timer_calls.append((delay, cb))),
     )
     qt_widgets = types.SimpleNamespace(
         QApplication=types.SimpleNamespace(
@@ -147,11 +147,14 @@ _OBJECT_TOOLS = (
     "inspect_objects",
     "create_object",
     "edit_object",
+    "edit_objects",
     "delete_object",
 )
-_GEOMETRY_TOOLS = ("validate_geometry", "measure")
+_GEOMETRY_TOOLS = ("validate_geometry", "measure", "inspect_topology")
 _OTHER_TOOLS = {
     "parameters": ("edit_parameters",),
+    "sketch": ("inspect_sketch", "edit_sketch"),
+    "features": ("create_feature",),
     "export": ("export",),
     "view": ("capture_view",),
     "fem": ("run_fem",),
@@ -196,6 +199,10 @@ def _export_preflight(ctx, name, arguments):
     return PREFLIGHT_RESULTS.get(name)
 
 
+def _import_preflight(ctx, name, arguments):
+    return PREFLIGHT_RESULTS.get(name)
+
+
 def _install_tool_modules() -> None:
     package = types.ModuleType("mcp_server.tools")
     package.__path__ = []  # namespace-style marker; submodules are injected
@@ -214,6 +221,9 @@ def _install_tool_modules() -> None:
     _module("objects", _OBJECT_TOOLS, None)
     _module("geometry", _GEOMETRY_TOOLS, None)
     _module("parameters", _OTHER_TOOLS["parameters"], None)
+    _module("sketch", _OTHER_TOOLS["sketch"], None)
+    _module("features", _OTHER_TOOLS["features"], None)
+    _module("import_model", ("import_model",), _import_preflight)
     _module("export", _OTHER_TOOLS["export"], _export_preflight)
     _module("view", _OTHER_TOOLS["view"], None)
     _module("fem", _OTHER_TOOLS["fem"], None)
@@ -229,12 +239,13 @@ def _install_tool_modules() -> None:
 
 _install_tool_modules()
 
-import mcp_server.gui_dispatch as gui_dispatch  # noqa: E402
-import mcp_server.protocol as protocol  # noqa: E402
-import mcp_server.server as server_module  # noqa: E402
-import mcp_server.subscriptions as subs_module  # noqa: E402
-import mcp_server.tasks as tasks_module  # noqa: E402
-
+import mcp_server.server as server_module
+import mcp_server.subscriptions as subs_module
+import mcp_server.tasks as tasks_module
+from mcp_server import (
+    gui_dispatch,
+    protocol,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers.
@@ -389,13 +400,13 @@ def _reset_dispatcher_for_tests() -> ThreadedWaker:
 # ---------------------------------------------------------------------------
 
 
-def test_tools_list_returns_exactly_17_in_plan_order():
+def test_tools_list_returns_exactly_23_in_plan_order():
     server = make_server()
     response = dispatch(server, "tools/list")
     result = response["result"]
     names = [tool["name"] for tool in result["tools"]]
     assert names == list(server_module.PLAN_TOOL_ORDER)
-    assert len(names) == 17
+    assert len(names) == 23
     assert result["resultType"] == "complete"
     assert result["_meta"][META_SERVER_INFO] == protocol.SERVER_INFO
     assert result["ttlMs"] == 3_600_000
@@ -514,9 +525,7 @@ def test_blocking_tool_error_is_a_complete_is_error_result():
     STUB_HANDLERS["new_document"] = lambda ctx, args: (_ for _ in ()).throw(
         protocol.ToolError(protocol.DOCUMENT_NOT_FOUND, "no such document")
     )
-    response = dispatch(
-        server, "tools/call", {"name": "new_document", "arguments": {}}, rpc_id=3
-    )
+    response = dispatch(server, "tools/call", {"name": "new_document", "arguments": {}}, rpc_id=3)
     events = drain_stream(response, 2)
     result = events[0]["result"]
     assert result["isError"] is True
@@ -621,9 +630,7 @@ def _call_close(
     # testable.
     if capabilities is None:
         capabilities = ELICITATION_FORM_CAPS
-    return dispatch(
-        server, "tools/call", params, rpc_id=rpc_id, capabilities=capabilities
-    )
+    return dispatch(server, "tools/call", params, rpc_id=rpc_id, capabilities=capabilities)
 
 
 def test_consent_challenge_precedes_any_execution():
@@ -684,10 +691,48 @@ def test_consent_without_form_capability_falls_back_to_execution():
     else:
         replay_result = replay["result"]
     assert replay_result["isError"] is True
-    assert (
-        replay_result["structuredContent"]["error"]["code"] == "CONSENT_DENIED"
-    )
+    assert replay_result["structuredContent"]["error"]["code"] == "CONSENT_DENIED"
     assert len(STUB_CALLS) == 2
+
+
+def test_import_model_consent_challenge_precedes_execution():
+    server = make_server()
+    _reset_dispatcher_for_tests()
+    PREFLIGHT_RESULTS["import_model"] = {
+        "kind": "file",
+        "path": "/tmp/part.step",
+        "fingerprint": {"size": 10, "mtime_ns": 1},
+        "purpose": "import",
+        "requires_consent": True,
+        "message": "Import untrusted geometry?",
+    }
+    params = {
+        "name": "import_model",
+        "arguments": {"document": "Smoke", "path": "/tmp/part.step", "format": "step"},
+    }
+    # The contract-shaped stub declares an empty schema; allow the real
+    # argument shape for this consent-flow test.
+    server._definitions["import_model"]["inputSchema"] = {"type": "object"}
+
+    challenge = dispatch(server, "tools/call", params, rpc_id=1, capabilities=ELICITATION_FORM_CAPS)
+    assert challenge["result"]["resultType"] == "input_required"
+    assert STUB_CALLS == []  # denied/no-answer path performs no import
+
+    accepted = dispatch(
+        server,
+        "tools/call",
+        {
+            **params,
+            "requestState": challenge["result"]["requestState"],
+            "inputResponses": {"confirm": {"action": "accept", "content": {"confirmed": True}}},
+        },
+        rpc_id=2,
+        capabilities=ELICITATION_FORM_CAPS,
+    )
+    assert isinstance(accepted, server_module.StreamResponse)
+    events = drain_stream(accepted, 2)
+    assert events[0]["result"]["resultType"] == "complete"
+    assert [name for name, _ctx, _args in STUB_CALLS] == ["import_model"]
 
 
 def test_accepted_retry_executes_once_and_replay_is_rejected():
@@ -729,9 +774,7 @@ def test_decline_does_not_burn_the_nonce():
         server,
         rpc_id=3,
         request_state=token,
-        input_responses={
-            "confirm": {"action": "accept", "content": {"confirmed": True}}
-        },
+        input_responses={"confirm": {"action": "accept", "content": {"confirmed": True}}},
     )
     events = drain_stream(accepted, 2)
     assert events[0]["result"]["resultType"] == "complete"
@@ -752,9 +795,7 @@ def test_tampered_arguments_are_rejected_before_execution():
         server,
         rpc_id=2,
         request_state=token,
-        input_responses={
-            "confirm": {"action": "accept", "content": {"confirmed": True}}
-        },
+        input_responses={"confirm": {"action": "accept", "content": {"confirmed": True}}},
         arguments={"document": "DifferentDocument"},
     )
     # Consent for the original arguments cannot authorize a different target.
@@ -774,9 +815,7 @@ def test_target_change_gets_a_fresh_challenge():
         server,
         rpc_id=2,
         request_state=token,
-        input_responses={
-            "confirm": {"action": "accept", "content": {"confirmed": True}}
-        },
+        input_responses={"confirm": {"action": "accept", "content": {"confirmed": True}}},
     )
     result = stale["result"]
     assert result["resultType"] == "input_required"
@@ -788,9 +827,7 @@ def test_target_change_gets_a_fresh_challenge():
         server,
         rpc_id=3,
         request_state=result["requestState"],
-        input_responses={
-            "confirm": {"action": "accept", "content": {"confirmed": True}}
-        },
+        input_responses={"confirm": {"action": "accept", "content": {"confirmed": True}}},
     )
     events = drain_stream(retry, 2)
     assert events[0]["result"]["resultType"] == "complete"
@@ -808,9 +845,7 @@ def test_requeststate_verified_even_when_consent_no_longer_needed():
         server,
         rpc_id=2,
         request_state=token,
-        input_responses={
-            "confirm": {"action": "accept", "content": {"confirmed": True}}
-        },
+        input_responses={"confirm": {"action": "accept", "content": {"confirmed": True}}},
     )
     events = drain_stream(retry, 2)
     assert events[0]["result"]["resultType"] == "complete"
@@ -905,9 +940,7 @@ def test_task_created_queryable_and_completed_with_tool_result():
     assert get_response["result"]["status"] == "working"
     assert get_response["result"]["resultType"] == "complete"
     release.set()
-    assert wait_until(
-        lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal
-    )
+    assert wait_until(lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal)
     terminal = server._task_store.get(task_id, principal=PRINCIPAL)
     assert terminal.status == "completed"
     assert terminal.result["structuredContent"] == {
@@ -938,9 +971,7 @@ def test_task_tool_error_completes_not_fails():
         capabilities=TASKS_CAPS,
     )
     task_id = response["result"]["taskId"]
-    assert wait_until(
-        lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal
-    )
+    assert wait_until(lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal)
     task = server._task_store.get(task_id, principal=PRINCIPAL)
     assert task.status == "completed"  # isError tool result, not failed
     assert task.result["isError"] is True
@@ -968,9 +999,7 @@ def test_task_schema_violation_fails_with_protocol_error():
         capabilities=TASKS_CAPS,
     )
     task_id = response["result"]["taskId"]
-    assert wait_until(
-        lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal
-    )
+    assert wait_until(lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal)
     task = server._task_store.get(task_id, principal=PRINCIPAL)
     assert task.status == "failed"
     assert task.error["code"] == protocol.INTERNAL_ERROR
@@ -979,9 +1008,7 @@ def test_task_schema_violation_fails_with_protocol_error():
 def test_task_eligible_without_tasks_capability_runs_blocking():
     server = make_server()
     _reset_dispatcher_for_tests()
-    response = dispatch(
-        server, "tools/call", {"name": "run_script", "arguments": {}}, rpc_id=1
-    )
+    response = dispatch(server, "tools/call", {"name": "run_script", "arguments": {}}, rpc_id=1)
     assert isinstance(response, server_module.StreamResponse)
     events = drain_stream(response, 2)
     assert events[0]["result"]["resultType"] == "complete"
@@ -1066,9 +1093,7 @@ def test_tasks_cancel_requests_cooperative_cancellation_and_real_result_wins():
     assert task.status_message == "Cancellation requested"
     assert task.cancel_event.is_set()
     release.set()
-    assert wait_until(
-        lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal
-    )
+    assert wait_until(lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal)
     # Work finished before cancellation took effect: real result wins.
     assert server._task_store.get(task_id, principal=PRINCIPAL).status == "completed"
 
@@ -1132,7 +1157,7 @@ def test_task_notifications_flow_to_subscribed_stream_only():
 
 def test_operation_cap_counts_blocking_and_tasks():
     server = make_server()
-    for index in range(server_module.MAX_OPERATIONS):
+    for _index in range(server_module.MAX_OPERATIONS):
         server._register_operation(
             "inspect_objects",
             kind="blocking",
@@ -1149,9 +1174,7 @@ def test_operation_cap_counts_blocking_and_tasks():
     result = response["result"]
     assert result["isError"] is True
     assert result["structuredContent"]["error"]["code"] == "SERVER_BUSY"
-    assert (
-        result["structuredContent"]["error"]["details"]["reason"] == "operation_limit"
-    )
+    assert result["structuredContent"]["error"]["details"]["reason"] == "operation_limit"
     # Task path shares the cap.
     response = dispatch(
         server,
@@ -1185,9 +1208,7 @@ def test_async_fem_future_is_flattened_and_operation_retained():
     task = server._task_store.get(task_id, principal=PRINCIPAL)
     assert task.status == "working"
     deferred.set_result({"pipeline": "Result", "blocks": 1})
-    assert wait_until(
-        lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal
-    )
+    assert wait_until(lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal)
     task = server._task_store.get(task_id, principal=PRINCIPAL)
     assert task.status == "completed"
     assert task.result["structuredContent"] == {"pipeline": "Result", "blocks": 1}
@@ -1206,12 +1227,8 @@ def test_async_fem_tool_error_flattens_to_completed_is_error():
         rpc_id=1,
         capabilities=TASKS_CAPS,
     )["result"]["taskId"]
-    deferred.set_exception(
-        protocol.ToolError("SOLVER_FAILED", "CalculiX failed", {"exit": 1})
-    )
-    assert wait_until(
-        lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal
-    )
+    deferred.set_exception(protocol.ToolError("SOLVER_FAILED", "CalculiX failed", {"exit": 1}))
+    assert wait_until(lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal)
     task = server._task_store.get(task_id, principal=PRINCIPAL)
     assert task.status == "completed"
     assert task.result["structuredContent"]["error"]["code"] == "SOLVER_FAILED"
@@ -1223,9 +1240,7 @@ def test_blocking_async_future_completes_stream_at_real_completion():
     _reset_dispatcher_for_tests()
     deferred: Future = Future()
     STUB_HANDLERS["run_fem"] = lambda ctx, arguments: deferred
-    response = dispatch(
-        server, "tools/call", {"name": "run_fem", "arguments": {}}, rpc_id=1
-    )
+    response = dispatch(server, "tools/call", {"name": "run_fem", "arguments": {}}, rpc_id=1)
     assert isinstance(response, server_module.StreamResponse)
     # Nothing is emitted while only the Future is pending: the operation
     # stays truthfully tracked and the SSE wait is not finalized early.
@@ -1246,12 +1261,8 @@ def test_blocking_async_tool_error_flattens_to_is_error_result():
     _reset_dispatcher_for_tests()
     deferred: Future = Future()
     STUB_HANDLERS["run_fem"] = lambda ctx, arguments: deferred
-    response = dispatch(
-        server, "tools/call", {"name": "run_fem", "arguments": {}}, rpc_id=1
-    )
-    deferred.set_exception(
-        protocol.ToolError("SOLVER_FAILED", "CalculiX failed", {"exit": 1})
-    )
+    response = dispatch(server, "tools/call", {"name": "run_fem", "arguments": {}}, rpc_id=1)
+    deferred.set_exception(protocol.ToolError("SOLVER_FAILED", "CalculiX failed", {"exit": 1}))
     events = drain_stream(response, 2, timeout=5.0)
     result = events[0]["result"]
     assert result["resultType"] == "complete"
@@ -1265,9 +1276,7 @@ def test_blocking_async_future_deadline_reports_still_running_and_retains():
     _reset_dispatcher_for_tests()
     deferred: Future = Future()
     STUB_HANDLERS["run_fem"] = lambda ctx, arguments: deferred
-    stream = dispatch(
-        server, "tools/call", {"name": "run_fem", "arguments": {}}, rpc_id=1
-    )
+    stream = dispatch(server, "tools/call", {"name": "run_fem", "arguments": {}}, rpc_id=1)
     op = next(iter(server._ops.values()))
     # Force the operation deadline overdue while the producer awaits the
     # retained Future: the wait must end with a truthful still-running
@@ -1299,9 +1308,7 @@ def test_blocking_async_cancellation_request_reports_still_running():
         return deferred
 
     STUB_HANDLERS["run_fem"] = fem
-    stream = dispatch(
-        server, "tools/call", {"name": "run_fem", "arguments": {}}, rpc_id=1
-    )
+    stream = dispatch(server, "tools/call", {"name": "run_fem", "arguments": {}}, rpc_id=1)
     assert ran.wait(timeout=5.0)  # job created: the shared event is wired
     op = next(iter(server._ops.values()))
     # A cancellation request (disconnect, stop, or the deadline sweep —
@@ -1330,9 +1337,7 @@ def test_stop_defers_waker_disposal_until_async_future_resolves(lifecycle):
     install_waker()
     deferred: Future = Future()
     STUB_HANDLERS["run_fem"] = lambda ctx, arguments: deferred
-    stream = dispatch(
-        server, "tools/call", {"name": "run_fem", "arguments": {}}, rpc_id=1
-    )
+    stream = dispatch(server, "tools/call", {"name": "run_fem", "arguments": {}}, rpc_id=1)
     assert isinstance(stream, server_module.StreamResponse)
     # The dispatcher job itself is done; only the server still retains
     # the async Future.
@@ -1455,12 +1460,12 @@ def test_duplicate_subscription_id_on_same_connection_is_rejected():
 
 def test_disconnect_closes_only_that_connection():
     server = make_server()
-    stream_a = dispatch(server, "subscriptions/listen", {"notifications": {}}, rpc_id=1)
+    dispatch(server, "subscriptions/listen", {"notifications": {}}, rpc_id=1)
     # A different subscription id on the same connection is fine.
-    stream_b = dispatch(server, "subscriptions/listen", {"notifications": {}}, rpc_id=2)
+    dispatch(server, "subscriptions/listen", {"notifications": {}}, rpc_id=2)
     # The same JSON-RPC id on a separate connection is isolated identity.
     view = validated_view("subscriptions/listen", {"notifications": {}}, rpc_id=1)
-    stream_c = server.dispatch(view, PRINCIPAL, "conn-2")
+    server.dispatch(view, PRINCIPAL, "conn-2")
     assert len(server._registry) == 3
     server._registry.disconnect("conn-1")
     assert len(server._registry) == 1
@@ -1488,7 +1493,7 @@ def test_same_name_reopen_replaces_identity_with_monotonic_generation():
     server._on_document_event(reopened, bump=True, publish=False)
 
     identity_after = server.document_identity(reopened)
-    generation_after = server.document_generation(reopened)
+    server.document_generation(reopened)
     assert identity_after != captured[0]  # fresh lifetime UUID
     # The stale instance can never adopt or report the live identity.
     with pytest.raises(protocol.ToolError):
@@ -1507,9 +1512,7 @@ def test_subscription_listen_rejects_unknown_or_foreign_task_ids():
         rpc_id=1,
         capabilities=TASKS_CAPS,
     )["result"]["taskId"]
-    assert wait_until(
-        lambda: server._task_store.get(owned, principal=PRINCIPAL).terminal
-    )
+    assert wait_until(lambda: server._task_store.get(owned, principal=PRINCIPAL).terminal)
     # Unknown id: -32602 before any stream is registered.
     with pytest.raises(protocol.ProtocolError) as unknown_exc:
         dispatch(
@@ -1610,9 +1613,7 @@ TEST_SETTINGS = {
 
 @pytest.fixture()
 def lifecycle(monkeypatch):
-    monkeypatch.setattr(
-        server_module, "load_settings", lambda path=None: dict(TEST_SETTINGS)
-    )
+    monkeypatch.setattr(server_module, "load_settings", lambda path=None: dict(TEST_SETTINGS))
     monkeypatch.setattr(server_module, "McpHTTPServer", FakeHTTP)
     FakeHTTP.instances = []
     return FakeHTTP
@@ -1650,6 +1651,7 @@ def test_bind_failure_unwinds_and_never_reports_running(lifecycle, monkeypatch):
     assert status["state"] == "stopped"
     assert status["pendingOperations"] == 0
     assert status["connection"] == {}
+
 
 def test_startup_captures_static_capabilities_and_registers_observer(lifecycle):
     status = server_module.start_server()
@@ -1755,9 +1757,7 @@ def test_service_actions_deadline_sets_one_shared_cancellation_event():
     server._service_actions()
     assert len([op for op in server._ops.values() if op.deadline_noted]) == 1
     release.set()
-    assert wait_until(
-        lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal
-    )
+    assert wait_until(lambda: server._task_store.get(task_id, principal=PRINCIPAL).terminal)
     # The real result still wins over the deadline cancellation request.
     assert server._task_store.get(task_id, principal=PRINCIPAL).status == "completed"
     # True completion clears the stuck health and the inflight job.
@@ -1850,9 +1850,7 @@ def test_discover_refresh_rejects_document_without_refresh_flag():
 def test_discover_refresh_requires_known_document():
     server = make_server()
     _reset_dispatcher_for_tests()
-    response = dispatch(
-        server, "server/discover", {"refresh": True, "document": "Missing"}
-    )
+    response = dispatch(server, "server/discover", {"refresh": True, "document": "Missing"})
     result = response["result"]
     assert result["refreshError"]["code"] == "DOCUMENT_NOT_FOUND"
     assert result["refreshError"]["message"] == "no such document: Missing"
@@ -1871,11 +1869,13 @@ def test_discover_refresh_publishes_full_sorted_types_and_scope():
     try:
         response = dispatch(server, "server/discover", {"refresh": True})
         assert wait_until(
-            lambda: server._static_capabilities is not None
-            and server._static_capabilities.get("supportedTypesDocument") == "Alpha"
+            lambda: (
+                server._static_capabilities is not None
+                and server._static_capabilities.get("supportedTypesDocument") == "Alpha"
+            )
         )
         waker.join()
-        result = response["result"] if isinstance(response, dict) else None
+        response["result"] if isinstance(response, dict) else None
     finally:
         FC_STATE["documents"] = {}
     # Re-read through the published cache (the dispatch thread published it).
@@ -1891,13 +1891,11 @@ def test_discover_refresh_publishes_full_sorted_types_and_scope():
 
 def test_discover_refresh_error_does_not_publish_late_results():
     server = make_server()
-    waker = _reset_dispatcher_for_tests()
+    _reset_dispatcher_for_tests()
     before = server._capability_snapshot()
     FC_STATE["documents"] = {"Ghost": FakeDoc("Ghost")}
     try:
-        response = dispatch(
-            server, "server/discover", {"refresh": True, "document": "Nope"}
-        )
+        response = dispatch(server, "server/discover", {"refresh": True, "document": "Nope"})
         result = response["result"]
         assert result["refreshError"]["code"] == "DOCUMENT_NOT_FOUND"
         assert server._capability_snapshot() == before

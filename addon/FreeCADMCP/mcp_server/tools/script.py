@@ -18,7 +18,8 @@ from __future__ import annotations
 import io
 import sys
 import traceback
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from mcp_server.protocol import VALIDATION_FAILED, ToolError
 
@@ -27,6 +28,11 @@ SERVER_BUSY = "SERVER_BUSY"
 
 # Stored namespaces are bounded; new sessions are rejected when full rather
 # than evicting live state (PLAN item 17).
+# Stream caps: kept output stays bounded in every path; the flags make
+# truncation explicit instead of silent (autonomous-context contract).
+OUTPUT_LIMIT_CHARS = 65536
+TRACEBACK_LIMIT_CHARS = 32768
+
 SESSION_LIMIT = 32
 
 _SESSION_ID_MAX_LENGTH = 128
@@ -69,9 +75,18 @@ _RUN_SCRIPT_DEFINITION: dict[str, Any] = {
             "session_id": {"type": "string"},
             "stdout": {"type": "string"},
             "stderr": {"type": "string"},
+            "stdoutTruncated": {"type": "boolean"},
+            "stderrTruncated": {"type": "boolean"},
             "executed": {"type": "boolean"},
         },
-        "required": ["session_id", "stdout", "stderr", "executed"],
+        "required": [
+            "session_id",
+            "stdout",
+            "stderr",
+            "stdoutTruncated",
+            "stderrTruncated",
+            "executed",
+        ],
         "additionalProperties": False,
     },
 }
@@ -120,6 +135,8 @@ def run_script(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             "session_id": session_id,
             "stdout": "",
             "stderr": "",
+            "stdoutTruncated": False,
+            "stderrTruncated": False,
             "executed": False,
         }
 
@@ -131,25 +148,54 @@ def run_script(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         sys.stderr = stderr
         exec(compile(code, f"<run_script:{session_id}>", "exec"), namespace)
     except BaseException:
+        stdout_text, stdout_truncated = _cap_head(stdout.getvalue())
+        stderr_text, stderr_truncated = _cap_head(stderr.getvalue())
+        traceback_text, traceback_truncated = _cap_tail(traceback.format_exc())
+        # Arbitrary code may have mutated documents before raising: the
+        # truthful state is may_have_changed, never a clean rollback claim.
         raise ToolError(
             VALIDATION_FAILED,
             _script_error_message(),
             details={
                 "session_id": session_id,
-                "stdout": stdout.getvalue(),
-                "stderr": stderr.getvalue(),
-                "traceback": traceback.format_exc(),
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "stdoutTruncated": stdout_truncated,
+                "stderrTruncated": stderr_truncated,
+                "traceback": traceback_text,
+                "tracebackTruncated": traceback_truncated,
+                "operationState": "may_have_changed",
             },
         ) from None
     finally:
         sys.stdout, sys.stderr = saved_stdout, saved_stderr
 
+    stdout_text, stdout_truncated = _cap_head(stdout.getvalue())
+    stderr_text, stderr_truncated = _cap_head(stderr.getvalue())
     return {
         "session_id": session_id,
-        "stdout": stdout.getvalue(),
-        "stderr": stderr.getvalue(),
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+        "stdoutTruncated": stdout_truncated,
+        "stderrTruncated": stderr_truncated,
         "executed": True,
     }
+
+
+def _cap_head(text: str) -> tuple[str, bool]:
+    """Keep the first OUTPUT_LIMIT_CHARS characters; report truncation."""
+
+    if len(text) > OUTPUT_LIMIT_CHARS:
+        return text[:OUTPUT_LIMIT_CHARS], True
+    return text, False
+
+
+def _cap_tail(text: str) -> tuple[str, bool]:
+    """Keep the last TRACEBACK_LIMIT_CHARS characters; report truncation."""
+
+    if len(text) > TRACEBACK_LIMIT_CHARS:
+        return text[-TRACEBACK_LIMIT_CHARS:], True
+    return text, False
 
 
 def _seed_namespace(ctx: Any) -> dict[str, Any]:

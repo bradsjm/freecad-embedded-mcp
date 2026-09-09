@@ -8,14 +8,15 @@ subelement-preserving selection + active-document restoration in ``finally``
 — including when the capture itself fails.
 """
 
-from contextlib import contextmanager
 import base64
 import importlib.util
 import os
-from pathlib import Path
 import sys
 import types
-from typing import Any, Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -225,9 +226,7 @@ class FakeCtx:
     def require_object(self, doc: Any, name: str) -> Any:
         obj = self.objects.get(doc.Name, {}).get(name)
         if obj is None:
-            raise ToolError(
-                "OBJECT_NOT_FOUND", f"unknown object '{name}'", {"object": name}
-            )
+            raise ToolError("OBJECT_NOT_FOUND", f"unknown object '{name}'", {"object": name})
         return obj
 
     def check_document_idle(self, doc: Any) -> None:
@@ -251,9 +250,7 @@ def load_view_module() -> Iterator[types.ModuleType]:
         QObject=object,
         Signal=lambda *_: None,
         Qt=types.SimpleNamespace(QueuedConnection=0),
-        QEventLoop=types.SimpleNamespace(
-            ExcludeUserInputEvents=1, ExcludeSocketNotifiers=2
-        ),
+        QEventLoop=types.SimpleNamespace(ExcludeUserInputEvents=1, ExcludeSocketNotifiers=2),
         QThread=types.SimpleNamespace(msleep=lambda _delay: None),
         QTimer=types.SimpleNamespace(singleShot=lambda *_: None),
     )
@@ -436,7 +433,6 @@ def test_one_omitted_side_uses_view_dimension_unclamped(view_module) -> None:
     assert save_call[2] == 1500
 
 
-
 def test_one_omitted_side_clamps_to_schema_maximum(view_module) -> None:
     ctx = make_ctx(gui_views={"Smoke": FakeView(size=(5120, 2880))})
     view = ctx.Gui.views["Smoke"]
@@ -464,6 +460,7 @@ def test_explicit_4097_fails_before_capture(view_module) -> None:
         view_module.capture_view(ctx, capture_args(height=4097))
     assert excinfo.value.code == "VALIDATION_FAILED"
     assert view.calls == []
+
 
 def test_explicit_size_beyond_limit_is_rejected(view_module) -> None:
     ctx = make_ctx()

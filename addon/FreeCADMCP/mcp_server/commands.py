@@ -20,8 +20,8 @@ import FreeCADGui
 from PySide import QtCore, QtGui, QtWidgets
 
 from mcp_server import server as mcp_server_module
-from mcp_server.settings import SettingsError, load_settings, save_settings
 from mcp_server.ip_parse import validate_allowed_ips
+from mcp_server.settings import SettingsError, load_settings, save_settings
 
 _TOGGLE_COMMAND = "Toggle_MCP_Server"
 _DETAILS_COMMAND = "Connection_Details"
@@ -383,8 +383,7 @@ class ToggleMCPServerCommand:
             message = "MCP server stopped."
         _show_status_bar(message)
         _report_message(
-            "[MCP] Server stop requested (state: %s, pending operations: %s)"
-            % (state, pending)
+            f"[MCP] Server stop requested (state: {state}, pending operations: {pending})"
         )
         _controller_refresh()
 
@@ -415,17 +414,11 @@ def _connection_details(status: dict, saved: dict | None) -> dict:
     running = state in ("running", "starting", "draining")
     if running and actual_port:
         endpoint = (
-            f"http://127.0.0.1:{actual_port}/mcp"
-            if network_active
-            else str(status.get("endpoint"))
+            f"http://127.0.0.1:{actual_port}/mcp" if network_active else str(status.get("endpoint"))
         )
         listening = True
     else:
-        endpoint = (
-            f"http://127.0.0.1:{configured_port}/mcp"
-            if configured_port
-            else None
-        )
+        endpoint = f"http://127.0.0.1:{configured_port}/mcp" if configured_port else None
         listening = False
     mode = "Network enabled" if network_active else "Local only"
     return {
@@ -445,7 +438,9 @@ class ConnectionDetailsCommand:
     def GetResources(self):
         return {
             "MenuText": "Connection Details…",
-            "ToolTip": "Show the MCP endpoint, access mode and bearer token for connecting clients.",
+            "ToolTip": (
+                "Show the MCP endpoint, access mode and bearer token for connecting clients."
+            ),
             "Pixmap": _icon_path("mcp-connection.svg"),
         }
 
@@ -464,12 +459,8 @@ class ConnectionDetailsCommand:
         # The ACTIVE server's settings hold the running token; it is used
         # only inside this dialog and never enters status snapshots.
         active_server = mcp_server_module.get_server()
-        active_settings = (
-            dict(active_server.settings) if active_server is not None else None
-        )
-        local_only = not bool(
-            (status.get("connection") or {}).get("remote_enabled")
-        )
+        active_settings = dict(active_server.settings) if active_server is not None else None
+        local_only = not bool((status.get("connection") or {}).get("remote_enabled"))
         if active_settings is not None and not local_only and status.get("running"):
             token = str(active_settings.get("token") or "")
         else:
@@ -534,9 +525,7 @@ class ConnectionDetailsCommand:
 
         restart_note = QtWidgets.QLabel(dialog)
         if model["restart_required"]:
-            restart_note.setText(
-                _tr("Restart required to apply saved connection settings.")
-            )
+            restart_note.setText(_tr("Restart required to apply saved connection settings."))
         lan_note = None
         if model["mode"] == "Network enabled":
             lan_note = QtWidgets.QLabel(dialog)
@@ -547,9 +536,7 @@ class ConnectionDetailsCommand:
                 )
             )
 
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Close, parent=dialog
-        )
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close, parent=dialog)
         buttons.rejected.connect(dialog.reject)
 
         layout = QtWidgets.QFormLayout(dialog)
@@ -625,8 +612,7 @@ class MCPSettingsCommand:
         )
         network.setChecked(bool(settings.get("remote_enabled", False)))
         network_note = QtWidgets.QLabel(
-            _tr("Network clients must present the bearer token shown in "
-                "Connection Details."),
+            _tr("Network clients must present the bearer token shown in Connection Details."),
             dialog,
         )
         network_note.setWordWrap(True)
@@ -634,8 +620,7 @@ class MCPSettingsCommand:
 
         ips_field = QtWidgets.QLineEdit(str(settings.get("allowed_ips", "")), dialog)
         ips_field.setPlaceholderText(
-            _tr("e.g. 192.168.1.0/24, 10.0.0.5 - empty allows any host "
-                "(the token stays required)")
+            _tr("e.g. 192.168.1.0/24, 10.0.0.5 - empty allows any host (the token stays required)")
         )
         ips_error = QtWidgets.QLabel(dialog)
         ips_error.setWordWrap(True)
@@ -643,9 +628,7 @@ class MCPSettingsCommand:
 
         roots_field = QtWidgets.QPlainTextEdit(dialog)
         roots_field.setPlaceholderText(_tr("One directory per line"))
-        roots_field.setPlainText(
-            "\n".join(str(root) for root in settings.get("allowed_roots", []))
-        )
+        roots_field.setPlainText("\n".join(str(root) for root in settings.get("allowed_roots", [])))
         roots_error = QtWidgets.QLabel(dialog)
         roots_error.setWordWrap(True)
         roots_error.hide()
@@ -663,9 +646,7 @@ class MCPSettingsCommand:
             if ip_errors:
                 _set_error(ips_error, "Allowed IPs: " + "; ".join(ip_errors))
                 return
-            roots = [
-                line.strip() for line in roots_field.toPlainText().splitlines()
-            ]
+            roots = [line.strip() for line in roots_field.toPlainText().splitlines()]
             roots = [line for line in roots if line]
             if not roots:
                 _set_error(roots_error, "Allowed roots: add at least one directory.")
@@ -723,15 +704,12 @@ class MCPSettingsCommand:
         saved = outcome["saved"]
         _controller_settings_changed()
         _report_message(
-            "[MCP] Settings saved: port %s; auto-start %s; network access %s; "
-            "allowed IPs %s; %d allowed root(s)."
-            % (
-                saved["port"],
-                "on" if saved["auto_start"] else "off",
-                "enabled" if saved["remote_enabled"] else "disabled (Local only)",
-                saved["allowed_ips"] or "(any host - open)",
-                len(saved["allowed_roots"]),
-            )
+            "[MCP] Settings saved: port "
+            f"{saved['port']}; auto-start "
+            f"{'on' if saved['auto_start'] else 'off'}; network access "
+            f"{'enabled' if saved['remote_enabled'] else 'disabled (Local only)'}; "
+            f"allowed IPs {saved['allowed_ips'] or '(any host - open)'}; "
+            f"{len(saved['allowed_roots'])} allowed root(s)."
         )
         if outcome["token_generated"]:
             _report_message(

@@ -20,8 +20,8 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server.ip_parse import parse_allowed_networks, validate_allowed_ips  # noqa: E402
-from mcp_server.settings import (  # noqa: E402
+from mcp_server.ip_parse import parse_allowed_networks, validate_allowed_ips
+from mcp_server.settings import (
     DEFAULT_ALLOWED_IPS,
     DEFAULT_PORT,
     SettingsError,
@@ -73,6 +73,7 @@ def test_transport_and_settings_import_without_freecad():
         capture_output=True,
         text=True,
         timeout=60,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     assert "GUI-INDEPENDENT-OK" in result.stdout
@@ -152,9 +153,7 @@ def test_remote_without_token_is_generated_and_persisted(tmp_path):
 
 def test_remote_save_without_token_fails_closed(tmp_path):
     with pytest.raises(SettingsError):
-        save_settings(
-            valid_settings(remote_enabled=True, token=""), str(tmp_path / "s.json")
-        )
+        save_settings(valid_settings(remote_enabled=True, token=""), str(tmp_path / "s.json"))
 
 
 # --------------------------------------------------------------------------
@@ -239,9 +238,7 @@ def test_blank_token_is_valid_in_local_mode(tmp_path, token):
 @pytest.mark.parametrize("auto_start", ["yes", 1, 0, None])
 def test_invalid_auto_start_fails_closed(tmp_path, auto_start):
     with pytest.raises(SettingsError):
-        save_settings(
-            valid_settings(auto_start=auto_start), str(tmp_path / "settings.json")
-        )
+        save_settings(valid_settings(auto_start=auto_start), str(tmp_path / "settings.json"))
 
 
 @pytest.mark.parametrize(
@@ -249,24 +246,18 @@ def test_invalid_auto_start_fails_closed(tmp_path, auto_start):
 )
 def test_invalid_allowed_ips_fails_closed(tmp_path, allowed_ips):
     with pytest.raises(SettingsError):
-        save_settings(
-            valid_settings(allowed_ips=allowed_ips), str(tmp_path / "settings.json")
-        )
+        save_settings(valid_settings(allowed_ips=allowed_ips), str(tmp_path / "settings.json"))
 
 
 @pytest.mark.parametrize("allowed_roots", ["home", "", [""], [42], {"root": 1}, [None]])
 def test_invalid_allowed_roots_fails_closed(tmp_path, allowed_roots):
     with pytest.raises(SettingsError):
-        save_settings(
-            valid_settings(allowed_roots=allowed_roots), str(tmp_path / "settings.json")
-        )
+        save_settings(valid_settings(allowed_roots=allowed_roots), str(tmp_path / "settings.json"))
 
 
 def test_unknown_key_fails_closed(tmp_path):
     with pytest.raises(SettingsError):
-        save_settings(
-            valid_settings(unattended_upgrades=True), str(tmp_path / "settings.json")
-        )
+        save_settings(valid_settings(unattended_upgrades=True), str(tmp_path / "settings.json"))
 
 
 def test_save_rejects_invalid_settings_and_leaves_file_unchanged(tmp_path):

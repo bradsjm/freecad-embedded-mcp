@@ -16,7 +16,6 @@ import tempfile
 from typing import Any
 
 import FreeCAD
-import FreeCADGui
 
 from ..gui_dispatch import _flush_gui_events
 from ..protocol import ToolError
@@ -63,9 +62,7 @@ def _scale_to_max_edge(width: int, height: int, max_edge: int) -> tuple[int, int
     return max(1, int(width * scale)), max(1, int(height * scale))
 
 
-def resolve_capture_size(
-    view: Any, width: int | None, height: int | None
-) -> tuple[int, int]:
+def resolve_capture_size(view: Any, width: int | None, height: int | None) -> tuple[int, int]:
     """Resolve the capture size.
 
     Both sizes omitted: current viewport, longest edge clamped to
@@ -90,12 +87,8 @@ def resolve_capture_size(
     view_width, view_height = _view_size(view)
     if width is None and height is None:
         return _scale_to_max_edge(view_width, view_height, MAX_AUTO_EDGE)
-    resolved_width = (
-        min(max(1, view_width), MAX_EXPLICIT_EDGE) if width is None else width
-    )
-    resolved_height = (
-        min(max(1, view_height), MAX_EXPLICIT_EDGE) if height is None else height
-    )
+    resolved_width = min(max(1, view_width), MAX_EXPLICIT_EDGE) if width is None else width
+    resolved_height = min(max(1, view_height), MAX_EXPLICIT_EDGE) if height is None else height
     return resolved_width, resolved_height
 
 

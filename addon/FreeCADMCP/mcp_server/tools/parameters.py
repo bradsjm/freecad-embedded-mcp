@@ -36,7 +36,8 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from ..object_validation import mutation
 from ..protocol import VALIDATION_FAILED, ToolError
@@ -110,14 +111,15 @@ def _definition() -> dict[str, Any]:
         "description": (
             "Edit one object's parameters atomically: add dynamic properties, "
             "rename dynamic properties (built-in properties cannot be renamed "
-            "and are rejected), and register FreeCAD expressions with "
-            "setExpression. All names, types and value shapes are validated "
-            "before anything changes; the changes then run inside the shared "
-            "mutation gate so a failing recompute, a failed property "
-            "operation or an invalid expression reference rolls the whole "
-            "operation back. Expression keys are final (post-rename) property "
-            "names. Recomputed dependents are validated, not just the edited "
-            "object."
+            "and are rejected), register FreeCAD expressions with "
+            "setExpression, and remove existing expressions with "
+            "clear_expressions (setExpression(prop, None)). All names, types "
+            "and value shapes are validated before anything changes; the "
+            "changes then run inside the shared mutation gate so a failing "
+            "recompute, a failed property operation or an invalid expression "
+            "reference rolls the whole operation back. Expression keys and "
+            "clear_expressions names are final (post-rename) property names. "
+            "Recomputed dependents are validated, not just the edited object."
         ),
         "inputSchema": {
             "type": "object",
@@ -128,9 +130,13 @@ def _definition() -> dict[str, Any]:
                 "expressions": {
                     "type": "object",
                     "additionalProperties": {"type": "string", "minLength": 1},
-                    "description": (
-                        "Final property name -> FreeCAD expression string."
-                    ),
+                    "description": ("Final property name -> FreeCAD expression string."),
+                },
+                "clear_expressions": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "maxItems": 64,
+                    "description": ("Final property names whose expressions are removed."),
                 },
                 "rename": {
                     "type": "object",
@@ -167,8 +173,18 @@ def _definition() -> dict[str, Any]:
                     "items": {"$ref": "#/$defs/rename_pair"},
                 },
                 "expressions": {"type": "array", "items": {"type": "string"}},
+                "clearedExpressions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
             },
-            "required": ["object", "added", "renamed", "expressions"],
+            "required": [
+                "object",
+                "added",
+                "renamed",
+                "expressions",
+                "clearedExpressions",
+            ],
             "additionalProperties": False,
         },
     }
@@ -260,8 +276,7 @@ def _check_value_shape(prop_type: str, value: Any, name: str) -> None:
     if prop_type == "App::PropertyColor":
         if not isinstance(value, list) or len(value) not in (3, 4):
             raise _fail(
-                f"property '{name}' of type {prop_type} needs [r, g, b(, a)], "
-                f"got {value!r}"
+                f"property '{name}' of type {prop_type} needs [r, g, b(, a)], got {value!r}"
             )
         if any(_finite_number(item) is None for item in value):
             raise _fail(f"property '{name}' needs finite color components")
@@ -308,8 +323,7 @@ def _reject_read_only(obj: Any, name: str, *, what: str) -> None:
     blocked = sorted(_READ_ONLY_MODES.intersection(modes))
     if blocked:
         raise _fail(
-            f"{what} targets read-only property '{name}' (editor mode: "
-            f"{', '.join(blocked)})"
+            f"{what} targets read-only property '{name}' (editor mode: {', '.join(blocked)})"
         )
 
 
@@ -393,12 +407,40 @@ def _validate_all(obj: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         _reject_read_only(obj, prop, what="expression")
         expression_pairs.append((prop, expression))
 
+    # 4. Clears: final (post-rename) names, not paired with a set, unique.
+    requested_clears = arguments.get("clear_expressions") or []
+    if not isinstance(requested_clears, list) or len(requested_clears) > 64:
+        raise _fail("clear_expressions must be an array of at most 64 names")
+    clears: list[str] = []
+    for prop in requested_clears:
+        if not isinstance(prop, str):
+            raise _fail("clear_expressions must contain property names")
+        if prop in rename:
+            raise _fail(
+                f"clear_expressions name '{prop}' uses a renamed-away name; use "
+                "the final (post-rename) property name"
+            )
+        if prop not in final_names:
+            raise _fail(
+                f"clear_expressions name '{prop}' is not a property of "
+                f"'{getattr(obj, 'Name', '<unknown>')}' after the requested changes"
+            )
+        if prop in expressions:
+            raise _fail(
+                f"property '{prop}' cannot be cleared and given an expression in the same request"
+            )
+        if prop in clears:
+            raise _fail(f"clear_expressions lists property '{prop}' twice")
+        _reject_read_only(obj, prop, what="clear_expressions")
+        clears.append(prop)
+
     return {
         "added_entries": add,
         "added_names": added_names,
         "added_values": added_values,
         "renames": rename_pairs,
         "expressions": expression_pairs,
+        "clears": clears,
     }
 
 
@@ -421,6 +463,8 @@ def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
                 setattr(obj, entry["name"], value)
         for old, new in plan["renames"]:
             obj.renameProperty(old, new)
+        for prop in plan["clears"]:
+            obj.setExpression(prop, None)
         for prop, expression in plan["expressions"]:
             obj.setExpression(prop, expression)
 
@@ -429,6 +473,7 @@ def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         "added": plan["added_names"],
         "renamed": [{"from": old, "to": new} for old, new in plan["renames"]],
         "expressions": [prop for prop, _expression in plan["expressions"]],
+        "clearedExpressions": list(plan["clears"]),
     }
 
 

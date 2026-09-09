@@ -9,12 +9,7 @@ from PySide import QtCore
 
 from . import commands
 
-_ICON = str(
-    Path(__file__).resolve().parent.parent
-    / "Resources"
-    / "icons"
-    / "mcp-workbench.svg"
-)
+_ICON = str(Path(__file__).resolve().parent.parent / "Resources" / "icons" / "mcp-workbench.svg")
 
 _TOOLBAR_COMMANDS = ["Toggle_MCP_Server"]
 
@@ -65,9 +60,7 @@ def _auto_start_mcp():
         try:
             window = FreeCADGui.getMainWindow()
             if window is not None:
-                window.statusBar().showMessage(
-                    "MCP auto-start failed; see Report view", 5000
-                )
+                window.statusBar().showMessage("MCP auto-start failed; see Report view", 5000)
         except Exception:
             pass
 

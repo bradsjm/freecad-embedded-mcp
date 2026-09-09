@@ -6,14 +6,15 @@ connects process.finished -> _process_finished on successful exit; the local
 subclass must guard BEFORE super().update_properties()).
 """
 
-from contextlib import contextmanager
 import concurrent.futures
 import importlib.util
-from pathlib import Path
 import sys
 import threading
 import types
-from typing import Any, Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,7 +24,6 @@ if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
 from mcp_server.protocol import ToolError
-
 
 # ---------------------------------------------------------------------------
 # Stubs mirroring the native lifecycle.
@@ -238,8 +238,8 @@ def load_fem(
     calculixtools = types.ModuleType("femsolver.calculix.calculixtools")
     calculixtools.CalculiXTools = FakeCalculiXToolsBase
     checksanalysis = types.ModuleType("femtools.checksanalysis")
-    checksanalysis.check_member_for_solver_calculix = (
-        lambda analysis, solver, mesh, member: checks_message
+    checksanalysis.check_member_for_solver_calculix = lambda analysis, solver, mesh, member: (
+        checks_message
     )
     membertools = types.ModuleType("femtools.membertools")
     membertools.get_mesh_to_solve = lambda analysis: (FakeMesh(), mesh_message)
@@ -319,9 +319,7 @@ def working_dir(tmp_path: Path) -> Path:
 
 def test_tool_definition_is_finite_and_explicit() -> None:
     with load_fem() as fem:
-        assert [definition["name"] for definition in fem.TOOL_DEFINITIONS] == [
-            "run_fem"
-        ]
+        assert [definition["name"] for definition in fem.TOOL_DEFINITIONS] == ["run_fem"]
         schema = fem.TOOL_DEFINITIONS[0]["inputSchema"]
         assert schema["additionalProperties"] is False
         assert schema["required"] == ["document", "analysis"]
@@ -464,9 +462,7 @@ def test_missing_solver_creates_one_modern_solver_through_the_mutation_gate(
 
 
 def test_analysis_check_messages_are_honored(tmp_path: Path) -> None:
-    with load_fem(
-        checks_message="No material object defined in the analysis.\n"
-    ) as fem:
+    with load_fem(checks_message="No material object defined in the analysis.\n") as fem:
         ctx = FakeCtx(FakeDocument(), tmp_path)
         ctx._analysis.Group = [FakeSolver()]  # existing modern solver, reused
         with pytest.raises(ToolError) as excinfo:
@@ -479,9 +475,7 @@ def test_analysis_check_messages_are_honored(tmp_path: Path) -> None:
 
 
 def test_multiple_meshes_are_reported_before_prepare(tmp_path: Path) -> None:
-    with load_fem(
-        mesh_message="FEM: multiple mesh in analysis not yet supported!"
-    ) as fem:
+    with load_fem(mesh_message="FEM: multiple mesh in analysis not yet supported!") as fem:
         ctx = FakeCtx(FakeDocument(), tmp_path)
 
         with pytest.raises(ToolError) as excinfo:
@@ -502,7 +496,6 @@ def test_stale_generation_rejects_before_native_loading(tmp_path: Path) -> None:
         future, _doc, analysis = start_solve(fem, ctx, tmp_path)
         operation = ctx.active_solves["identity-Doc"]
         tool = operation.tool
-        op = operation
         assert tool.prepare_called and tool.compute_called
         solver = analysis.Group[0]
 
@@ -529,7 +522,6 @@ def test_changed_or_closed_identity_rejects_before_native_loading(
         future, doc, _analysis = start_solve(fem, ctx, tmp_path)
         operation = ctx.active_solves["identity-Doc"]
         tool = operation.tool
-        op = operation
 
         doc.identity = "identity-Doc2"
         tool.update_properties()
@@ -546,7 +538,6 @@ def test_changed_or_closed_identity_rejects_before_native_loading(
         future2, doc2, _analysis2 = start_solve(fem, ctx2, tmp_path)
         operation2 = ctx2.active_solves["identity-Doc"]
         tool2 = operation2.tool
-        op2 = operation2
         doc2.closed = True
         tool2.update_properties()
 
@@ -607,7 +598,6 @@ def test_result_block_summary_reports_sums(tmp_path: Path) -> None:
         future, _doc, _analysis = start_solve(fem, ctx, tmp_path)
         operation = ctx.active_solves["identity-Doc"]
         tool = operation.tool
-        op = operation
         work = working_dir(tmp_path)
         (work / "Result.vtm").write_text("<VTKFile/>")
 
@@ -629,9 +619,7 @@ def test_result_block_summary_reports_sums(tmp_path: Path) -> None:
                 return self._arrays[index][0]
 
         class FakeGrid:
-            def __init__(
-                self, points: int, cells: int, arrays: list[tuple[str, Any]]
-            ) -> None:
+            def __init__(self, points: int, cells: int, arrays: list[tuple[str, Any]]) -> None:
                 self._points = points
                 self._cells = cells
                 self._arrays = arrays
@@ -724,7 +712,6 @@ def test_crashed_process_is_reported(tmp_path: Path) -> None:
         ctx = FakeCtx(FakeDocument(), tmp_path)
         future, _doc, _analysis = start_solve(fem, ctx, tmp_path)
         operation = ctx.active_solves["identity-Doc"]
-        tool = operation.tool
         op = operation
 
         op._on_finished(-1, FakeQProcess.ExitStatus.CrashExit)
@@ -741,7 +728,6 @@ def test_failed_to_start_finalizes_exactly_once(tmp_path: Path) -> None:
         ctx = FakeCtx(FakeDocument(), tmp_path)
         future, _doc, _analysis = start_solve(fem, ctx, tmp_path)
         operation = ctx.active_solves["identity-Doc"]
-        tool = operation.tool
         op = operation
 
         op._on_error(FakeQProcess.ProcessError.FailedToStart)
@@ -774,7 +760,6 @@ def test_exit_zero_without_a_completed_loader_is_not_success(tmp_path: Path) -> 
         ctx = FakeCtx(FakeDocument(), tmp_path)
         future, _doc, _analysis = start_solve(fem, ctx, tmp_path)
         operation = ctx.active_solves["identity-Doc"]
-        tool = operation.tool
         op = operation
 
         # Native update_properties never ran (loader failed before our slot).
@@ -799,9 +784,7 @@ def test_compute_failure_finalizes_and_clears_the_solve(tmp_path: Path) -> None:
 
         FakeCalculiXToolsBase.compute = exploding_compute
         try:
-            future, _doc, _analysis2 = start_solve(
-                fem, ctx, tmp_path, analysis=analysis
-            )
+            future, _doc, _analysis2 = start_solve(fem, ctx, tmp_path, analysis=analysis)
         finally:
             FakeCalculiXToolsBase.compute = original_compute
 
@@ -845,7 +828,6 @@ def test_cancel_event_marks_requested_without_touching_the_result(
         future, _doc, _analysis = start_solve(fem, ctx, tmp_path)
         operation = ctx.active_solves["identity-Doc"]
         tool = operation.tool
-        op = operation
         work = working_dir(tmp_path)
         (work / "Result.vtm").write_text("<VTKFile/>")
 
@@ -868,7 +850,7 @@ def test_cancel_event_marks_requested_without_touching_the_result(
 def test_request_cancel_is_a_truthful_no_kill_boundary(tmp_path: Path) -> None:
     with load_fem() as fem:
         ctx = FakeCtx(FakeDocument(), tmp_path)
-        future, _doc, _analysis = start_solve(fem, ctx, tmp_path)
+        _future, _doc, _analysis = start_solve(fem, ctx, tmp_path)
         operation = ctx.active_solves["identity-Doc"]
         tool = operation.tool
 

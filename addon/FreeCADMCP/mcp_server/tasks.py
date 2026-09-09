@@ -25,9 +25,10 @@ import copy
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 from .protocol import (
     INVALID_PARAMS,
@@ -61,7 +62,7 @@ _UNKNOWN_TASK_MESSAGE = "Unknown or expired task"
 
 
 def _utc_now_iso() -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
@@ -75,9 +76,7 @@ def require_tasks_capability(client_capabilities: object) -> None:
     extensions: Any = None
     if isinstance(client_capabilities, dict):
         extensions = client_capabilities.get("extensions")
-    if not isinstance(extensions, dict) or not isinstance(
-        extensions.get(TASKS_EXTENSION_ID), dict
-    ):
+    if not isinstance(extensions, dict) or not isinstance(extensions.get(TASKS_EXTENSION_ID), dict):
         raise ProtocolError(
             MISSING_REQUIRED_CLIENT_CAPABILITY,
             "This request requires the MCP Tasks extension capability",
@@ -261,9 +260,7 @@ class TaskStore:
             self._sweep_locked(now)
             return self._get_checked_locked(task_id, principal)
 
-    def cancel_event_for(
-        self, task_id: str, *, principal: str | None = None
-    ) -> threading.Event:
+    def cancel_event_for(self, task_id: str, *, principal: str | None = None) -> threading.Event:
         """Cancellation event for the operation runner to poll."""
         return self.get(task_id, principal=principal).cancel_event
 
@@ -373,7 +370,6 @@ class TaskStore:
         changing them (``tasks/cancel`` still acknowledges at the protocol
         layer).
         """
-        now = self._clock()
         with self._lock:
             task = self._get_checked_locked(task_id, principal)
             if task.terminal:
@@ -414,9 +410,7 @@ class TaskStore:
         # A principal mismatch is indistinguishable from an unknown id so a
         # foreign principal cannot probe another principal's task ids.
         if task is None or task.principal != principal:
-            raise ProtocolError(
-                INVALID_PARAMS, _UNKNOWN_TASK_MESSAGE, {"taskId": task_id}
-            )
+            raise ProtocolError(INVALID_PARAMS, _UNKNOWN_TASK_MESSAGE, {"taskId": task_id})
         return task
 
     def _active_count_locked(self) -> int:

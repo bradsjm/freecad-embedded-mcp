@@ -16,8 +16,8 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server.protocol import VALIDATION_FAILED, ToolError  # noqa: E402
-from mcp_server.tools import parameters  # noqa: E402
+from mcp_server.protocol import VALIDATION_FAILED, ToolError
+from mcp_server.tools import parameters
 
 
 class FakeObj:
@@ -214,9 +214,7 @@ def test_unsupported_property_type_rejected_up_front():
     obj = FakeObj()
     ctx = FakeCtx(obj)
     with pytest.raises(ToolError) as excinfo:
-        call(
-            ctx, {**base(), "add": [{"name": "Weird", "type": "App::PropertyNonsense"}]}
-        )
+        call(ctx, {**base(), "add": [{"name": "Weird", "type": "App::PropertyNonsense"}]})
     assert "unsupported property type" in excinfo.value.message
     assert obj.ops == []
 
@@ -229,9 +227,7 @@ def test_value_shape_mismatch_rejected_up_front():
             ctx,
             {
                 **base(),
-                "add": [
-                    {"name": "Count", "type": "App::PropertyInteger", "value": True}
-                ],
+                "add": [{"name": "Count", "type": "App::PropertyInteger", "value": True}],
             },
         )
     assert "needs an integer" in excinfo.value.message
@@ -241,14 +237,12 @@ def test_value_shape_mismatch_rejected_up_front():
 def test_non_finite_float_value_rejected_up_front():
     obj = FakeObj()
     ctx = FakeCtx(obj)
-    with pytest.raises(ToolError) as excinfo:
+    with pytest.raises(ToolError):
         call(
             ctx,
             {
                 **base(),
-                "add": [
-                    {"name": "Depth", "type": "App::PropertyLength", "value": 1e400}
-                ],
+                "add": [{"name": "Depth", "type": "App::PropertyLength", "value": 1e400}],
             },
         )
     assert obj.ops == []
@@ -467,15 +461,14 @@ def test_successful_flow_applies_add_rename_expression_in_order():
         "added": ["Depth"],
         "renamed": [{"from": "Old", "to": "New"}],
         "expressions": ["New"],
+        "clearedExpressions": [],
     }
 
 
 def test_added_property_without_value_keeps_free_cad_default():
     obj = FakeObj()
     ctx = FakeCtx(obj)
-    result = call(
-        ctx, {**base(), "add": [{"name": "Note", "type": "App::PropertyString"}]}
-    )
+    result = call(ctx, {**base(), "add": [{"name": "Note", "type": "App::PropertyString"}]})
     assert result["added"] == ["Note"]
     assert obj._props["Note"]["value"] is None
     assert ("commit",) in ctx.doc.transactions
@@ -497,14 +490,146 @@ def test_expression_may_target_a_property_added_in_the_same_call():
 
 
 # ---------------------------------------------------------------------------
+# clear_expressions: removal after renames, before sets.
+# ---------------------------------------------------------------------------
+
+
+def test_successful_clear_removes_expression_after_renames_before_sets():
+    obj = FakeObj(properties=["Old", "Other"])
+    obj.expressions["Old"] = "1"
+    ctx = FakeCtx(obj)
+
+    result = call(
+        ctx,
+        {
+            **base(),
+            "rename": {"Old": "New"},
+            "clear_expressions": ["New"],
+            "expressions": {"Other": "2"},
+        },
+    )
+
+    assert obj.ops == [
+        ("rename", "Old", "New"),
+        ("expression", "New", None),
+        ("expression", "Other", "2"),
+    ]
+    assert obj.expressions["New"] is None
+    assert obj.expressions["Old"] == "1"
+    assert obj.expressions["Other"] == "2"
+    assert result["clearedExpressions"] == ["New"]
+    assert ctx.doc.transactions[-1] == ("commit",)
+
+
+def test_clear_and_set_of_the_same_property_is_rejected():
+    obj = FakeObj(properties=["Length"])
+    ctx = FakeCtx(obj)
+
+    with pytest.raises(ToolError) as excinfo:
+        call(
+            ctx,
+            {
+                **base(),
+                "clear_expressions": ["Length"],
+                "expressions": {"Length": "2"},
+            },
+        )
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert "cleared and given an expression" in excinfo.value.message
+    assert obj.ops == []
+    assert ctx.doc.transactions == []
+
+
+def test_clear_of_a_renamed_away_name_is_rejected():
+    obj = FakeObj(properties=["Old"])
+    ctx = FakeCtx(obj)
+
+    with pytest.raises(ToolError) as excinfo:
+        call(
+            ctx,
+            {**base(), "rename": {"Old": "New"}, "clear_expressions": ["Old"]},
+        )
+
+    assert "renamed-away name" in excinfo.value.message
+    assert obj.ops == []
+
+
+def test_clear_of_an_unknown_final_name_is_rejected():
+    obj = FakeObj(properties=["Length"])
+    ctx = FakeCtx(obj)
+
+    with pytest.raises(ToolError) as excinfo:
+        call(ctx, {**base(), "clear_expressions": ["Ghost"]})
+
+    assert "not a property" in excinfo.value.message
+    assert obj.ops == []
+
+
+def test_clear_targets_read_only_property_is_rejected():
+    obj = FakeObj(properties=["Length"], read_only=["Length"])
+    ctx = FakeCtx(obj)
+
+    with pytest.raises(ToolError) as excinfo:
+        call(ctx, {**base(), "clear_expressions": ["Length"]})
+
+    assert "read-only" in excinfo.value.message
+    assert obj.ops == []
+
+
+def test_clear_lists_a_property_twice_is_rejected():
+    obj = FakeObj(properties=["Length"])
+    ctx = FakeCtx(obj)
+
+    with pytest.raises(ToolError) as excinfo:
+        call(
+            ctx,
+            {**base(), "clear_expressions": ["Length", "Length"]},
+        )
+
+    assert "twice" in excinfo.value.message
+    assert obj.ops == []
+
+
+def test_clear_may_target_a_property_added_in_the_same_call():
+    obj = FakeObj()
+    ctx = FakeCtx(obj)
+
+    result = call(
+        ctx,
+        {
+            **base(),
+            "add": [{"name": "Width", "type": "App::PropertyFloat", "value": 3.5}],
+            "clear_expressions": ["Width"],
+        },
+    )
+
+    assert obj.ops == [
+        ("add", "Width", "App::PropertyFloat", parameters._GROUP),
+        ("expression", "Width", None),
+    ]
+    assert result["clearedExpressions"] == ["Width"]
+
+
+def test_cleared_expressions_reported_in_request_order():
+    obj = FakeObj(properties=["A", "B", "C"])
+    ctx = FakeCtx(obj)
+
+    result = call(
+        ctx,
+        {**base(), "clear_expressions": ["C", "A"]},
+    )
+
+    assert result["clearedExpressions"] == ["C", "A"]
+
+
+# ---------------------------------------------------------------------------
 # Tool definition sanity.
 # ---------------------------------------------------------------------------
 
 
 def test_definition_is_finite_and_bound():
-    assert [definition["name"] for definition in parameters.TOOL_DEFINITIONS] == [
-        "edit_parameters"
-    ]
+    assert [definition["name"] for definition in parameters.TOOL_DEFINITIONS] == ["edit_parameters"]
     assert sorted(parameters.HANDLERS) == ["edit_parameters"]
     from mcp_server.protocol import check_schema
 

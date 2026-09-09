@@ -11,10 +11,10 @@ injected fake monotonic clock.
 
 from __future__ import annotations
 
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-import sys
 
 import pytest
 
@@ -22,8 +22,8 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server import tasks as tasks_module  # noqa: E402
-from mcp_server.protocol import INVALID_PARAMS, ProtocolError, ToolError  # noqa: E402
+from mcp_server import tasks as tasks_module
+from mcp_server.protocol import INVALID_PARAMS, ProtocolError, ToolError
 
 
 class FakeClock:
@@ -131,9 +131,7 @@ def test_complete_sets_terminal_result_and_creation_based_ttl() -> None:
     store, clock = make_store()
     record = store.create("run_fem", {}, principal="alice")
     clock.advance(300)  # 300 s of work
-    assert store.complete(
-        record.task_id, {"resultType": "complete", "ok": True}, principal="alice"
-    )
+    assert store.complete(record.task_id, {"resultType": "complete", "ok": True}, principal="alice")
     wire = tasks_module.get_task_wire(record)
     assert wire["resultType"] == "complete"
     assert wire["status"] == "completed"
@@ -174,9 +172,7 @@ def test_terminal_state_is_immutable_against_late_writers() -> None:
     record = store.create("run_script", {}, principal="alice")
     assert store.complete(record.task_id, {"stdout": "42"}, principal="alice")
     # Every later writer loses the race against the terminal state.
-    assert not store.fail(
-        record.task_id, {"code": -32603, "message": "late"}, principal="alice"
-    )
+    assert not store.fail(record.task_id, {"code": -32603, "message": "late"}, principal="alice")
     assert not store.finalize_cancelled(record.task_id, principal="alice")
     assert not store.request_cancel(record.task_id, principal="alice")
     assert record.status == "completed"
@@ -283,9 +279,7 @@ def test_completed_task_survives_cancel_requested_during_run() -> None:
         release.wait(timeout=5)
         if record.cancel_event.is_set():
             # A safe boundary abandoned remaining work.
-            store.finalize_cancelled(
-                record.task_id, principal="alice", status_message="abandoned"
-            )
+            store.finalize_cancelled(record.task_id, principal="alice", status_message="abandoned")
             return
         executed.append(True)
         store.complete(record.task_id, {"stdout": "42"}, principal="alice")
@@ -394,9 +388,7 @@ def test_retention_cap_with_no_terminal_records_rejects_busy() -> None:
 
 
 def test_require_tasks_capability_accepts_declared_extension() -> None:
-    tasks_module.require_tasks_capability(
-        {"extensions": {"io.modelcontextprotocol/tasks": {}}}
-    )
+    tasks_module.require_tasks_capability({"extensions": {"io.modelcontextprotocol/tasks": {}}})
     # Other extensions alongside do not interfere.
     tasks_module.require_tasks_capability(
         {
@@ -441,7 +433,8 @@ def test_status_vocabulary_matches_released_schema() -> None:
         "failed",
         "cancelled",
     )
-    assert tasks_module.TERMINAL_STATUSES == {"completed", "failed", "cancelled"}
-    assert tasks_module.TASK_ELIGIBLE_OPERATIONS == frozenset(
-        {"run_script", "run_fem", "export", "measure"}
+    assert {"completed", "failed", "cancelled"} == tasks_module.TERMINAL_STATUSES
+    assert (
+        frozenset({"run_script", "run_fem", "export", "measure"})
+        == tasks_module.TASK_ELIGIBLE_OPERATIONS
     )

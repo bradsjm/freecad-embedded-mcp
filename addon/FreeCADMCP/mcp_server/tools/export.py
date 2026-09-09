@@ -171,8 +171,7 @@ def publish(ctx: Any, staged: str, destination: str) -> None:
         if current is not None:
             raise ToolError(
                 "CONSENT_DENIED",
-                "destination appeared while exporting; request fresh consent "
-                "before overwriting it",
+                "destination appeared while exporting; request fresh consent before overwriting it",
                 {"reason": "target_changed", "path": destination},
             )
         try:
@@ -196,9 +195,7 @@ def publish(ctx: Any, staged: str, destination: str) -> None:
         return
 
     current = ctx.file_fingerprint(destination)
-    if current is None or _fingerprint_of(current) != _fingerprint_of(
-        approved_fingerprint
-    ):
+    if current is None or _fingerprint_of(current) != _fingerprint_of(approved_fingerprint):
         raise ToolError(
             "CONSENT_DENIED",
             "target changed after consent; retry the original export operation",
@@ -241,9 +238,7 @@ def _require_export_solid(ctx: Any, doc: Any, name: str) -> Any:
     return obj
 
 
-def _placed_shape_copies(
-    ctx: Any, doc: Any, object_names: list[str]
-) -> list[tuple[str, Any]]:
+def _placed_shape_copies(ctx: Any, doc: Any, object_names: list[str]) -> list[tuple[str, Any]]:
     """Document-space shape copies of the selected objects, selection order.
 
     ``_require_export_solid`` is the one geometry validation per selected
@@ -390,8 +385,7 @@ def _step_readback(path: str) -> dict[str, Any]:
     if not solids or not math.isfinite(volume):
         raise ToolError(
             "VALIDATION_FAILED",
-            "STEP readback contains no usable solids; the destination file "
-            "was not modified",
+            "STEP readback contains no usable solids; the destination file was not modified",
             {},
         )
     return {
@@ -516,8 +510,7 @@ def _export_fcstd(ctx: Any, doc: Any, destination: str) -> dict[str, Any]:
         if str(doc.FileName) != original_file_name:
             raise ToolError(
                 "VALIDATION_FAILED",
-                "FCStd export changed the document's save identity; "
-                "refusing to publish",
+                "FCStd export changed the document's save identity; refusing to publish",
                 {"path": destination},
             )
         try:
@@ -567,8 +560,7 @@ def export(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         if object_names:
             raise ToolError(
                 "VALIDATION_FAILED",
-                "fcstd export serializes the entire native document; pass "
-                "an empty object list",
+                "fcstd export serializes the entire native document; pass an empty object list",
                 {"format": "fcstd"},
             )
         for key in ("linear_deflection", "angular_deflection", "bed_align"):
@@ -603,9 +595,7 @@ def export(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             fmt,
             destination,
             _deflection(arguments, "linear_deflection", DEFAULT_LINEAR_DEFLECTION),
-            _deflection(
-                arguments, "angular_deflection", DEFAULT_ANGULAR_DEFLECTION
-            ),
+            _deflection(arguments, "angular_deflection", DEFAULT_ANGULAR_DEFLECTION),
             _bed_align(arguments),
         )
     except ToolError:

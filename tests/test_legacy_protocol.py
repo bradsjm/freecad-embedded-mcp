@@ -3,7 +3,7 @@
 Drives the real ``mcp_server.legacy_protocol`` and the real server module
 over test_server's shared harness (stubbed FreeCAD/PySide and contract-
 shaped stub tool modules). Covers: initialize negotiation for every
-legacy revision, session lifecycle and isolation, the 17-tool registry
+legacy revision, session lifecycle and isolation, the 23-tool registry
 through legacy shapes, consent bridging (accept, decline, invalid reply,
 client error, timeout, changed target, duplicate and cross-session
 responses, deletion, shutdown, explicit cancellation), final-result
@@ -29,13 +29,14 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-import test_server as ts  # noqa: E402 - shared stub harness
-
-import mcp_server.gui_dispatch as gui_dispatch  # noqa: E402
-import mcp_server.legacy_protocol as legacy  # noqa: E402
-import mcp_server.protocol as protocol  # noqa: E402
-import mcp_server.server as server_module  # noqa: E402
-import mcp_server.tasks as tasks_module  # noqa: E402
+import mcp_server.legacy_protocol as legacy
+import mcp_server.server as server_module
+import mcp_server.tasks as tasks_module
+import test_server as ts
+from mcp_server import (
+    gui_dispatch,
+    protocol,
+)
 
 # server.py has bound the stub tool modules; drop the fake package from
 # sys.modules so later test files import the real tool modules again.
@@ -75,9 +76,7 @@ class FakeClock:
 
 
 def make_adapter(server, clock=None):
-    return legacy.LegacyProtocol(
-        server.dispatch, clock=time.monotonic if clock is None else clock
-    )
+    return legacy.LegacyProtocol(server.dispatch, clock=time.monotonic if clock is None else clock)
 
 
 @pytest.fixture(autouse=True)
@@ -107,8 +106,9 @@ def _clean_state():
     server_module._server = None
 
 
-
-def initialize(adapter, version="2025-11-25", *, principal=PRINCIPAL, capabilities=None, headers=None):
+def initialize(
+    adapter, version="2025-11-25", *, principal=PRINCIPAL, capabilities=None, headers=None
+):
     message = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -149,9 +149,7 @@ def request(method, rpc_id=7, params=None):
 
 
 def call_tool(name, rpc_id=7, arguments=None):
-    return request(
-        "tools/call", rpc_id, {"name": name, "arguments": arguments or {}}
-    )
+    return request("tools/call", rpc_id, {"name": name, "arguments": arguments or {}})
 
 
 def next_event(stream, timeout=3.0):
@@ -171,15 +169,15 @@ def final_event(adapter, reply, sid, *, principal=PRINCIPAL, on_elicitation=None
         return event
 
 
-def answer_elicitation(adapter, sid, elicitation_event, result=None, *, error=None, principal=PRINCIPAL):
+def answer_elicitation(
+    adapter, sid, elicitation_event, result=None, *, error=None, principal=PRINCIPAL
+):
     response = {"jsonrpc": "2.0", "id": elicitation_event["id"]}
     if error is not None:
         response["error"] = error
     else:
         response["result"] = (
-            {"action": "accept", "content": {"confirmed": True}}
-            if result is None
-            else result
+            {"action": "accept", "content": {"confirmed": True}} if result is None else result
         )
     return adapter.handle(response, {"mcp-session-id": sid}, principal)
 
@@ -302,9 +300,7 @@ def test_session_lifecycle_requires_initialized_before_requests():
     early = send(adapter, sid, request("tools/list", 3))
     assert early.status == 400
     assert "Session initialization is not complete." in early.payload["error"]["message"]
-    first = send(
-        adapter, sid, request("notifications/initialized", None)
-    )
+    first = send(adapter, sid, request("notifications/initialized", None))
     assert first.status == 202
     second = send(adapter, sid, request("notifications/initialized", None))
     assert second.status == 202  # idempotent duplicate
@@ -327,7 +323,7 @@ def test_session_limit_returns_503_at_32_sessions():
     server = make_server()
     adapter = make_adapter(server)
     for _ in range(32):
-        sid = session_of(initialize(adapter))
+        session_of(initialize(adapter))
     overflow = initialize(adapter)
     assert overflow.status == 503
     assert "MCP session limit reached" in overflow.payload["error"]["message"]
@@ -387,7 +383,7 @@ def test_tools_list_returns_17_with_revision_shape(version):
     assert reply.status == 200
     result = reply.payload["result"]
     assert [t["name"] for t in result["tools"]] == list(server_module.PLAN_TOOL_ORDER)
-    assert len(result["tools"]) == 17
+    assert len(result["tools"]) == 23
     assert "resultType" not in result
     assert "ttlMs" not in result and "cacheScope" not in result
     if version == legacy.BATCH_REVISION:
@@ -541,9 +537,7 @@ def test_consent_decline_denies_without_effects():
     reply = send(adapter, sid, call_tool("new_document", 7))
 
     def on_elicitation(event):
-        answer_elicitation(
-            adapter, sid, event, {"action": "decline", "message": "no"}
-        )
+        answer_elicitation(adapter, sid, event, {"action": "decline", "message": "no"})
 
     event = final_event(adapter, reply, sid, on_elicitation=on_elicitation)
     assert_consent_denied(event)
@@ -751,16 +745,14 @@ def test_consent_cancelled_via_notification_never_executes():
     assert cancelled.status == 202
     event = next_event(reply.stream)
     assert_consent_denied(event)
-    assert (
-        event["result"]["structuredContent"]["error"]["details"]["reason"]
-        == "cancelled"
-    )
+    assert event["result"]["structuredContent"]["error"]["details"]["reason"] == "cancelled"
     assert event["result"]["content"][0]["text"] == "Operation cancelled before execution"
     assert STUB_CALLS == []
     # The unknown-id case is a harmless 202.
-    assert send(
-        adapter, sid, request("notifications/cancelled", None, {"requestId": 999})
-    ).status == 202
+    assert (
+        send(adapter, sid, request("notifications/cancelled", None, {"requestId": 999})).status
+        == 202
+    )
 
 
 def test_session_delete_aborts_pending_consent():
@@ -821,7 +813,7 @@ def test_concurrent_sessions_with_same_numeric_request_id():
         send(adapter, sid, request("notifications/initialized", None))
         sids.append(sid)
         replies.append(send(adapter, sid, call_tool("new_document", 5)))
-    for sid, reply in zip(sids, replies):
+    for sid, reply in zip(sids, replies, strict=True):
         elicitation = next_event(reply.stream)
         answer_elicitation(adapter, sid, elicitation)
     finals = [next_event(reply.stream) for reply in replies]
@@ -890,9 +882,7 @@ def test_queued_cancellation_prevents_handler_entry(_clean_state):
     try:
         reply = send(adapter, sid, call_tool("run_script", 7))
         assert wait_until(lambda: gui_dispatch.pending_count() == 1)
-        cancelled = send(
-            adapter, sid, request("notifications/cancelled", None, {"requestId": 7})
-        )
+        cancelled = send(adapter, sid, request("notifications/cancelled", None, {"requestId": 7}))
         assert cancelled.status == 202
     finally:
         gui_dispatch._waker = saved_waker
@@ -925,8 +915,8 @@ def test_explicit_cancellation_is_scoped_to_its_own_request():
     send(adapter, sid, request("notifications/cancelled", None, {"requestId": 7}))
     victim_final = next_event(victim.stream)
     assert_consent_denied(victim_final)
+
     # The bystander's consent wait is untouched and still answerable.
-    bystander_prompt = None
     # answer the bystander elicitation: fetch its prompt
     # (already consumed above; re-answer by reading the next event)
     def on_elicitation(event):
@@ -1159,7 +1149,6 @@ def test_legacy_result_revision_shims_for_2025_03_26():
 
 
 def test_batch_overflow_rejects_only_the_excess_members(_clean_state):
-    waker = _clean_state
     server = make_server()
     adapter = make_adapter(server)
     sid = session_of(initialize(adapter, "2025-03-26"))

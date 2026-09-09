@@ -77,9 +77,8 @@ def _ensure_object_validation() -> None:
 
 _ensure_object_validation()
 
-from mcp_server import protocol  # noqa: E402
-from mcp_server.tools import geometry  # noqa: E402
-
+from mcp_server import protocol
+from mcp_server.tools import geometry
 
 # ---------------------------------------------------------------------------
 # FreeCAD doubles.
@@ -190,9 +189,7 @@ class FakeEdge:
         self.BoundBox = FakeBoundBox(*bounds)
         self.Curve = curve
         self._closed = bool(closed)
-        self.Vertexes = [
-            SimpleNamespace(Point=FakeVector(*point)) for point in points if point
-        ]
+        self.Vertexes = [SimpleNamespace(Point=FakeVector(*point)) for point in points if point]
 
     def isClosed(self):
         return self._closed
@@ -237,9 +234,7 @@ class FakeCtx:
 
     def require_document(self, name):
         if name != self.doc.Name:
-            raise protocol.ToolError(
-                protocol.DOCUMENT_NOT_FOUND, f"unknown document {name!r}"
-            )
+            raise protocol.ToolError(protocol.DOCUMENT_NOT_FOUND, f"unknown document {name!r}")
         return self.doc
 
     def require_object(self, doc, name):
@@ -359,9 +354,7 @@ def test_validate_geometry_bounds_tolerance_window():
     ctx = FakeCtx({"Box": FakeObject("Box", shape)})
     base = {"document": "Doc", "objects": ["Box"]}
     drifted = {"Box": [0.0, 0.0, 0.0, 10.0, 10.0, 10.5]}
-    result = geometry.HANDLERS["validate_geometry"](
-        ctx, {**base, "expected_bounds": drifted}
-    )
+    result = geometry.HANDLERS["validate_geometry"](ctx, {**base, "expected_bounds": drifted})
     verdict = result["objects"][0]["verdicts"]["bounds"]
     assert verdict["verdict"] == "mismatch"
     assert verdict["deviations"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.5]
@@ -374,11 +367,31 @@ def test_validate_geometry_bounds_tolerance_window():
     assert tolerant["all_valid"] is True
 
 
+def test_validate_geometry_unavailable_bounds_verdict_through_shared_helper():
+    # Shapeless objects keep null bounds; an expected_bounds request then
+    # produces the shared helper's "unavailable" verdict and the entry is
+    # invalid — identical semantics to the pre-refactor inline comparison.
+    ctx = FakeCtx({"Group": FakeObject("Group", None)})
+    result = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "objects": ["Group"],
+            "expected_bounds": {"Group": [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]},
+        },
+    )
+    entry = result["objects"][0]
+    verdict = entry["verdicts"]["bounds"]
+    assert verdict["verdict"] == "unavailable"
+    assert verdict["deviations"] is None
+    assert entry["valid"] is False
+    assert result["all_valid"] is False
+    _assert_output_schema(result, "validate_geometry")
+
+
 def test_validate_geometry_without_expected_bounds_has_no_verdict():
     ctx = FakeCtx({"Box": FakeObject("Box", FakeShape(volume=1000.0))})
-    result = geometry.HANDLERS["validate_geometry"](
-        ctx, {"document": "Doc", "objects": ["Box"]}
-    )
+    result = geometry.HANDLERS["validate_geometry"](ctx, {"document": "Doc", "objects": ["Box"]})
     assert "bounds" not in result["objects"][0]["verdicts"]
     assert result["objects"][0]["valid"] is True
 
@@ -427,7 +440,6 @@ def test_placed_shape_failures_are_fail_closed():
     with pytest.raises(protocol.ToolError):
         geometry.placed_shape(link)
 
-
     # An ordinary unscaled link resolves through the native API.
     plain_link = FakeObject("PlainLink", FakeShape())
     plain_link.TypeId = "App::Link"
@@ -439,9 +451,7 @@ def test_placed_shape_failures_are_fail_closed():
 
 def test_validate_geometry_valid_non_solid():
     ctx = FakeCtx({"Group": FakeObject("Group", None)})
-    result = geometry.HANDLERS["validate_geometry"](
-        ctx, {"document": "Doc", "objects": ["Group"]}
-    )
+    result = geometry.HANDLERS["validate_geometry"](ctx, {"document": "Doc", "objects": ["Group"]})
     entry = result["objects"][0]
     assert entry["shape_valid"] is None
     assert entry["solid_count"] is None
@@ -473,14 +483,10 @@ def test_validate_geometry_zero_volume_solid_fails():
 def test_validate_geometry_missing_document_and_object():
     ctx = FakeCtx({"Box": FakeObject("Box", FakeShape())})
     with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.HANDLERS["validate_geometry"](
-            ctx, {"document": "Ghost", "objects": ["Box"]}
-        )
+        geometry.HANDLERS["validate_geometry"](ctx, {"document": "Ghost", "objects": ["Box"]})
     assert excinfo.value.code == protocol.DOCUMENT_NOT_FOUND
     with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.HANDLERS["validate_geometry"](
-            ctx, {"document": "Doc", "objects": ["Ghost"]}
-        )
+        geometry.HANDLERS["validate_geometry"](ctx, {"document": "Doc", "objects": ["Ghost"]})
     assert excinfo.value.code == protocol.OBJECT_NOT_FOUND
 
 
@@ -511,9 +517,7 @@ def test_measure_requires_b_for_distance_and_interference():
     ctx = FakeCtx({"Box": box})
     for mode in ("distance", "interference"):
         with pytest.raises(protocol.ToolError) as excinfo:
-            geometry.HANDLERS["measure"](
-                ctx, {"document": "Doc", "a": "Box", "mode": mode}
-            )
+            geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Box", "mode": mode})
         assert excinfo.value.code == protocol.VALIDATION_FAILED
         assert "'b'" in excinfo.value.message
 
@@ -645,9 +649,7 @@ def test_measure_section_requires_plane():
     box = FakeObject("Box", FakeShape())
     ctx = FakeCtx({"Box": box})
     with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.HANDLERS["measure"](
-            ctx, {"document": "Doc", "a": "Box", "mode": "section"}
-        )
+        geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Box", "mode": "section"})
     assert "'plane'" in excinfo.value.message
     with pytest.raises(protocol.ToolError) as excinfo:
         geometry.HANDLERS["measure"](
@@ -753,9 +755,7 @@ def test_measure_section_normal_and_point_plane(part_stub, freecad_stub):
 def test_measure_faces_lists_areas_normals_and_references():
     shell = _two_face_object()
     ctx = FakeCtx({"Shell": shell})
-    result = geometry.HANDLERS["measure"](
-        ctx, {"document": "Doc", "a": "Shell", "mode": "faces"}
-    )
+    result = geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Shell", "mode": "faces"})
     assert result["mode"] == "faces"
     assert result["truncated"] is False
     assert len(result["faces"]) == 2
@@ -782,9 +782,7 @@ def test_measure_faces_truncates_and_single_face_selection():
     ]
     shell = FakeObject("Shell", FakeShape(volume=0.0, solids=0, faces=faces))
     ctx = FakeCtx({"Shell": shell})
-    result = geometry.HANDLERS["measure"](
-        ctx, {"document": "Doc", "a": "Shell", "mode": "faces"}
-    )
+    result = geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Shell", "mode": "faces"})
     assert len(result["faces"]) == geometry._MAX_FACES
     assert result["truncated"] is True
     selected = geometry.HANDLERS["measure"](
@@ -819,9 +817,7 @@ def test_reference_round_trip_and_whole_object():
     token = reference["subelement"]
     assert token and "." in token
     assert geometry.resolve_reference(ctx, doc, reference) == (box, "Edge1")
-    assert geometry.resolve_reference(
-        ctx, doc, {"object": "Box", "subelement": ""}
-    ) == (
+    assert geometry.resolve_reference(ctx, doc, {"object": "Box", "subelement": ""}) == (
         box,
         "",
     )
@@ -833,9 +829,7 @@ def test_resolve_rejects_numeric_subelement():
     doc = ctx.require_document("Doc")
     for selector in ("Face7", "Edge7"):
         with pytest.raises(protocol.ToolError) as excinfo:
-            geometry.resolve_reference(
-                ctx, doc, {"object": "Box", "subelement": selector}
-            )
+            geometry.resolve_reference(ctx, doc, {"object": "Box", "subelement": selector})
         assert excinfo.value.code == protocol.VALIDATION_FAILED
         assert "not durable" in excinfo.value.message
 
@@ -870,7 +864,7 @@ def test_resolve_rejects_foreign_document_and_unknown_object():
     box_b = FakeObject("BoxB", FakeShape())
     ctx = FakeCtx({"BoxA": box_a, "BoxB": box_b})
     doc = ctx.require_document("Doc")
-    reference = geometry.make_reference(ctx, doc, box_a, "face", 1)
+    geometry.make_reference(ctx, doc, box_a, "face", 1)
     payload = {
         "document": "other-document",
         "generation": ctx.generation,
@@ -895,3 +889,206 @@ def test_resolve_rejects_out_of_range_index():
     with pytest.raises(protocol.ToolError) as excinfo:
         geometry.resolve_reference(ctx, doc, reference)
     assert excinfo.value.details["reason"] == "missing_subelement"
+
+
+# ---------------------------------------------------------------------------
+# inspect_topology.
+# ---------------------------------------------------------------------------
+
+
+class FakeCylinderSurface:
+    def __init__(self):
+        self.Radius = 5.0
+        self.Axis = FakeVector(0.0, 0.0, 1.0)
+
+
+class FakeCircleCurve:
+    def __init__(self):
+        self.Radius = 2.5
+        self.Center = FakeVector(1.0, 2.0, 3.0)
+        self.Axis = FakeVector(0.0, 0.0, 1.0)
+
+
+def _topology_doc(face_count=130, edge_count=2):
+    faces = [
+        FakeFace(
+            area=float(index),
+            bounds=(0.0, 0.0, 0.0, 10.0, 10.0, float(index)),
+        )
+        for index in range(1, face_count + 1)
+    ]
+    faces[0].Surface = FakeCylinderSurface()
+    edges = [
+        FakeEdge(
+            length=4.0,
+            bounds=(0.0, 0.0, 0.0, 4.0, 0.0, 0.0),
+            curve=FakeCircleCurve() if index == 1 else None,
+            closed=index == 1,
+            points=[(0.0, 0.0, 0.0), (4.0, 0.0, 0.0)],
+        )
+        for index in range(1, edge_count + 1)
+    ]
+    shape = FakeShape(volume=10.0, faces=faces, edges=edges)
+    return FakeCtx({"Shell": FakeObject("Shell", shape)})
+
+
+def test_inspect_topology_pages_every_face_once_through_signed_cursors():
+    ctx = _topology_doc()
+    arguments = {"document": "Doc", "object": "Shell", "role": "face"}
+
+    seen: list[int] = []
+    cursor = None
+    pages = 0
+    while True:
+        page_arguments = {**arguments, "limit": 50}
+        if cursor is not None:
+            page_arguments["cursor"] = cursor
+        result = geometry.HANDLERS["inspect_topology"](ctx, page_arguments)
+        _assert_output_schema(result, "inspect_topology")
+        seen.extend(item["index"] for item in result["items"])
+        pages += 1
+        cursor = result["nextCursor"]
+        if cursor is None:
+            break
+
+    assert seen == list(range(1, 131))
+    assert len(set(seen)) == 130
+    assert pages == 3
+
+
+def test_inspect_topology_face_items_carry_descriptive_data():
+    ctx = _topology_doc()
+    result = geometry.HANDLERS["inspect_topology"](
+        ctx, {"document": "Doc", "object": "Shell", "role": "face", "limit": 1}
+    )
+
+    assert result["total"] == 130
+    assert result["count"] == 1
+    assert result["object"] == "Shell"
+    assert result["role"] == "face"
+    item = result["items"][0]
+    assert item["index"] == 1
+    assert item["bounds"] == [0.0, 0.0, 0.0, 10.0, 10.0, 1.0]
+    assert item["area"] == 1.0
+    assert item["center"] == [0.0, 0.0, 0.0]
+    assert item["normal"] == [0.0, 0.0, 1.0]
+    assert item["surfaceType"] == "FakeCylinderSurface"
+    assert item["radius"] == 5.0
+    assert item["axis"] == [0.0, 0.0, 1.0]
+    reference = item["reference"]
+    assert reference["object"] == "Shell"
+    assert reference["subelement"]
+
+
+def test_inspect_topology_edge_items_carry_descriptive_data():
+    ctx = _topology_doc()
+    result = geometry.HANDLERS["inspect_topology"](
+        ctx, {"document": "Doc", "object": "Shell", "role": "edge"}
+    )
+
+    assert result["total"] == 2
+    first, second = result["items"]
+    assert first["curveType"] == "FakeCircleCurve"
+    assert first["closed"] is True
+    assert first["length"] == 4.0
+    assert first["radius"] == 2.5
+    assert first["center"] == [1.0, 2.0, 3.0]
+    assert first["axis"] == [0.0, 0.0, 1.0]
+    assert second["curveType"] is None
+    assert second["closed"] is False
+    assert second["start"] == [0.0, 0.0, 0.0]
+    assert second["end"] == [4.0, 0.0, 0.0]
+    assert second["radius"] is None
+
+
+def test_topology_cursor_rejects_generation_change_and_mismatched_arguments():
+    ctx = _topology_doc()
+    arguments = {"document": "Doc", "object": "Shell", "role": "face", "limit": 50}
+    first = geometry.HANDLERS["inspect_topology"](ctx, arguments)
+    cursor = first["nextCursor"]
+    assert cursor is not None
+
+    ctx.generation += 1
+    with pytest.raises(protocol.ToolError) as stale:
+        geometry.HANDLERS["inspect_topology"](ctx, {**arguments, "cursor": cursor})
+    assert stale.value.details["reason"] == "stale_cursor"
+
+    ctx.generation -= 1
+    with pytest.raises(protocol.ToolError) as role_changed:
+        geometry.HANDLERS["inspect_topology"](ctx, {**arguments, "role": "edge", "cursor": cursor})
+    assert role_changed.value.details["reason"] == "stale_cursor"
+
+    with pytest.raises(protocol.ToolError) as limit_changed:
+        geometry.HANDLERS["inspect_topology"](ctx, {**arguments, "limit": 10, "cursor": cursor})
+    assert limit_changed.value.details["reason"] == "stale_cursor"
+
+
+def test_topology_cursor_rejects_malformed_indexes():
+    ctx = _topology_doc()
+    arguments = {"document": "Doc", "object": "Shell", "role": "face", "limit": 50}
+
+    for bad_last in (0, -3, "7", True, 1.5):
+        payload = {
+            "kind": "topology-page",
+            "identity": ctx.document_identity(ctx.doc),
+            "generation": ctx.generation,
+            "object": "Shell",
+            "role": "face",
+            "limit": 50,
+            "last": bad_last,
+        }
+        cursor = ctx.signer.sign("cursor", payload)
+        with pytest.raises(protocol.ToolError) as malformed:
+            geometry.HANDLERS["inspect_topology"](ctx, {**arguments, "cursor": cursor})
+        assert malformed.value.details["reason"] == "malformed_cursor"
+
+
+def test_inspect_topology_unknown_object_is_object_not_found():
+    ctx = _topology_doc()
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.HANDLERS["inspect_topology"](
+            ctx, {"document": "Doc", "object": "Ghost", "role": "face"}
+        )
+    assert excinfo.value.code == protocol.OBJECT_NOT_FOUND
+
+
+def test_measure_accepts_signed_topology_reference_selectors():
+    ctx = _topology_doc(face_count=3)
+    page = geometry.HANDLERS["inspect_topology"](
+        ctx, {"document": "Doc", "object": "Shell", "role": "face", "limit": 2}
+    )
+    reference = page["items"][1]["reference"]
+
+    result = geometry.HANDLERS["measure"](
+        ctx,
+        {
+            "document": "Doc",
+            "mode": "faces",
+            "a": {"object": reference["object"], "subelement": reference["subelement"]},
+        },
+    )
+
+    assert [face["index"] for face in result["faces"]] == [2]
+    assert result["a"] == reference
+
+
+def test_measure_rejects_reference_incompatible_with_mode():
+    ctx = _topology_doc()
+    page = geometry.HANDLERS["inspect_topology"](
+        ctx, {"document": "Doc", "object": "Shell", "role": "edge"}
+    )
+    edge_reference = page["items"][0]["reference"]
+
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.HANDLERS["measure"](
+            ctx,
+            {
+                "document": "Doc",
+                "mode": "faces",
+                "a": {
+                    "object": edge_reference["object"],
+                    "subelement": edge_reference["subelement"],
+                },
+            },
+        )
+    assert excinfo.value.code == protocol.VALIDATION_FAILED

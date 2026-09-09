@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
-from ..object_validation import geometry_report
+from ..object_validation import compare_expected_bounds, geometry_report
 from ..protocol import (
+    DOMAIN_CURSOR,
     VALIDATION_FAILED,
     ProtocolError,
     ToolError,
@@ -37,8 +39,11 @@ _DEFAULT_BOUNDS_TOLERANCE = 0.000001
 _MAX_CANDIDATES = 16
 _MAX_CURVES = 32
 _MAX_FACES = 64
+_MAX_TOPOLOGY_PAGE = 100
+_DEFAULT_TOPOLOGY_PAGE = 50
 
 _NUMERIC_SUBELEMENT = re.compile(r"(?:Face|Edge|Vertex|Wire)\d+")
+_SUBELEMENT_INDEX = re.compile(r"(Face|Edge)([1-9][0-9]*)")
 
 
 # ---------------------------------------------------------------------------
@@ -197,21 +202,15 @@ def resolve_reference(ctx: Any, doc: Any, reference: Any) -> tuple[Any, str]:
     """
 
     if not isinstance(reference, Mapping):
-        raise ToolError(
-            VALIDATION_FAILED, "topology reference must be an object mapping"
-        )
+        raise ToolError(VALIDATION_FAILED, "topology reference must be an object mapping")
     name = reference.get("object")
     subelement = reference.get("subelement", "")
     if subelement is None:
         subelement = ""
     if not isinstance(name, str) or not name:
-        raise ToolError(
-            VALIDATION_FAILED, "topology reference is missing an object name"
-        )
+        raise ToolError(VALIDATION_FAILED, "topology reference is missing an object name")
     if not isinstance(subelement, str):
-        raise ToolError(
-            VALIDATION_FAILED, "topology reference subelement must be a string"
-        )
+        raise ToolError(VALIDATION_FAILED, "topology reference subelement must be a string")
     obj = ctx.require_object(doc, name)
     if subelement == "":
         return obj, ""
@@ -222,9 +221,7 @@ def resolve_reference(ctx: Any, doc: Any, reference: Any) -> tuple[Any, str]:
                 "numeric subelement selectors (e.g. Face7) are not durable; use the"
                 " signed reference returned by measure",
             )
-        raise ToolError(
-            VALIDATION_FAILED, "topology reference subelement is not a signed token"
-        )
+        raise ToolError(VALIDATION_FAILED, "topology reference subelement is not a signed token")
     try:
         payload = ctx.signer.verify("topology", subelement)
     except ProtocolError as exc:
@@ -254,11 +251,7 @@ def resolve_reference(ctx: Any, doc: Any, reference: Any) -> tuple[Any, str]:
         )
     role = payload.get("role")
     index = payload.get("index")
-    if (
-        role not in ("face", "edge")
-        or isinstance(index, bool)
-        or not isinstance(index, int)
-    ):
+    if role not in ("face", "edge") or isinstance(index, bool) or not isinstance(index, int):
         raise ToolError(
             VALIDATION_FAILED,
             "topology reference role or index is invalid",
@@ -295,17 +288,59 @@ def resolve_reference(ctx: Any, doc: Any, reference: Any) -> tuple[Any, str]:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_reference_selection(
+    ctx: Any, doc: Any, selector: Mapping
+) -> tuple[Any, Mapping | None]:
+    """Resolve a canonical signed ``{object, subelement}`` reference.
+
+    An empty subelement selects the whole object; a signed Face/Edge token
+    selects the placed (document-space) subshape at the signed index.
+    """
+
+    obj, native = resolve_reference(ctx, doc, selector)
+    if native == "":
+        return obj, None
+    match = _SUBELEMENT_INDEX.fullmatch(native)
+    if match is None:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"unsupported native subelement {native!r} on {obj.Name}",
+        )
+    role = "face" if match.group(1) == "Face" else "edge"
+    index = int(match.group(2))
+    shape = placed_shape(obj)
+    try:
+        subshapes = list(shape.Faces if role == "face" else shape.Edges)
+    except Exception as exc:
+        raise ToolError(VALIDATION_FAILED, f"subshape access failed: {exc}") from exc
+    if index > len(subshapes):
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"{role} {index} no longer exists on {obj.Name}",
+            {"reason": "missing_subelement"},
+        )
+    subshape = subshapes[index - 1]
+    return obj, {
+        "role": role,
+        "index": index,
+        "shape": subshape,
+        "bounds": _bbox(subshape),
+    }
+
+
 def _resolve_target(ctx: Any, doc: Any, selector: Any) -> tuple[Any, Mapping | None]:
-    """Resolve an object name or ``{object, role, box}`` selector.
+    """Resolve an object name, signed reference, or ``{object, role, box}``.
 
     Returns ``(object, selection)`` where ``selection`` is None for a whole
-    object, otherwise ``{role, index, shape, bounds}`` for the unique matching
+    object, otherwise ``{role, index, shape, bounds}`` for the selected
     subshape. Zero matches and ambiguity are explicit errors; ambiguity lists
     the candidate subelements.
     """
 
     if isinstance(selector, str):
         return ctx.require_object(doc, selector), None
+    if "subelement" in selector:
+        return _resolve_reference_selection(ctx, doc, selector)
     obj = ctx.require_object(doc, selector["object"])
     role = selector["role"]
     box = [float(value) for value in selector["box"]]
@@ -391,30 +426,16 @@ def _geometry_entry(
         volume_verdict = "positive"
     else:
         volume_verdict = "nonpositive"
-    expected = (
-        expected_bounds.get(name) if isinstance(expected_bounds, Mapping) else None
-    )
+    expected = expected_bounds.get(name) if isinstance(expected_bounds, Mapping) else None
     measured = report["bounds"]
     bounds_verdict = None
     if expected is not None:
+        verdict, deviations = compare_expected_bounds(measured, expected, tolerance)
         bounds_verdict = {
-            "verdict": "mismatch",
+            "verdict": verdict,
             "expected": [float(value) for value in expected],
-            "deviations": None,
+            "deviations": deviations,
         }
-        if measured is None:
-            bounds_verdict["verdict"] = "unavailable"
-        else:
-            deviations = [
-                abs(float(measured) - float(goal))
-                for measured, goal in zip(measured, expected)
-            ]
-            bounds_verdict["deviations"] = deviations
-            bounds_verdict["verdict"] = (
-                "match"
-                if all(value <= tolerance for value in deviations)
-                else "mismatch"
-            )
     valid = (
         bool(report["object_valid"])
         and report["shape_valid"] is not False
@@ -440,6 +461,7 @@ def _geometry_entry(
         "valid": valid,
     }
 
+
 def _handle_validate_geometry(ctx: Any, arguments: Mapping[str, Any]) -> dict:
     doc = ctx.require_document(arguments["document"])
     expected_solids = arguments.get("expected_solids")
@@ -455,9 +477,7 @@ def _handle_validate_geometry(ctx: Any, arguments: Mapping[str, Any]) -> dict:
         global_report = dict(report)
         if _shape_of(obj) is not None:
             global_report["bounds"] = _bbox(placed_shape(obj))
-        entries.append(
-            _geometry_entry(global_report, expected_solids, expected_bounds, tolerance)
-        )
+        entries.append(_geometry_entry(global_report, expected_solids, expected_bounds, tolerance))
     return {
         "document": {
             "name": doc.Name,
@@ -478,9 +498,7 @@ def _measure_distance(a_shape: Any, b_shape: Any, payload: dict) -> dict:
     try:
         distance, points, _info = a_shape.distToShape(b_shape)
     except Exception as exc:
-        raise ToolError(
-            VALIDATION_FAILED, f"distance computation failed: {exc}"
-        ) from exc
+        raise ToolError(VALIDATION_FAILED, f"distance computation failed: {exc}") from exc
     payload["distance"] = _finite(distance)
     if points:
         first = points[0]
@@ -598,16 +616,12 @@ def _measure_section(a_shape: Any, plane: Mapping[str, Any], payload: dict) -> d
     try:
         compound = a_shape.section(face)
     except Exception as exc:
-        raise ToolError(
-            VALIDATION_FAILED, f"section computation failed: {exc}"
-        ) from exc
+        raise ToolError(VALIDATION_FAILED, f"section computation failed: {exc}") from exc
     try:
         edges = list(getattr(compound, "Edges", ()) or ())
         wires = list(getattr(compound, "Wires", ()) or ())
     except Exception as exc:
-        raise ToolError(
-            VALIDATION_FAILED, f"section result access failed: {exc}"
-        ) from exc
+        raise ToolError(VALIDATION_FAILED, f"section result access failed: {exc}") from exc
     curves = []
     total = 0.0
     for edge in edges[:_MAX_CURVES]:
@@ -673,9 +687,7 @@ def _face_summary(face: Any) -> dict:
     return summary
 
 
-def _measure_faces(
-    ctx: Any, doc: Any, obj: Any, selection: Mapping | None, payload: dict
-) -> dict:
+def _measure_faces(ctx: Any, doc: Any, obj: Any, selection: Mapping | None, payload: dict) -> dict:
     shape = _target_shape(obj, selection)
     if shape is None:
         raise ToolError(VALIDATION_FAILED, f"object {obj.Name} has no shape")
@@ -724,9 +736,7 @@ def _handle_measure(ctx: Any, arguments: Mapping[str, Any]) -> dict:
         if arguments.get("plane") is None:
             raise ToolError(VALIDATION_FAILED, "mode 'section' requires a 'plane'")
         if arguments.get("b") is not None:
-            raise ToolError(
-                VALIDATION_FAILED, "mode 'section' takes only 'a' and 'plane'"
-            )
+            raise ToolError(VALIDATION_FAILED, "mode 'section' takes only 'a' and 'plane'")
         payload["a"] = _reference_for(ctx, doc, a_obj, a_sel)
         a_shape = _target_shape(a_obj, a_sel)
         if a_shape is None:
@@ -749,8 +759,198 @@ def _handle_measure(ctx: Any, arguments: Mapping[str, Any]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# inspect_topology.
+# ---------------------------------------------------------------------------
+
+
+def _type_name(value: Any) -> str | None:
+    """Native geometry type name, or None when unavailable."""
+
+    if value is None:
+        return None
+    return type(value).__name__
+
+
+def _first_vertex_point(edge: Any, last: bool) -> list[float] | None:
+    try:
+        vertexes = list(getattr(edge, "Vertexes", ()) or ())
+    except Exception:
+        return None
+    if not vertexes:
+        return None
+    target = vertexes[-1] if last else vertexes[0]
+    return _point(getattr(target, "Point", None))
+
+
+def _topology_face_item(ctx: Any, doc: Any, obj: Any, index: int, face: Any) -> dict:
+    summary = _face_summary(face)
+    surface = getattr(face, "Surface", None)
+    radius = _finite(getattr(surface, "Radius", None))
+    axis = _point(getattr(surface, "Axis", None))
+    return {
+        "index": index,
+        "reference": make_reference(ctx, doc, obj, "face", index),
+        "bounds": _bbox(face),
+        "area": summary.get("area"),
+        "center": summary.get("center"),
+        "normal": summary.get("normal"),
+        "surfaceType": _type_name(surface),
+        "radius": radius,
+        "axis": axis,
+    }
+
+
+def _topology_edge_item(ctx: Any, doc: Any, obj: Any, index: int, edge: Any) -> dict:
+    curve = getattr(edge, "Curve", None)
+    try:
+        closed = bool(edge.isClosed())
+    except Exception:
+        closed = None
+    return {
+        "index": index,
+        "reference": make_reference(ctx, doc, obj, "edge", index),
+        "bounds": _bbox(edge),
+        "length": _finite(getattr(edge, "Length", None)),
+        "curveType": _type_name(curve),
+        "closed": closed,
+        "start": _first_vertex_point(edge, last=False),
+        "end": _first_vertex_point(edge, last=True),
+        "center": _point(getattr(curve, "Center", None)),
+        "radius": _finite(getattr(curve, "Radius", None)),
+        "axis": _point(getattr(curve, "Axis", None)),
+    }
+
+
+def _topology_cursor_payload(
+    ctx: Any,
+    doc: Any,
+    object_name: str,
+    role: str,
+    limit: int,
+    last: int,
+) -> dict:
+    return {
+        "kind": "topology-page",
+        "identity": str(ctx.document_identity(doc)),
+        "generation": int(ctx.document_generation(doc)),
+        "object": object_name,
+        "role": role,
+        "limit": limit,
+        "last": last,
+    }
+
+
+def _open_topology_cursor(
+    ctx: Any,
+    doc: Any,
+    cursor: str,
+    object_name: str,
+    role: str,
+    limit: int,
+) -> int:
+    """Return the page start index, rejecting stale or changed cursors."""
+
+    payload = ctx.signer.verify(DOMAIN_CURSOR, cursor)
+    expected = _topology_cursor_payload(ctx, doc, object_name, role, limit, 0)
+    if payload.get("kind") != "topology-page":
+        raise _stale_topology_cursor()
+    for key in ("identity", "generation", "object", "role", "limit"):
+        if payload.get(key) != expected[key]:
+            raise _stale_topology_cursor()
+    last = payload.get("last")
+    if isinstance(last, bool) or not isinstance(last, int) or last < 1:
+        raise ToolError(
+            VALIDATION_FAILED,
+            "topology cursor carries a malformed page index",
+            {"reason": "malformed_cursor"},
+        )
+    return last
+
+
+def _stale_topology_cursor() -> ToolError:
+    return ToolError(
+        VALIDATION_FAILED,
+        "topology cursor is stale or was built for a different request; "
+        "restart from the first page",
+        {"reason": "stale_cursor"},
+    )
+
+
+def _handle_inspect_topology(ctx: Any, arguments: Mapping[str, Any]) -> dict:
+    doc = ctx.require_document(arguments["document"])
+    role = str(arguments["role"])
+    if role not in ("face", "edge"):
+        raise ToolError(VALIDATION_FAILED, "role must be 'face' or 'edge'")
+    limit = arguments.get("limit")
+    limit = _DEFAULT_TOPOLOGY_PAGE if limit is None else int(limit)
+    limit = max(1, min(_MAX_TOPOLOGY_PAGE, limit))
+    obj = ctx.require_object(doc, str(arguments["object"]))
+
+    start_after = 0
+    cursor = arguments.get("cursor")
+    if cursor:
+        start_after = _open_topology_cursor(ctx, doc, str(cursor), obj.Name, role, limit)
+
+    shape = placed_shape(obj)
+    try:
+        subshapes = list(shape.Faces if role == "face" else shape.Edges)
+    except Exception as exc:
+        raise ToolError(VALIDATION_FAILED, f"subshape access failed: {exc}") from exc
+    total = len(subshapes)
+
+    build = _topology_face_item if role == "face" else _topology_edge_item
+    items = [
+        build(ctx, doc, obj, index, subshape)
+        for index, subshape in enumerate(
+            subshapes[start_after : start_after + limit], start_after + 1
+        )
+    ]
+    next_cursor = None
+    if start_after + limit < total:
+        next_cursor = ctx.signer.sign(
+            DOMAIN_CURSOR,
+            _topology_cursor_payload(ctx, doc, obj.Name, role, limit, start_after + limit),
+        )
+    return {
+        "document": str(getattr(doc, "Name", "")),
+        "generation": int(ctx.document_generation(doc)),
+        "object": str(getattr(obj, "Name", "")),
+        "role": role,
+        "total": total,
+        "count": len(items),
+        "items": items,
+        "nextCursor": next_cursor,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Schemas.
 # ---------------------------------------------------------------------------
+
+
+_BOUNDS_ARRAY_DEF = {
+    "type": ["array", "null"],
+    "items": {"type": "number"},
+    "minItems": 6,
+    "maxItems": 6,
+}
+
+_POINT_DEF = {
+    "type": ["array", "null"],
+    "items": {"type": "number"},
+    "minItems": 3,
+    "maxItems": 3,
+}
+
+_REFERENCE_DEF = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "object": {"type": "string", "minLength": 1},
+        "subelement": {"type": "string"},
+    },
+    "required": ["object", "subelement"],
+}
 
 _SELECTOR_DEF = {
     "anyOf": [
@@ -770,7 +970,125 @@ _SELECTOR_DEF = {
             },
             "required": ["object", "role", "box"],
         },
+        _REFERENCE_DEF,
     ]
+}
+
+_TOPOLOGY_FACE_ITEM = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "index",
+        "reference",
+        "bounds",
+        "area",
+        "center",
+        "normal",
+        "surfaceType",
+        "radius",
+        "axis",
+    ],
+    "properties": {
+        "index": {"type": "integer", "minimum": 1},
+        "reference": {"$ref": "#/$defs/reference"},
+        "bounds": _BOUNDS_ARRAY_DEF,
+        "area": {"type": ["number", "null"]},
+        "center": {"$ref": "#/$defs/point"},
+        "normal": {"$ref": "#/$defs/point"},
+        "surfaceType": {"type": ["string", "null"]},
+        "radius": {"type": ["number", "null"]},
+        "axis": {"$ref": "#/$defs/point"},
+    },
+}
+
+_TOPOLOGY_EDGE_ITEM = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "index",
+        "reference",
+        "bounds",
+        "length",
+        "curveType",
+        "closed",
+        "start",
+        "end",
+        "center",
+        "radius",
+        "axis",
+    ],
+    "properties": {
+        "index": {"type": "integer", "minimum": 1},
+        "reference": {"$ref": "#/$defs/reference"},
+        "bounds": _BOUNDS_ARRAY_DEF,
+        "length": {"type": ["number", "null"]},
+        "curveType": {"type": ["string", "null"]},
+        "closed": {"type": ["boolean", "null"]},
+        "start": {"$ref": "#/$defs/point"},
+        "end": {"$ref": "#/$defs/point"},
+        "center": {"$ref": "#/$defs/point"},
+        "radius": {"type": ["number", "null"]},
+        "axis": {"$ref": "#/$defs/point"},
+    },
+}
+
+_INSPECT_TOPOLOGY_INPUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["document", "object", "role"],
+    "properties": {
+        "document": {"type": "string", "minLength": 1},
+        "object": {"type": "string", "minLength": 1},
+        "role": {"enum": ["face", "edge"]},
+        "cursor": {"type": ["string", "null"]},
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": _MAX_TOPOLOGY_PAGE,
+            "default": _DEFAULT_TOPOLOGY_PAGE,
+        },
+    },
+}
+
+_INSPECT_TOPOLOGY_OUTPUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "document",
+        "generation",
+        "object",
+        "role",
+        "total",
+        "count",
+        "items",
+        "nextCursor",
+    ],
+    "properties": {
+        "document": {"type": "string"},
+        "generation": {"type": "integer", "minimum": 0},
+        "object": {"type": "string"},
+        "role": {"enum": ["face", "edge"]},
+        "total": {"type": "integer", "minimum": 0},
+        "count": {"type": "integer", "minimum": 0},
+        "items": {
+            "type": "array",
+            "items": {
+                "anyOf": [
+                    {"$ref": "#/$defs/faceItem"},
+                    {"$ref": "#/$defs/edgeItem"},
+                ]
+            },
+            "maxItems": _MAX_TOPOLOGY_PAGE,
+        },
+        "nextCursor": {"type": ["string", "null"]},
+    },
+    "$defs": {
+        "point": _POINT_DEF,
+        "bounds": _BOUNDS_ARRAY_DEF,
+        "reference": _REFERENCE_DEF,
+        "faceItem": _TOPOLOGY_FACE_ITEM,
+        "edgeItem": _TOPOLOGY_EDGE_ITEM,
+    },
 }
 
 _PLANE_DEF = {
@@ -803,29 +1121,6 @@ _PLANE_DEF = {
     ]
 }
 
-_BOUNDS_ARRAY_DEF = {
-    "type": ["array", "null"],
-    "items": {"type": "number"},
-    "minItems": 6,
-    "maxItems": 6,
-}
-
-_POINT_DEF = {
-    "type": ["array", "null"],
-    "items": {"type": "number"},
-    "minItems": 3,
-    "maxItems": 3,
-}
-
-_REFERENCE_DEF = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "object": {"type": "string", "minLength": 1},
-        "subelement": {"type": "string"},
-    },
-    "required": ["object", "subelement"],
-}
 
 _VALIDATE_GEOMETRY_INPUT = {
     "type": "object",
@@ -1067,14 +1362,30 @@ TOOL_DEFINITIONS = [
         "inputSchema": _MEASURE_INPUT,
         "outputSchema": _MEASURE_OUTPUT,
     },
+    {
+        "name": "inspect_topology",
+        "description": (
+            "Page through an object's faces or edges in native index order "
+            "with document-space bounds, sampled centers/normals, surface "
+            "and curve type names and optional radius/axis data. Each item "
+            "carries a signed topology reference usable as a measure "
+            "selector; pagination uses a signed cursor bound to the document "
+            "generation, object, role and page size."
+        ),
+        "inputSchema": _INSPECT_TOPOLOGY_INPUT,
+        "outputSchema": _INSPECT_TOPOLOGY_OUTPUT,
+    },
 ]
 
 HANDLERS = {
     "validate_geometry": _handle_validate_geometry,
     "measure": _handle_measure,
+    "inspect_topology": _handle_inspect_topology,
 }
 
 check_schema(_VALIDATE_GEOMETRY_INPUT)
 check_schema(_VALIDATE_GEOMETRY_OUTPUT)
 check_schema(_MEASURE_INPUT)
 check_schema(_MEASURE_OUTPUT)
+check_schema(_INSPECT_TOPOLOGY_INPUT)
+check_schema(_INSPECT_TOPOLOGY_OUTPUT)

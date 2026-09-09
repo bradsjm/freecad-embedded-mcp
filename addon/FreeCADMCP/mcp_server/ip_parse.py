@@ -26,13 +26,15 @@ def validate_allowed_ips(allowed_ips_str):
 
     if not _COMMA_SEP_RE.match(allowed_ips_str):
         return [], [
-            "Malformed list — check for leading/trailing commas, "
-            "double commas, or missing separators."
+            (
+                "Malformed list — check for leading/trailing commas, "
+                "double commas, or missing separators."
+            )
         ]
 
     valid = []
-    for entry in allowed_ips_str.split(","):
-        entry = entry.strip()
+    for raw_entry in allowed_ips_str.split(","):
+        entry = raw_entry.strip()
         try:
             ipaddress.ip_network(entry, strict=False)
             valid.append(entry)

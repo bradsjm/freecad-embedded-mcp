@@ -20,8 +20,9 @@ shapeless objects stay valid). On top of it this module provides:
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from .protocol import VALIDATION_FAILED, ToolError
 
@@ -63,9 +64,7 @@ def object_validity_error(obj: Any) -> str | None:
 
     name = str(getattr(obj, "Name", "<unknown>"))
     states = _object_states(obj)
-    failed_states = [
-        state for state in states if state.strip().casefold() in _FAILED_STATES
-    ]
+    failed_states = [state for state in states if state.strip().casefold() in _FAILED_STATES]
     is_valid = getattr(obj, "isValid", None)
 
     if callable(is_valid):
@@ -279,6 +278,7 @@ def _rollback_failure_details(stage: str, exc: BaseException) -> dict:
     """
 
     details: dict = {
+        "operationState": "rollback_failed",
         "rollbackFailed": True,
         "rollbackStage": stage,
         "originalError": _describe(exc),
@@ -286,6 +286,20 @@ def _rollback_failure_details(stage: str, exc: BaseException) -> dict:
     if isinstance(exc, ToolError) and exc.details is not None:
         details["originalDetails"] = exc.details
     return details
+
+
+def _mark_rolled_back(exc: ToolError) -> None:
+    """Attach the ``rolled_back`` state to a ToolError lacking one.
+
+    Errors that already carry an explicit state (the commit-failure
+    ``may_have_changed``) pass through unchanged.
+    """
+
+    details = exc.details if isinstance(exc.details, dict) else {}
+    if "operationState" not in details:
+        details["operationState"] = "rolled_back"
+        details["nextAction"] = "retry_from_original_state"
+    exc.details = details
 
 
 def _force_close_surviving_transaction(ctx: Any, doc: Any, label: str) -> None:
@@ -347,10 +361,10 @@ def _reject_user_transaction(ctx: Any, doc: Any) -> None:
         )
 
 
-def _dependents_of(targets: list[Any]) -> tuple[list[Any], bool]:
+def _dependents_of(targets: list[Any], limit: int = _MAX_DEPENDENTS) -> tuple[list[Any], bool]:
     """Transitive InList closure of ``targets`` and whether it was truncated.
 
-    The closure walk stops at ``_MAX_DEPENDENTS``; the truncated flag lets
+    The closure walk stops at ``limit``; the truncated flag lets
     callers refuse the complexity instead of silently skipping dependents.
     """
 
@@ -368,7 +382,7 @@ def _dependents_of(targets: list[Any]) -> tuple[list[Any], bool]:
             dep_name = str(getattr(dep, "Name", ""))
             if not dep_name or dep_name in seen:
                 continue
-            if len(dependents) >= _MAX_DEPENDENTS:
+            if len(dependents) >= limit:
                 truncated = True
                 break
             seen.add(dep_name)
@@ -376,9 +390,7 @@ def _dependents_of(targets: list[Any]) -> tuple[list[Any], bool]:
             queue.append(dep)
         if truncated:
             break
-    return sorted(
-        dependents, key=lambda item: str(getattr(item, "Name", ""))
-    ), truncated
+    return sorted(dependents, key=lambda item: str(getattr(item, "Name", ""))), truncated
 
 
 def _baseline_solid_counts(dependents: list[Any]) -> dict[str, int]:
@@ -422,6 +434,57 @@ def _baseline_solid_counts(dependents: list[Any]) -> dict[str, int]:
     return baseline
 
 
+def compare_expected_bounds(
+    measured: Sequence[float] | None,
+    expected: Sequence[float],
+    tolerance: float,
+) -> tuple[str, list[float] | None]:
+    """Shared six-coordinate bounds comparison.
+
+    Returns ``("match" | "mismatch" | "unavailable", deviations)``; the
+    deviations are the per-coordinate absolute differences against
+    ``expected`` in document-space order, or ``None`` when no measured
+    bounds exist. ``validate_geometry`` verdicts and the ``mutation``
+    commit condition are both built on this one comparison.
+    """
+
+    if measured is None:
+        return "unavailable", None
+    deviations = [abs(float(a) - float(b)) for a, b in zip(measured, expected, strict=True)]
+    if any(value > tolerance for value in deviations):
+        return "mismatch", deviations
+    return "match", deviations
+
+
+def document_bounds(obj: Any) -> list[float] | None:
+    """Document-space bounds of ``obj`` or ``None`` when unavailable.
+
+    Reads the placed shape (global placement applied exactly once) through
+    the lazily imported ``tools.geometry.placed_shape``; this module stays
+    FreeCAD-free at import time.
+    """
+
+    try:
+        from .tools.geometry import placed_shape
+    except Exception:
+        return None
+    try:
+        return _shape_bounds(placed_shape(obj))
+    except Exception:
+        return None
+
+
+def dependent_count(targets: Sequence[Any], limit: int = _MAX_DEPENDENTS) -> int:
+    """Count the transitive dependent closure of ``targets``, bounded.
+
+    A closure larger than ``limit`` reports ``limit``: the count is a
+    bounded diagnostic for change summaries, never a completeness claim.
+    """
+
+    dependents, _truncated = _dependents_of(list(targets), limit)
+    return len(dependents)
+
+
 @contextmanager
 def mutation(
     ctx: Any,
@@ -429,6 +492,9 @@ def mutation(
     label: str,
     objects: Iterable[Any] | Callable[[], Iterable[Any]],
     expected_solids: int | None = None,
+    expected_bounds: Sequence[float] | None = None,
+    bounds_tolerance: float = 0.000001,
+    expectations: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> Any:
     """Run one tool mutation inside its own FreeCAD transaction.
 
@@ -452,15 +518,28 @@ def mutation(
     invalid/shapeless dependents use the default ``geometry_report`` solid
     contract. A dependent closure larger
     than 256 is refused before any effects for direct targets (and rolled
-    back for create flows) instead of being silently skipped; commit on
-    success, abort on any assignment, recompute, validation or commit
-    failure. FreeCAD's abort undoes recorded changes without recomputing,
+    back for create flows) instead of being silently skipped; an explicit
+    ``expected_bounds`` is compared against the direct target's
+    document-space bounds through :func:`compare_expected_bounds` after
+    recompute, and any unavailable or exceeding coordinate fails the
+    commit condition. Commit on success; abort on any assignment,
+    recompute, validation, bounds or commit failure. FreeCAD's abort
+    undoes recorded changes without recomputing,
     so every rollback recomputes to clear the stale Touched/Invalid cached
     state and restore usable pre-mutation geometry. Abort or rollback
     recompute failures surface explicitly as ``rollbackFailed`` tool errors
     naming the failing stage, with the original error and diagnostics
     preserved — never as a valid rollback. UndoMode is restored in every
     exit path.
+
+    Every error raised after the transaction opens carries
+    ``details.operationState``: ``"rolled_back"`` (with
+    ``nextAction: "retry_from_original_state"``) when the abort and
+    rollback recompute succeeded, ``"rollback_failed"`` when either step
+    broke, and ``"may_have_changed"`` (with
+    ``nextAction: "inspect_target"``) for a commit failure whose prior
+    state the gate cannot prove restored. Failures before the transaction
+    opens stay without ``operationState`` because nothing started.
     """
 
     ctx.check_document_idle(doc)
@@ -473,9 +552,7 @@ def mutation(
     pre_target_names: set[str] = set()
     if not callable(objects):
         pre_targets = list(objects)
-        pre_target_names = {
-            str(getattr(obj, "Name", "")) for obj in pre_targets
-        }
+        pre_target_names = {str(getattr(obj, "Name", "")) for obj in pre_targets}
         pre_dependents, exceeded = _dependents_of(pre_targets)
         if exceeded:
             raise ToolError(
@@ -526,15 +603,11 @@ def mutation(
                     f"{_MAX_DEPENDENTS} dependent objects; rolled back",
                     {"reason": "too_many_dependents"},
                 )
-            target_names = {
-                str(getattr(obj, "Name", "")) for obj in targets
-            }
+            target_names = {str(getattr(obj, "Name", "")) for obj in targets}
 
             # A removal inside the body kills its wrapper's Name, so the
             # reported names were captured at entry for pre-known targets.
-            target_names = pre_target_names or {
-                str(getattr(obj, "Name", "")) for obj in targets
-            }
+            target_names = pre_target_names or {str(getattr(obj, "Name", "")) for obj in targets}
 
             doc.recompute()
             # A removed object's Python wrapper can survive the removal with
@@ -551,30 +624,59 @@ def mutation(
             if not live_names:
                 # A document double without an Objects list cannot report
                 # liveness; keep every target under validation.
-                live_names = {
-                    str(getattr(obj, "Name", "")) for obj in targets
-                } | {
+                live_names = {str(getattr(obj, "Name", "")) for obj in targets} | {
                     str(getattr(dep, "Name", "")) for dep in dependents
                 }
-            targets = [
-                obj
-                for obj in targets
-                if str(getattr(obj, "Name", "") or "") in live_names
-            ]
+            targets = [obj for obj in targets if str(getattr(obj, "Name", "") or "") in live_names]
             dependents = [
-                dep
-                for dep in dependents
-                if str(getattr(dep, "Name", "") or "") in live_names
+                dep for dep in dependents if str(getattr(dep, "Name", "") or "") in live_names
             ]
             errors: list[str] = []
             for obj in targets:
+                name = str(getattr(obj, "Name", "<unknown>"))
+                if expectations is None:
+                    target_solids = expected_solids
+                    target_bounds = expected_bounds
+                    target_tolerance = bounds_tolerance
+                else:
+                    entry = expectations.get(name) or {}
+                    target_solids = entry.get("expected_solids")
+                    target_bounds = entry.get("expected_bounds")
+                    target_tolerance = float(entry.get("bounds_tolerance", bounds_tolerance))
                 problem = object_validity_error(obj)
                 if problem is not None:
                     errors.append(problem)
                     continue
-                report = geometry_report(obj, expected_solids)
+                report = geometry_report(obj, target_solids)
                 if not report["ok"]:
                     errors.append(str(report["error"]))
+                if target_bounds is None:
+                    continue
+                measured = document_bounds(obj)
+                verdict, deviations = compare_expected_bounds(
+                    measured, target_bounds, target_tolerance
+                )
+                if verdict == "match":
+                    continue
+                raise ToolError(
+                    VALIDATION_FAILED,
+                    (
+                        f"Object '{name}' has no document-space bounds; "
+                        "expected_bounds cannot be verified."
+                        if verdict == "unavailable"
+                        else f"Object '{name}' bounds deviate from "
+                        "expected_bounds by more than "
+                        f"bounds_tolerance={target_tolerance}."
+                    ),
+                    {
+                        "reason": "expected_bounds",
+                        "object": name,
+                        "expected": [float(v) for v in target_bounds],
+                        "measured": measured,
+                        "deviations": deviations,
+                        "tolerance": float(target_tolerance),
+                    },
+                )
             for dep in dependents:
                 dep_name = str(getattr(dep, "Name", ""))
                 if dep_name in target_names:
@@ -596,7 +698,22 @@ def mutation(
                     "recompute left the document invalid; the mutation was rolled back",
                     {"errors": errors[:_MAX_DIAGNOSTICS]},
                 )
-            doc.commitTransaction()
+            try:
+                doc.commitTransaction()
+            except Exception as commit_exc:
+                # Once the commit begins, the gate can no longer prove that
+                # an abort restores the prior state: report the truthful
+                # may-have-changed state even when the best-effort rollback
+                # below succeeds.
+                raise ToolError(
+                    VALIDATION_FAILED,
+                    f"mutation '{label}' failed during commit: {_describe(commit_exc)}",
+                    {
+                        "operationState": "may_have_changed",
+                        "nextAction": "inspect_target",
+                        "commitError": _describe(commit_exc),
+                    },
+                ) from commit_exc
             _force_close_surviving_transaction(ctx, doc, label)
         except BaseException as exc:
             applied.clear()
@@ -624,10 +741,15 @@ def mutation(
                 ) from exc
             if isinstance(exc, Exception):
                 if isinstance(exc, ToolError):
+                    _mark_rolled_back(exc)
                     raise
                 raise ToolError(
                     VALIDATION_FAILED,
                     f"mutation '{label}' failed and was rolled back: {_describe(exc)}",
+                    {
+                        "operationState": "rolled_back",
+                        "nextAction": "retry_from_original_state",
+                    },
                 ) from exc
             raise
     finally:

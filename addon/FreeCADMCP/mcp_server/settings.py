@@ -83,9 +83,7 @@ def _normalize_settings(raw, *, generate_token):
         if generate_token:
             token = secrets.token_urlsafe(32)
         else:
-            raise SettingsError(
-                "remote_enabled requires a token; none is set."
-            )
+            raise SettingsError("remote_enabled requires a token; none is set.")
 
     auto_start = raw.get("auto_start", False)
     if not isinstance(auto_start, bool):
@@ -131,7 +129,7 @@ def load_settings(path=None):
     if path is None:
         path = default_settings_path()
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             raw = json.load(handle)
     except FileNotFoundError:
         settings = _normalize_settings({}, generate_token=True)

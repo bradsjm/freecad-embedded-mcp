@@ -12,8 +12,8 @@ with zero timeouts.
 
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -22,16 +22,16 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server import subscriptions as subs_module  # noqa: E402
-from mcp_server import tasks as tasks_module  # noqa: E402
-from mcp_server.protocol import (  # noqa: E402
+from mcp_server import subscriptions as subs_module
+from mcp_server import tasks as tasks_module
+from mcp_server.protocol import (
     INVALID_PARAMS,
-    ProtocolError,
     SERVER_INFO,
+    ProtocolError,
 )
-from mcp_server.subscriptions import (  # noqa: E402
-    SUBSCRIPTION_ID_META_KEY,
+from mcp_server.subscriptions import (
     SERVER_INFO_META_KEY,
+    SUBSCRIPTION_ID_META_KEY,
     SubscriptionClosed,
     SubscriptionRegistry,
 )
@@ -116,9 +116,7 @@ def test_task_notifications_reach_only_subscribed_task_ids() -> None:
     registry = make_registry()
     sub_a = registry.register("conn-a", 1, {"taskIds": ["t1"]}, principal="alice")
     sub_b = registry.register("conn-b", 1, {}, principal="bob")
-    assert (
-        sub_b.receive(timeout=0)["method"] == "notifications/subscriptions/acknowledged"
-    )
+    assert sub_b.receive(timeout=0)["method"] == "notifications/subscriptions/acknowledged"
 
     working = tasks_module.detailed_task_wire(_fake_task("t1", status="working"))
     assert registry.publish_task_status(working) == 1
@@ -264,12 +262,8 @@ def test_disconnect_closes_only_that_connection_without_final_result() -> None:
     registry = make_registry()
     sub_a = registry.register("conn-a", 1, {"taskIds": ["t1"]}, principal="alice")
     sub_b = registry.register("conn-b", 1, {"taskIds": ["t1"]}, principal="bob")
-    assert (
-        sub_a.receive(timeout=0)["method"] == "notifications/subscriptions/acknowledged"
-    )
-    assert (
-        sub_b.receive(timeout=0)["method"] == "notifications/subscriptions/acknowledged"
-    )
+    assert sub_a.receive(timeout=0)["method"] == "notifications/subscriptions/acknowledged"
+    assert sub_b.receive(timeout=0)["method"] == "notifications/subscriptions/acknowledged"
     assert registry.disconnect("conn-a") == 1
     assert registry.disconnect("conn-a") == 0  # idempotent
 
@@ -292,9 +286,7 @@ def test_disconnect_never_cancels_a_detached_task() -> None:
     store = tasks_module.TaskStore()
     registry = make_registry()
     record = store.create("run_fem", {}, principal="alice")
-    sub = registry.register(
-        "conn-a", 1, {"taskIds": [record.task_id]}, principal="alice"
-    )
+    sub = registry.register("conn-a", 1, {"taskIds": [record.task_id]}, principal="alice")
     registry.disconnect("conn-a")
     # The detached task keeps its truthful working state and cancel event.
     fetched = store.get(record.task_id, principal="alice")

@@ -13,23 +13,29 @@ The add-on embeds the MCP server inside FreeCAD's GUI process. There is no separ
 
 ## Tool matrix
 
-The server exposes 17 tools in a fixed order. Document tools return the actual sanitized `name`, `label`, and `objectCount`; use the returned `name` as the `document` argument in later calls.
+The server exposes 23 tools in a fixed order. Document tools return the actual sanitized `name`, `label`, and `objectCount`; use the returned `name` as the `document` argument in later calls.
 
 | Tool | Use | Important arguments |
 |---|---|---|
 | `discover_capabilities` | Versions, workbenches, full `supportedTypes`, exporter and FEM availability, GUI dispatch health | none; GUI-independent |
 | `new_document` | Create an empty document | `name` |
 | `open_document` | Open an `.FCStd` from an allowed root | `path`; `untrusted` defaults true and requires consent |
+| `import_model` | Import STEP or STL behind file consent | `document`, `path`, `format`; optional `name` (STL mesh feature) |
 | `save_document` | Save to the existing path, or save-as | `document`; optional `path` (consent to overwrite a different existing file) |
 | `close_document` | Close one document | `document`; consent when dirty or unsaved nonempty |
 | `reload_document` | Close and reopen the saved file | `document`; consent to discard unsaved changes |
-| `inspect_objects` | List objects sorted by Name; signed-cursor pagination | `document`; `cursor`, `detail` (`compact`/`full`), `property_filter`, `limit` (default 100, max 500), `property_offset`, `property_limit` |
-| `create_object` | Create a supported Part/App type or a FEM object | `document`, `type`, `name`; optional `properties`, `expected_solids` |
-| `edit_object` | Assign properties with full prevalidation | `document`, `object`, `properties`; optional `expected_solids` |
+| `inspect_objects` | List objects sorted by Name, or a 1–64 object selection; signed-cursor pagination | `document`; optional `objects`, `cursor`, `detail` (`compact`/`full`), `property_filter`, `limit` (default 100, max 500), `property_offset`, `property_limit` |
+| `create_object` | Create a supported Part/App type or a FEM object | `document`, `type`, `name`; optional `properties`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
+| `edit_object` | Assign properties with full prevalidation; returns before/after deltas | `document`, `object`, `properties`; optional `expected_solids`, `expected_bounds`, `bounds_tolerance` |
+| `edit_objects` | Edit 1–32 objects atomically | `document`, `edits`; optional `expectations` per object |
 | `delete_object` | Delete one object; refuses objects with dependents | `document`, `object` |
-| `edit_parameters` | Add/rename dynamic properties and bind expressions | `document`, `object`; optional `add`, `rename`, `expressions` |
 | `validate_geometry` | State, validity, solid count, volume, bounds, tolerance | `document`, `objects` (max 100); optional `expected_solids`, `expected_bounds`, `bounds_tolerance` |
-| `measure` | Distance, interference, section, or face measurement | `document`, `a`, `mode`; optional `b`, `plane` |
+| `measure` | Distance, interference, section, or face measurement | `document`, `a`, `mode`; optional `b`, `plane`; selectors accept names, bbox objects, or signed `{object, subelement}` references |
+| `inspect_topology` | Page through faces or edges with signed references | `document`, `object`, `role`; optional `cursor`, `limit` (default 50, max 100) |
+| `edit_parameters` | Add/rename dynamic properties, bind expressions, clear expressions | `document`, `object`; optional `add`, `rename`, `expressions`, `clear_expressions` |
+| `inspect_sketch` | Sketch geometry/constraint rows and solver summary | `document`, `sketch` |
+| `edit_sketch` | Atomic sketch batch: geometry, constraints, datums, deletes | `document`, `sketch`; optional `addGeometry`, `addConstraints`, `setDatums`, `deleteGeometry`, `deleteConstraints` |
+| `create_feature` | Datum plane, sketch, pad, pocket, or hole inside a Body | `document`, `body`, `kind`, `name`; optional `properties`, `profile`, `support`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
 | `export` | STL/STEP/3MF or native FCStd copy with readback verification | `document`, `objects`, `format`, `path`; optional `linear_deflection`, `angular_deflection`, `bed_align` |
 | `capture_view` | PNG of the 3D view with an explicit orientation | `document`, `focus_object`, `view_name`; optional `width`, `height` |
 | `run_fem` | Modern CalculiX solve; returns a VTK result summary | `document`, `analysis`; optional `timeout_s` (default 600) |

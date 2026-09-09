@@ -19,13 +19,13 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server.protocol import (  # noqa: E402
+from mcp_server.protocol import (
     CONSENT_DENIED,
     PATH_NOT_ALLOWED,
     VALIDATION_FAILED,
     ToolError,
 )
-from mcp_server.tools import documents  # noqa: E402
+from mcp_server.tools import documents
 
 
 class FakeDoc:
@@ -82,9 +82,7 @@ class FakeApp:
             exc = self.fail_open_next
             self.fail_open_next = None
             if self.open_leaves_partial:
-                partial = FakeDoc(
-                    self.open_leaves_partial, file_name=path, objects=[object()]
-                )
+                partial = FakeDoc(self.open_leaves_partial, file_name=path, objects=[object()])
                 self.documents[partial.Name] = partial
             raise exc
         if os.path.basename(path).startswith("Existing"):
@@ -163,9 +161,7 @@ class FakeCtx:
         real = os.path.realpath(str(path))
         root = str(self.allowed_root)
         if real != root and not real.startswith(root + os.sep):
-            raise ToolError(
-                PATH_NOT_ALLOWED, f"path '{path}' is outside the allowed roots", None
-            )
+            raise ToolError(PATH_NOT_ALLOWED, f"path '{path}' is outside the allowed roots", None)
         return real
 
     def file_fingerprint(self, path):
@@ -225,9 +221,7 @@ def test_open_preflight_untrusted_returns_file_target_without_mutation(tmp_path)
 def test_open_preflight_trusted_flag_skips_consent(tmp_path):
     ctx = FakeCtx(tmp_path)
     path = ctx.write_file(ctx.allowed_root / "Trusted.FCStd")
-    target = documents.preflight(
-        ctx, "open_document", {"path": path, "untrusted": False}
-    )
+    target = documents.preflight(ctx, "open_document", {"path": path, "untrusted": False})
     assert target is None
 
 
@@ -261,25 +255,17 @@ def test_save_preflight_overwrite_target_but_own_path_and_new_path_none(tmp_path
     ctx.add_document(doc)
 
     other = ctx.write_file(ctx.allowed_root / "other.FCStd")
-    target = documents.preflight(
-        ctx, "save_document", {"document": "doc", "path": other}
-    )
+    target = documents.preflight(ctx, "save_document", {"document": "doc", "path": other})
     assert target["kind"] == "file"
     assert target["purpose"] == "overwrite"
     assert target["requires_consent"] is True
 
     assert documents.preflight(ctx, "save_document", {"document": "doc"}) is None
     # Own current file: normal save, no consent.
-    assert (
-        documents.preflight(ctx, "save_document", {"document": "doc", "path": own})
-        is None
-    )
+    assert documents.preflight(ctx, "save_document", {"document": "doc", "path": own}) is None
     # Fresh new path: nothing to overwrite.
     fresh = str(ctx.allowed_root / "fresh.FCStd")
-    assert (
-        documents.preflight(ctx, "save_document", {"document": "doc", "path": fresh})
-        is None
-    )
+    assert documents.preflight(ctx, "save_document", {"document": "doc", "path": fresh}) is None
 
 
 def test_save_preflight_rejects_missing_parent_directory(tmp_path):
@@ -299,9 +285,7 @@ def test_save_preflight_rejects_missing_parent_directory(tmp_path):
 def test_close_preflight_dirty_consent_and_clean_none(tmp_path):
     ctx = FakeCtx(tmp_path)
     dirty = FakeDoc("dirty", modified=True, objects=[object()])
-    clean = FakeDoc(
-        "clean", file_name=str(ctx.allowed_root / "c.FCStd"), modified=False
-    )
+    clean = FakeDoc("clean", file_name=str(ctx.allowed_root / "c.FCStd"), modified=False)
     unsaved_nonempty = FakeDoc("scratch", modified=False, objects=[object()])
     ctx.add_document(dirty)
     ctx.add_document(clean)
@@ -314,9 +298,7 @@ def test_close_preflight_dirty_consent_and_clean_none(tmp_path):
     assert target["requires_consent"] is True
 
     assert documents.preflight(ctx, "close_document", {"document": "clean"}) is None
-    assert (
-        documents.preflight(ctx, "close_document", {"document": "scratch"}) is not None
-    )
+    assert documents.preflight(ctx, "close_document", {"document": "scratch"}) is not None
 
 
 def test_dirty_state_unknown_is_conservative(tmp_path):
@@ -334,9 +316,7 @@ def test_gui_modified_conservative_beats_app_false_after_save(tmp_path):
     doc.Modified = False
     ctx.add_document(doc)
     ctx.Gui.modified_override["stubborn"] = True
-    assert (
-        documents.preflight(ctx, "close_document", {"document": "stubborn"}) is not None
-    )
+    assert documents.preflight(ctx, "close_document", {"document": "stubborn"}) is not None
 
 
 def test_reload_preflight_requires_saved_existing_path(tmp_path):
@@ -362,9 +342,7 @@ def test_reload_preflight_dirty_consent_clean_none(tmp_path):
     clean = FakeDoc("clean", file_name=clean_path, modified=False)
     ctx.add_document(dirty)
     ctx.add_document(clean)
-    assert (
-        documents.preflight(ctx, "reload_document", {"document": "dirty"}) is not None
-    )
+    assert documents.preflight(ctx, "reload_document", {"document": "dirty"}) is not None
     assert documents.preflight(ctx, "reload_document", {"document": "clean"}) is None
 
 
@@ -416,9 +394,7 @@ def test_open_document_target_changed_between_consent_and_effect(tmp_path):
 def test_open_document_untrusted_flag_opens_without_consent(tmp_path):
     ctx = FakeCtx(tmp_path)
     path = ctx.write_file(ctx.allowed_root / "ExistingTrusted.FCStd")
-    payload = documents.HANDLERS["open_document"](
-        ctx, {"path": path, "untrusted": False}
-    )
+    payload = documents.HANDLERS["open_document"](ctx, {"path": path, "untrusted": False})
     assert payload["name"] == "existing"
 
 
@@ -487,9 +463,7 @@ def test_save_document_new_path_saveas_without_consent(tmp_path):
     ctx.add_document(doc)
     target = str(ctx.allowed_root / "new.FCStd")
     doc.saveAs = lambda p: setattr(doc, "FileName", p)
-    payload = documents.HANDLERS["save_document"](
-        ctx, {"document": "doc", "path": target}
-    )
+    payload = documents.HANDLERS["save_document"](ctx, {"document": "doc", "path": target})
     assert payload["path"] == target
 
 
@@ -504,14 +478,10 @@ def test_save_document_overwrite_requires_approved_target(tmp_path):
         documents.HANDLERS["save_document"](ctx, {"document": "doc", "path": other})
     assert excinfo.value.code == CONSENT_DENIED
 
-    target = documents.preflight(
-        ctx, "save_document", {"document": "doc", "path": other}
-    )
+    target = documents.preflight(ctx, "save_document", {"document": "doc", "path": other})
     ctx.approved_target = target
     doc.saveAs = lambda p: setattr(doc, "FileName", p)
-    payload = documents.HANDLERS["save_document"](
-        ctx, {"document": "doc", "path": other}
-    )
+    payload = documents.HANDLERS["save_document"](ctx, {"document": "doc", "path": other})
     assert payload["path"] == other
 
 
@@ -522,9 +492,7 @@ def test_save_document_overwrite_target_changed_after_consent(tmp_path):
     ctx.add_document(doc)
     other = ctx.allowed_root / "other.FCStd"
     ctx.write_file(other, "v1")
-    target = documents.preflight(
-        ctx, "save_document", {"document": "doc", "path": str(other)}
-    )
+    target = documents.preflight(ctx, "save_document", {"document": "doc", "path": str(other)})
     ctx.approved_target = target
     ctx.write_file(other, "v2")
 
@@ -533,9 +501,7 @@ def test_save_document_overwrite_target_changed_after_consent(tmp_path):
 
     doc.saveAs = _no_save_as
     with pytest.raises(ToolError) as excinfo:
-        documents.HANDLERS["save_document"](
-            ctx, {"document": "doc", "path": str(other)}
-        )
+        documents.HANDLERS["save_document"](ctx, {"document": "doc", "path": str(other)})
     assert excinfo.value.code == CONSENT_DENIED
 
 
@@ -573,9 +539,7 @@ def test_save_document_checks_idle_gate(tmp_path):
 
 def test_close_document_clean_closes_without_consent(tmp_path):
     ctx = FakeCtx(tmp_path)
-    clean = FakeDoc(
-        "clean", file_name=str(ctx.allowed_root / "c.FCStd"), modified=False
-    )
+    clean = FakeDoc("clean", file_name=str(ctx.allowed_root / "c.FCStd"), modified=False)
     ctx.add_document(clean)
     payload = documents.HANDLERS["close_document"](ctx, {"document": "clean"})
     assert payload == {"document": "clean"}
@@ -627,9 +591,7 @@ def test_reload_document_dirty_with_consent_reopens(tmp_path):
 
 def test_reload_document_dirty_without_consent_refuses(tmp_path):
     ctx = FakeCtx(tmp_path)
-    doc = FakeDoc(
-        "d", file_name=ctx.write_file(ctx.allowed_root / "d.FCStd"), modified=True
-    )
+    doc = FakeDoc("d", file_name=ctx.write_file(ctx.allowed_root / "d.FCStd"), modified=True)
     ctx.add_document(doc)
     with pytest.raises(ToolError) as excinfo:
         documents.HANDLERS["reload_document"](ctx, {"document": "d"})

@@ -2,10 +2,9 @@
 encoding, finite schemas, and MRTR consent signing."""
 
 import base64
-import threading
-
-from pathlib import Path
 import sys
+import threading
+from pathlib import Path
 
 import pytest
 
@@ -13,8 +12,7 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server import protocol  # noqa: E402
-
+from mcp_server import protocol
 
 # ---------------------------------------------------------------------------
 # Message/header fixtures.
@@ -38,9 +36,7 @@ def make_meta(
     }
     # capabilities=None stays an explicit null (invalid: not an object);
     # only an omitted argument defaults to the empty capabilities object.
-    meta[protocol.META_CLIENT_CAPABILITIES] = (
-        {} if capabilities is _OMIT else capabilities
-    )
+    meta[protocol.META_CLIENT_CAPABILITIES] = {} if capabilities is _OMIT else capabilities
     if extra:
         meta.update(extra)
     return meta
@@ -226,9 +222,7 @@ class TestErrorPrecedence:
 
     def test_validated_view_shape(self):
         params = make_params(name="t")
-        validated = protocol.validate_request(
-            valid_message(params=params), make_headers(name="t")
-        )
+        validated = protocol.validate_request(valid_message(params=params), make_headers(name="t"))
         assert validated["method"] == "tools/call"
         assert validated["params"] is params
         assert validated["protocol_version"] == protocol.SUPPORTED_PROTOCOL_VERSION
@@ -263,16 +257,12 @@ class TestReleasedHeaderEncoding:
 
         headers[protocol.METHOD_HEADER] = "TOOLS/CALL"
         with pytest.raises(protocol.ProtocolError) as excinfo:
-            protocol.validate_request(
-                valid_message(params=make_params(name="my_tool")), headers
-            )
+            protocol.validate_request(valid_message(params=make_params(name="my_tool")), headers)
         expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
 
     def test_non_ascii_name_requires_sentinel_encoding(self):
         body_name = "file:///wörld/π.json"
-        message = valid_message(
-            method="resources/read", params=make_params(uri=body_name)
-        )
+        message = valid_message(method="resources/read", params=make_params(uri=body_name))
         validated = protocol.validate_request(
             message, make_headers(method="resources/read", name=sentinel(body_name))
         )
@@ -291,9 +281,7 @@ class TestReleasedHeaderEncoding:
             protocol.validate_request(message, make_headers(name=tricky))
         expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
 
-        validated = protocol.validate_request(
-            message, make_headers(name=sentinel(tricky))
-        )
+        validated = protocol.validate_request(message, make_headers(name=sentinel(tricky)))
         assert validated["params"]["name"] == tricky
 
     def test_malformed_sentinel_values_are_rejected(self):
@@ -318,9 +306,7 @@ class TestReleasedHeaderEncoding:
         expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
 
         with pytest.raises(protocol.ProtocolError) as excinfo:
-            protocol.validate_request(
-                message, make_headers(method="tools/list", name="t")
-            )
+            protocol.validate_request(message, make_headers(method="tools/list", name="t"))
         expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
 
     def test_name_header_required_only_for_name_source_methods(self):
@@ -332,9 +318,7 @@ class TestReleasedHeaderEncoding:
 
         # server/discover has no name source and needs no Mcp-Name.
         message = valid_message(method="server/discover")
-        validated = protocol.validate_request(
-            message, make_headers(method="server/discover")
-        )
+        validated = protocol.validate_request(message, make_headers(method="server/discover"))
         assert validated["method"] == "server/discover"
 
     def test_name_header_must_match_body_source(self):
@@ -366,9 +350,7 @@ class TestReleasedHeaderEncoding:
     def test_protocol_version_header_must_match_metadata(self):
         message = valid_message(params=make_params())
         with pytest.raises(protocol.ProtocolError) as excinfo:
-            protocol.validate_request(
-                message, make_headers(name="t", version="2025-11-25")
-            )
+            protocol.validate_request(message, make_headers(name="t", version="2025-11-25"))
         expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
 
     def test_mcp_param_headers_match_body_arguments(self):
@@ -409,19 +391,13 @@ class TestReleasedHeaderEncoding:
     def test_mcp_param_numeric_and_boolean_comparison(self):
         paths = {"Count": ("arguments", "count"), "Flag": ("arguments", "flag")}
         params = make_params(name="t", arguments={"count": 42.0, "flag": True})
-        headers = make_headers(
-            name="t", **{"Mcp-Param-Count": "42", "Mcp-Param-Flag": "true"}
-        )
-        protocol.validate_request(
-            valid_message(params=params), headers, param_paths=paths
-        )
+        headers = make_headers(name="t", **{"Mcp-Param-Count": "42", "Mcp-Param-Flag": "true"})
+        protocol.validate_request(valid_message(params=params), headers, param_paths=paths)
 
         for header, key in (("43", "Count"), ("True", "Flag")):
             bad = make_headers(name="t", **{f"Mcp-Param-{key}": header})
             with pytest.raises(protocol.ProtocolError) as excinfo:
-                protocol.validate_request(
-                    valid_message(params=params), bad, param_paths=paths
-                )
+                protocol.validate_request(valid_message(params=params), bad, param_paths=paths)
             expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
 
     def test_unknown_mcp_param_headers_only_need_valid_encoding(self):
@@ -539,9 +515,7 @@ class TestFiniteSchemas:
 
     def test_additional_properties_false_rejects_unknown_keys(self):
         with pytest.raises(protocol.ProtocolError) as excinfo:
-            protocol.validate_schema(
-                {"document": "Doc", "hacker": 1}, EMITTED_TOOL_SCHEMA
-            )
+            protocol.validate_schema({"document": "Doc", "hacker": 1}, EMITTED_TOOL_SCHEMA)
         assert excinfo.value.code == protocol.INVALID_PARAMS
 
     def test_missing_required_rejected(self):
@@ -560,28 +534,20 @@ class TestFiniteSchemas:
 
     def test_booleans_are_not_integers(self):
         with pytest.raises(protocol.ProtocolError):
-            protocol.validate_schema(
-                {"document": "D", "limit": True}, EMITTED_TOOL_SCHEMA
-            )
+            protocol.validate_schema({"document": "D", "limit": True}, EMITTED_TOOL_SCHEMA)
 
     def test_integral_floats_count_as_integers(self):
         protocol.validate_schema({"document": "D", "limit": 50.0}, EMITTED_TOOL_SCHEMA)
         with pytest.raises(protocol.ProtocolError):
-            protocol.validate_schema(
-                {"document": "D", "limit": 50.5}, EMITTED_TOOL_SCHEMA
-            )
+            protocol.validate_schema({"document": "D", "limit": 50.5}, EMITTED_TOOL_SCHEMA)
 
     def test_bounds_and_enums_enforced(self):
         with pytest.raises(protocol.ProtocolError):
-            protocol.validate_schema(
-                {"document": "D", "limit": 501}, EMITTED_TOOL_SCHEMA
-            )
+            protocol.validate_schema({"document": "D", "limit": 501}, EMITTED_TOOL_SCHEMA)
         with pytest.raises(protocol.ProtocolError):
             protocol.validate_schema({"document": "D", "limit": 0}, EMITTED_TOOL_SCHEMA)
         with pytest.raises(protocol.ProtocolError):
-            protocol.validate_schema(
-                {"document": "D", "detail": "deep"}, EMITTED_TOOL_SCHEMA
-            )
+            protocol.validate_schema({"document": "D", "detail": "deep"}, EMITTED_TOOL_SCHEMA)
 
     def test_enum_equality_is_type_aware(self):
         schema = {"type": "string", "enum": ["1", "true"]}
@@ -605,13 +571,9 @@ class TestFiniteSchemas:
             )
 
     def test_local_ref_resolves_during_validation(self):
-        protocol.validate_schema(
-            {"document": "D", "ref": {"object": "Box"}}, EMITTED_TOOL_SCHEMA
-        )
+        protocol.validate_schema({"document": "D", "ref": {"object": "Box"}}, EMITTED_TOOL_SCHEMA)
         with pytest.raises(protocol.ProtocolError):
-            protocol.validate_schema(
-                {"document": "D", "ref": {"object": 9}}, EMITTED_TOOL_SCHEMA
-            )
+            protocol.validate_schema({"document": "D", "ref": {"object": 9}}, EMITTED_TOOL_SCHEMA)
 
     def test_anyof_accepts_string_or_object_selectors(self):
         selector = {

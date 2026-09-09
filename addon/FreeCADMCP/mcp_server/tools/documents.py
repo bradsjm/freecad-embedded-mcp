@@ -46,7 +46,7 @@ consent, and native ``save``/``saveAs`` are used (no staged copies).
 from __future__ import annotations
 
 import os
-from typing import Any, Callable
+from typing import Any
 
 from ..protocol import (
     CONSENT_DENIED,
@@ -125,11 +125,7 @@ def _is_dirty(ctx: Any, doc: Any) -> bool:
 
 
 def _target_identity(target: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in target.items()
-        if key not in _IDENTITY_EXCLUDED_KEYS
-    }
+    return {key: value for key, value in target.items() if key not in _IDENTITY_EXCLUDED_KEYS}
 
 
 def _require_approved(ctx: Any, target: dict[str, Any] | None) -> None:
@@ -155,9 +151,7 @@ def _require_approved(ctx: Any, target: dict[str, Any] | None) -> None:
         )
 
 
-def _file_consent_target(
-    ctx: Any, path: str, *, purpose: str, message: str
-) -> dict[str, Any]:
+def _file_consent_target(ctx: Any, path: str, *, purpose: str, message: str) -> dict[str, Any]:
     return {
         "kind": "file",
         "path": path,
@@ -168,9 +162,7 @@ def _file_consent_target(
     }
 
 
-def _document_consent_target(
-    ctx: Any, doc: Any, *, purpose: str, message: str
-) -> dict[str, Any]:
+def _document_consent_target(ctx: Any, doc: Any, *, purpose: str, message: str) -> dict[str, Any]:
     return {
         "kind": "document",
         "identity": ctx.document_identity(doc),
@@ -345,7 +337,7 @@ TOOL_DEFINITIONS = [
             }
         },
         ["name"],
-        {key: value for key, value in _DOCUMENT_COUNT_PROPERTIES.items()},
+        dict(_DOCUMENT_COUNT_PROPERTIES),
         list(_DOCUMENT_COUNT_REQUIRED),
     ),
     _definition(
@@ -491,8 +483,7 @@ def _save_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             if not doc.FileName:
                 raise ToolError(
                     VALIDATION_FAILED,
-                    f"document '{doc.Name}' has never been saved; provide an "
-                    "explicit save path",
+                    f"document '{doc.Name}' has never been saved; provide an explicit save path",
                 )
             doc.save()
         else:

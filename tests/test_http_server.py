@@ -24,14 +24,14 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server.http_server import (  # noqa: E402
+from mcp_server.http_server import (
     MAX_BODY_BYTES,
     McpHTTPServer,
     StreamResponse,
     peer_in_allowed_networks,
 )
-from mcp_server.ip_parse import parse_allowed_networks  # noqa: E402
-from mcp_server.protocol import ProtocolError  # noqa: E402
+from mcp_server.ip_parse import parse_allowed_networks
+from mcp_server.protocol import ProtocolError
 
 TOKEN = "test-token-value"
 SUPPORTED_VERSION = "2026-07-28"
@@ -60,9 +60,7 @@ def valid_request(rpc_id=1, method="test/echo", params=None, version=SUPPORTED_V
     return {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params}
 
 
-def routing_headers(
-    method="test/echo", version=SUPPORTED_VERSION, name=None, raw_name=None
-):
+def routing_headers(method="test/echo", version=SUPPORTED_VERSION, name=None, raw_name=None):
     headers = {
         "MCP-Protocol-Version": version,
         "Mcp-Method": method,
@@ -202,7 +200,7 @@ def raw_exchange(port, payload, *, timeout=5.0):
         while True:
             try:
                 data = sock.recv(65536)
-            except socket.timeout:
+            except TimeoutError:
                 break
             if not data:
                 break
@@ -251,12 +249,10 @@ def recv_until(sock, marker, *, deadline_s=5.0):
         sock.settimeout(min(0.2, remaining))
         try:
             data = sock.recv(65536)
-        except socket.timeout:
+        except TimeoutError:
             continue
         if not data:
-            raise AssertionError(
-                f"connection closed waiting for {marker!r}; got {buffer!r}"
-            )
+            raise AssertionError(f"connection closed waiting for {marker!r}; got {buffer!r}")
         buffer += data
     return buffer
 
@@ -268,7 +264,7 @@ def recv_window(sock, *, window_s=1.0):
         sock.settimeout(max(0.05, end - time.monotonic()))
         try:
             data = sock.recv(65536)
-        except socket.timeout:
+        except TimeoutError:
             continue
         if not data:
             break
@@ -287,7 +283,7 @@ def recv_until_eof(sock, *, deadline_s=3.0):
         sock.settimeout(min(0.2, remaining))
         try:
             data = sock.recv(65536)
-        except socket.timeout:
+        except TimeoutError:
             continue
         tail += data
         if not data:
@@ -407,9 +403,7 @@ def test_remote_mode_accepts_non_loopback_host_and_origin():
 
 
 def test_remote_mode_still_rejects_peer_outside_allow_list():
-    with running_server(
-        echo_dispatch, remote_enabled=True, allowed_ips="10.0.0.0/8"
-    ) as server:
+    with running_server(echo_dispatch, remote_enabled=True, allowed_ips="10.0.0.0/8") as server:
         # The test client connects from 127.0.0.1, which is not allowed.
         status, _, _ = server.post(valid_request(), routing_headers())
         assert status == 403
@@ -434,9 +428,7 @@ def test_remote_mode_reports_bound_host():
 
 def test_remote_mode_open_list_accepts_loopback_peer():
     # allowed_ips defaults to empty: any peer may connect; token gates access.
-    with running_server(
-        echo_dispatch, remote_enabled=True, allowed_ips=""
-    ) as server:
+    with running_server(echo_dispatch, remote_enabled=True, allowed_ips="") as server:
         status, _, _ = server.post(valid_request(), routing_headers())
         assert status == 200
 
@@ -471,9 +463,7 @@ def test_local_mode_without_token_still_rejects_peer_outside_loopback():
         assert server.server.peer_allowed("::1") is True
         assert server.server.peer_allowed("not-an-ip") is False
 
-    with running_server(
-        echo_dispatch, token=TOKEN, remote_enabled=True, allowed_ips=""
-    ) as server:
+    with running_server(echo_dispatch, token=TOKEN, remote_enabled=True, allowed_ips="") as server:
         assert server.server.peer_allowed("192.168.1.5") is True
 
     with running_server(
@@ -510,9 +500,7 @@ def test_accept_quality_zero_media_returns_406():
             "application/json, text/event-stream;q=0.0",
             "application/json;q=abc, text/event-stream",
         ):
-            status, _, _ = server.post(
-                valid_request(), {**routing_headers(), "Accept": accept}
-            )
+            status, _, _ = server.post(valid_request(), {**routing_headers(), "Accept": accept})
             assert status == 406
         assert server.dispatch_calls() == []
         status, _, _ = server.post(
@@ -615,7 +603,7 @@ def test_transfer_encoding_is_rejected_for_get_and_delete():
 def test_unauthorized_post_rejects_without_waiting_for_body_bytes():
     lines = [
         "POST /mcp HTTP/1.1",
-        f"Host: 127.0.0.1:{{port}}",
+        "Host: 127.0.0.1:{port}",
         "Authorization: Bearer wrong-token",
         "Content-Type: application/json",
         "Accept: application/json, text/event-stream",
@@ -624,8 +612,7 @@ def test_unauthorized_post_rejects_without_waiting_for_body_bytes():
 
     def exchange(server):
         payload = (
-            "\r\n".join(line.replace("{port}", str(server.port)) for line in lines)
-            + "\r\n\r\n"
+            "\r\n".join(line.replace("{port}", str(server.port)) for line in lines) + "\r\n\r\n"
         ).encode("latin-1")
         return raw_exchange(server.port, payload, timeout=5.0)
 
@@ -648,8 +635,7 @@ def test_forbidden_post_rejects_without_waiting_for_body_bytes():
 
     def exchange(server):
         payload = (
-            "\r\n".join(line.replace("{port}", str(server.port)) for line in lines)
-            + "\r\n\r\n"
+            "\r\n".join(line.replace("{port}", str(server.port)) for line in lines) + "\r\n\r\n"
         ).encode("latin-1")
         return raw_exchange(server.port, payload, timeout=5.0)
 
@@ -673,8 +659,7 @@ def test_malformed_framing_precedes_authentication():
 
     def exchange(server):
         payload = (
-            "\r\n".join(line.replace("{port}", str(server.port)) for line in lines)
-            + "\r\n\r\n"
+            "\r\n".join(line.replace("{port}", str(server.port)) for line in lines) + "\r\n\r\n"
         ).encode("latin-1")
         return raw_exchange(server.port, payload, timeout=5.0)
 
@@ -689,9 +674,7 @@ def test_malformed_framing_precedes_authentication():
 
 def test_malformed_content_length_is_rejected():
     with running_server(echo_dispatch) as server:
-        status, _, body = raw_post(
-            server, extra_headers=["Content-Length: twelve"], body=b"{}"
-        )
+        status, _, body = raw_post(server, extra_headers=["Content-Length: twelve"], body=b"{}")
         assert status == 400
         assert json.loads(body)["error"]["code"] == -32600
         negative, _, _ = raw_post(server, extra_headers=["Content-Length: -1"])
@@ -732,7 +715,7 @@ def test_unknown_path_returns_404_method_not_found():
 
 def test_get_mcp_returns_405_with_allow_header():
     with running_server(echo_dispatch) as server:
-        status, headers, body = server.post(None, routing_headers(), http_method="GET")
+        status, headers, _body = server.post(None, routing_headers(), http_method="GET")
         assert status == 405
         assert headers.get("allow") == "POST, DELETE"
         assert server.dispatch_calls() == []
@@ -784,9 +767,7 @@ def test_incomplete_modern_metadata_still_returns_invalid_params():
             "method": "test/echo",
             "params": {
                 "echo": "hi",
-                "_meta": {
-                    "io.modelcontextprotocol/protocolVersion": "2026-07-28"
-                },
+                "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
             },
         }
         status, _, body = server.post(message, routing_headers())
@@ -797,9 +778,7 @@ def test_incomplete_modern_metadata_still_returns_invalid_params():
 
 def test_method_header_mismatch_returns_400_header_mismatch():
     with running_server(echo_dispatch) as server:
-        status, _, body = server.post(
-            valid_request(), routing_headers(method="other/method")
-        )
+        status, _, body = server.post(valid_request(), routing_headers(method="other/method"))
         assert status == 400
         assert json.loads(body)["error"]["code"] == -32020
         assert server.dispatch_calls() == []
@@ -836,11 +815,7 @@ def _name_dispatch(message, principal, connection_id):
 def test_sentinel_encoded_name_header_matches_body():
     unicode_name = "töol"
     params = {"name": unicode_name, "_meta": _meta()}
-    encoded = (
-        "=?base64?"
-        + base64.b64encode(unicode_name.encode("utf-8")).decode("ascii")
-        + "?="
-    )
+    encoded = "=?base64?" + base64.b64encode(unicode_name.encode("utf-8")).decode("ascii") + "?="
 
     with running_server(_name_dispatch) as server:
         status, _, body = server.post(
@@ -854,9 +829,7 @@ def test_sentinel_encoded_name_header_matches_body():
 def test_sentinel_lookalike_name_requires_encoding():
     lookalike = "=?base64?x?="
     params = {"name": lookalike, "_meta": _meta()}
-    encoded = (
-        "=?base64?" + base64.b64encode(lookalike.encode("utf-8")).decode("ascii") + "?="
-    )
+    encoded = "=?base64?" + base64.b64encode(lookalike.encode("utf-8")).decode("ascii") + "?="
 
     with running_server(_name_dispatch) as server:
         status, _, body = server.post(
@@ -924,9 +897,7 @@ def test_valid_notification_returns_empty_202_without_dispatch():
             "method": "test/notify",
             "params": {"_meta": _meta()},
         }
-        status, headers, body = server.post(
-            notification, routing_headers(method="test/notify")
-        )
+        status, headers, body = server.post(notification, routing_headers(method="test/notify"))
         assert status == 202
         assert body == b""
         assert int(headers["content-length"]) == 0
@@ -940,9 +911,7 @@ def test_invalid_notification_is_rejected_and_not_dispatched():
             "method": "test/notify",
             "params": {"_meta": _meta()},
         }
-        status, _, body = server.post(
-            notification, routing_headers(method="other/notify")
-        )
+        status, _, body = server.post(notification, routing_headers(method="other/notify"))
         assert status == 400
         assert json.loads(body)["error"]["code"] == -32020
         assert server.dispatch_calls() == []
@@ -997,9 +966,7 @@ def test_sse_stream_is_consumable_by_http_client():
             conn.request("POST", "/mcp", body=body, headers=headers)
             response = conn.getresponse()
             assert response.status == 200
-            response_headers = {
-                name.lower(): value for name, value in response.getheaders()
-            }
+            response_headers = {name.lower(): value for name, value in response.getheaders()}
             assert response_headers["content-type"] == "text/event-stream"
             fixture.queue.put(
                 {
@@ -1050,9 +1017,7 @@ def test_sse_chunked_framing_terminates_with_zero_chunk():
                 }
             )
             ack = recv_until(sock, b'"step":"ack"')
-            fixture.queue.put(
-                {"jsonrpc": "2.0", "id": 9, "result": {"resultType": "complete"}}
-            )
+            fixture.queue.put({"jsonrpc": "2.0", "id": 9, "result": {"resultType": "complete"}})
             fixture.queue.put(None)
             raw = recv_until(sock, b"0\r\n\r\n")
             # Nothing — keepalive, notification, trailer bytes — may follow
@@ -1084,9 +1049,7 @@ def test_sse_keepalive_comments_during_idle():
             recv_until(sock, b"\r\n\r\n")
             window = recv_window(sock, window_s=0.8)
             assert window.count(b": keepalive") >= 2
-            fixture.queue.put(
-                {"jsonrpc": "2.0", "id": 9, "result": {"resultType": "complete"}}
-            )
+            fixture.queue.put({"jsonrpc": "2.0", "id": 9, "result": {"resultType": "complete"}})
             fixture.queue.put(None)
             recv_until(sock, b"0\r\n\r\n")
         finally:
@@ -1114,9 +1077,7 @@ def test_normal_completion_skips_on_disconnect():
         sock = open_raw_stream(server, sse_request(rpc_id=9))
         try:
             recv_until(sock, b"\r\n\r\n")
-            fixture.queue.put(
-                {"jsonrpc": "2.0", "id": 9, "result": {"resultType": "complete"}}
-            )
+            fixture.queue.put({"jsonrpc": "2.0", "id": 9, "result": {"resultType": "complete"}})
             fixture.queue.put(None)
             recv_until(sock, b"0\r\n\r\n")
         finally:
@@ -1163,9 +1124,7 @@ def test_stop_delivers_queued_final_result_with_zero_chunk():
         sock = open_raw_stream(server, sse_request(rpc_id=9))
         try:
             recv_until(sock, b"\r\n\r\n")  # headers only; nothing queued yet
-            fixture.queue.put(
-                {"jsonrpc": "2.0", "id": 9, "result": {"resultType": "complete"}}
-            )
+            fixture.queue.put({"jsonrpc": "2.0", "id": 9, "result": {"resultType": "complete"}})
             fixture.queue.put(None)  # shutdown protocol: final, then sentinel
             started = time.monotonic()
             server.stop()

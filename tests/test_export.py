@@ -7,15 +7,16 @@ the canonical path guard, fcstd option rejection, collective bed alignment,
 and temporary-file cleanup.
 """
 
-from contextlib import contextmanager
 import dataclasses
 import errno
 import importlib.util
 import os
-from pathlib import Path
 import sys
 import types
-from typing import Any, Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,7 +27,6 @@ if str(ADDON_DIR) not in sys.path:
 
 from mcp_server import protocol
 from mcp_server.protocol import ToolError
-
 
 # ---------------------------------------------------------------------------
 # FreeCAD test doubles.
@@ -71,9 +71,7 @@ class FakePlacement:
 
 
 class FakeShape:
-    def __init__(
-        self, zmin: float = 0.0, placement: FakePlacement | None = None
-    ) -> None:
+    def __init__(self, zmin: float = 0.0, placement: FakePlacement | None = None) -> None:
         self.Placement = placement if placement is not None else FakePlacement()
         self.BoundBox = FakeBoundBox(0.0, 0.0, zmin, 10.0, 10.0, zmin + 10.0)
 
@@ -82,18 +80,6 @@ class FakeShape:
 
     def translate(self, vector: Any) -> None:
         self.BoundBox = self.BoundBox.shifted(vector.x, vector.y, vector.z)
-
-    def isValid(self) -> bool:
-        return True
-
-
-class FakeReadShape:
-    """What the stubbed ``Part.read`` returns for a good STEP file."""
-
-    def __init__(self) -> None:
-        self.Solids = [object()]
-        self.Volume = 1000.0
-        self.BoundBox = FakeBoundBox(0.0, 0.0, 0.0, 10.0, 10.0, 10.0)
 
     def isValid(self) -> bool:
         return True
@@ -127,9 +113,7 @@ class FakeMesh:
     def write(self, path: str, Format: str | None = None) -> None:
         self.write_calls.append((str(path), Format))
         with open(path, "wb") as handle:
-            handle.write(
-                b"BAD" if hooks.mesh_write_poison else f"FACETS:{self.facets}".encode()
-            )
+            handle.write(b"BAD" if hooks.mesh_write_poison else f"FACETS:{self.facets}".encode())
 
 
 @dataclasses.dataclass
@@ -220,9 +204,7 @@ class FakeCtx:
         self.requested_objects.append(str(name))
         obj = doc.objects.get(str(name))
         if obj is None:
-            raise ToolError(
-                "OBJECT_NOT_FOUND", f"unknown object '{name}'", {"object": name}
-            )
+            raise ToolError("OBJECT_NOT_FOUND", f"unknown object '{name}'", {"object": name})
         return obj
 
     def check_document_idle(self, doc: Any) -> None:
@@ -277,9 +259,16 @@ class _Hooks:
 hooks = _Hooks()
 
 
-def _fake_geometry_report(
-    obj: Any, expected_solids: int | None = None
-) -> dict[str, Any]:
+def _fake_compare_expected_bounds(measured: Any, expected: Any, tolerance: float):
+    if measured is None:
+        return "unavailable", None
+    deviations = [abs(float(a) - float(b)) for a, b in zip(measured, expected, strict=True)]
+    if any(value > tolerance for value in deviations):
+        return "mismatch", deviations
+    return "match", deviations
+
+
+def _fake_geometry_report(obj: Any, expected_solids: int | None = None) -> dict[str, Any]:
     if not getattr(obj, "report_ok", True):
         return {
             "ok": False,
@@ -364,6 +353,7 @@ def load_export_module() -> Iterator[types.ModuleType]:
     object_validation = types.ModuleType("mcp_server.object_validation")
     object_validation.geometry_report = _fake_geometry_report
     object_validation.object_validity_error = lambda obj: None
+    object_validation.compare_expected_bounds = _fake_compare_expected_bounds
 
     sys.modules["FreeCAD"] = freecad
     sys.modules["Mesh"] = mesh
@@ -401,9 +391,7 @@ def export_module():
 # ---------------------------------------------------------------------------
 
 
-def make_box_document(
-    ctx: FakeCtx, zmin_one: float = 0.0, zmin_two: float = 0.0
-) -> FakeDocument:
+def make_box_document(ctx: FakeCtx, zmin_one: float = 0.0, zmin_two: float = 0.0) -> FakeDocument:
     doc = FakeDocument(
         "Smoke",
         {
@@ -589,9 +577,7 @@ def test_step_export_publishes_and_returns_readback(export_module, tmp_path) -> 
         assert handle.read() == b"STEP-OK"
 
 
-def test_new_file_race_requires_fresh_consent(
-    export_module, tmp_path, monkeypatch
-) -> None:
+def test_new_file_race_requires_fresh_consent(export_module, tmp_path, monkeypatch) -> None:
     ctx = FakeCtx(str(tmp_path))
     make_box_document(ctx)
     destination = os.path.join(ctx.root, "raced.stl")
@@ -618,9 +604,7 @@ def test_new_file_race_requires_fresh_consent(
     assert staged_leftovers(ctx.root) == []
 
 
-def test_hardlink_unsupported_fails_without_overwrite(
-    export_module, tmp_path, monkeypatch
-) -> None:
+def test_hardlink_unsupported_fails_without_overwrite(export_module, tmp_path, monkeypatch) -> None:
     ctx = FakeCtx(str(tmp_path))
     make_box_document(ctx)
     destination = os.path.join(ctx.root, "nolink.stl")
@@ -880,7 +864,7 @@ def test_fcstd_readback_mismatch_never_publishes(export_module, tmp_path) -> Non
 
 def test_fcstd_reopen_failure_never_publishes(export_module, tmp_path) -> None:
     ctx = FakeCtx(str(tmp_path))
-    doc = make_box_document(ctx)
+    make_box_document(ctx)
     destination = os.path.join(ctx.root, "copy.FCStd")
     export_module.hooks.open_document_error = RuntimeError("cannot reopen")
 
@@ -906,9 +890,7 @@ def test_fcstd_placement_mismatch_is_rejected(export_module, tmp_path) -> None:
     destination = os.path.join(ctx.root, "copy.FCStd")
     moved = {
         "Box1": doc.objects["Box1"],
-        "Box2": FakeObject(
-            Name="Box2", zmin=0.0, Placement=FakePlacement((5.0, 0.0, 0.0))
-        ),
+        "Box2": FakeObject(Name="Box2", zmin=0.0, Placement=FakePlacement((5.0, 0.0, 0.0))),
     }
     export_module.hooks.open_document_result = FakeReopenedDocument(moved)
 
@@ -938,9 +920,7 @@ def test_unsolid_object_is_rejected(export_module, tmp_path) -> None:
     doc = FakeDocument(
         "Smoke",
         {
-            "Broken": FakeObject(
-                Name="Broken", report_ok=False, report_error="Shape is invalid"
-            ),
+            "Broken": FakeObject(Name="Broken", report_ok=False, report_error="Shape is invalid"),
         },
     )
     ctx.add_document(doc)
@@ -1027,9 +1007,7 @@ def test_unknown_document_and_object_are_tool_errors(export_module, tmp_path) ->
     assert excinfo.value.code == "OBJECT_NOT_FOUND"
 
 
-def test_preflight_returns_target_for_existing_destination(
-    export_module, tmp_path
-) -> None:
+def test_preflight_returns_target_for_existing_destination(export_module, tmp_path) -> None:
     ctx = FakeCtx(str(tmp_path))
     make_box_document(ctx)
     destination = os.path.join(ctx.root, "existing.stl")

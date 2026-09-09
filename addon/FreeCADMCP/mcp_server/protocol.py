@@ -39,7 +39,8 @@ import math
 import secrets
 import threading
 import time
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Released protocol constants.
@@ -273,9 +274,7 @@ def _error_object(error: Any) -> dict:
             err["data"] = error.data
         return err
     if isinstance(error, Mapping):
-        if not isinstance(error.get("code"), int) or not isinstance(
-            error.get("message"), str
-        ):
+        if not isinstance(error.get("code"), int) or not isinstance(error.get("message"), str):
             raise TypeError("error mapping requires integer code and string message")
         err = {"code": error["code"], "message": error["message"]}
         if "data" in error and error["data"] is not None:
@@ -411,9 +410,7 @@ def validate_request(
             INVALID_REQUEST, "malformed envelope: expected a single JSON-RPC message"
         )
     if message.get("jsonrpc") != JSONRPC_VERSION:
-        raise _envelope_error(
-            INVALID_REQUEST, 'malformed envelope: jsonrpc must be "2.0"'
-        )
+        raise _envelope_error(INVALID_REQUEST, 'malformed envelope: jsonrpc must be "2.0"')
     method = message.get("method")
     if not isinstance(method, str) or not method:
         raise _envelope_error(
@@ -424,14 +421,10 @@ def validate_request(
     if not is_notification and (
         isinstance(request_id, bool) or not isinstance(request_id, (str, int))
     ):
-        raise _envelope_error(
-            INVALID_REQUEST, "malformed envelope: id must be a string or integer"
-        )
+        raise _envelope_error(INVALID_REQUEST, "malformed envelope: id must be a string or integer")
     params = message.get("params", {})
     if not isinstance(params, dict):
-        raise _envelope_error(
-            INVALID_REQUEST, "malformed envelope: params must be an object"
-        )
+        raise _envelope_error(INVALID_REQUEST, "malformed envelope: params must be an object")
 
     # 2. Required request metadata. clientInfo is required by the plan even
     # though the released schema marks it optional.
@@ -496,16 +489,12 @@ def validate_request(
 
     method_header = raw_header(METHOD_HEADER)
     if method_header is None:
-        raise ProtocolError(
-            HEADER_MISMATCH, f"header mismatch: {METHOD_HEADER} is required"
-        )
+        raise ProtocolError(HEADER_MISMATCH, f"header mismatch: {METHOD_HEADER} is required")
     try:
         if header_source_value(method_header) != method:
             raise ValueError("value does not match request method")
     except ValueError as exc:
-        raise ProtocolError(
-            HEADER_MISMATCH, f"header mismatch: {METHOD_HEADER}: {exc}"
-        ) from exc
+        raise ProtocolError(HEADER_MISMATCH, f"header mismatch: {METHOD_HEADER}: {exc}") from exc
 
     name_source = _NAME_SOURCES.get(method)
     if name_source is not None:
@@ -529,9 +518,7 @@ def validate_request(
         try:
             header_source_value(raw_header(NAME_HEADER))
         except ValueError as exc:
-            raise ProtocolError(
-                HEADER_MISMATCH, f"header mismatch: {NAME_HEADER}: {exc}"
-            ) from exc
+            raise ProtocolError(HEADER_MISMATCH, f"header mismatch: {NAME_HEADER}: {exc}") from exc
 
     _validate_param_headers(params, raw_headers, param_paths)
 
@@ -680,13 +667,9 @@ _SUPPORTED_SCHEMA_KEYWORDS = frozenset(
     }
 )
 
-_B64_CHARS = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
-)
+_B64_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
 
-_URLSAFE_B64_CHARS = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_="
-)
+_URLSAFE_B64_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=")
 
 
 def _finite_number(value: Any, what: str) -> float:
@@ -706,9 +689,7 @@ def _nonnegative_int(value: Any, what: str) -> int:
 def _check_ref(schema: Mapping[str, Any], root: Mapping[str, Any], path: str) -> str:
     ref = schema["$ref"]
     if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
-        raise ValueError(
-            f"{path}: only local $ref of the form #/$defs/<name> is supported"
-        )
+        raise ValueError(f"{path}: only local $ref of the form #/$defs/<name> is supported")
     name = ref[len("#/$defs/") :]
     defs = root.get("$defs")
     if not isinstance(defs, dict) or name not in defs:
@@ -747,9 +728,7 @@ def check_schema(
         if (
             not isinstance(names, list)
             or not names
-            or not all(
-                isinstance(entry, str) and entry in _SUPPORTED_TYPES for entry in names
-            )
+            or not all(isinstance(entry, str) and entry in _SUPPORTED_TYPES for entry in names)
         ):
             raise ValueError(f"{path}: unsupported type {declared!r}")
 
@@ -775,9 +754,7 @@ def check_schema(
     if "$ref" in schema:
         name = _check_ref(schema, root, path)
         if name in refs:
-            raise ValueError(
-                f"{path}: recursive $ref {schema['$ref']!r} is unsupported"
-            )
+            raise ValueError(f"{path}: recursive $ref {schema['$ref']!r} is unsupported")
         check_schema(root["$defs"][name], root, f"{path}->$defs.{name}", refs | {name})
 
     if "anyOf" in schema:
@@ -795,9 +772,7 @@ def check_schema(
             check_schema(sub, root, f"{path}.properties.{name}", refs)
     if "required" in schema:
         required = schema["required"]
-        if not isinstance(required, list) or not all(
-            isinstance(k, str) for k in required
-        ):
+        if not isinstance(required, list) or not all(isinstance(k, str) for k in required):
             raise ValueError(f"{path}: required must be an array of strings")
     if "additionalProperties" in schema:
         extra = schema["additionalProperties"]
@@ -806,9 +781,7 @@ def check_schema(
         elif isinstance(extra, Mapping):
             check_schema(extra, root, f"{path}.additionalProperties", refs)
         else:
-            raise ValueError(
-                f"{path}: additionalProperties must be false or a schema object"
-            )
+            raise ValueError(f"{path}: additionalProperties must be false or a schema object")
     if "items" in schema:
         items = schema["items"]
         if not isinstance(items, Mapping):
@@ -856,9 +829,7 @@ def _ensure_finite(value: Any, path: str) -> None:
 
     if isinstance(value, float):
         if not math.isfinite(value):
-            raise ProtocolError(
-                INVALID_PARAMS, f"invalid parameters: {path} must be finite"
-            )
+            raise ProtocolError(INVALID_PARAMS, f"invalid parameters: {path} must be finite")
     elif isinstance(value, list):
         for index, item in enumerate(value):
             _ensure_finite(item, f"{path}[{index}]")
@@ -895,9 +866,8 @@ def validate_schema(
 
     if "const" in schema and not _same_json(value, schema["const"]):
         fail(f"must equal {schema['const']!r}")
-    if "enum" in schema:
-        if not any(_same_json(value, candidate) for candidate in schema["enum"]):
-            fail(f"must be one of {schema['enum']!r}")
+    if "enum" in schema and not any(_same_json(value, candidate) for candidate in schema["enum"]):
+        fail(f"must be one of {schema['enum']!r}")
 
     expected = schema.get("type")
     if expected is not None:
@@ -959,9 +929,7 @@ def validate_schema(
         extra_schema = schema.get("additionalProperties")
         for key, item in value.items():
             if key in properties:
-                validate_schema(
-                    item, properties[key], root, f"{path}.{key}", _depth + 1
-                )
+                validate_schema(item, properties[key], root, f"{path}.{key}", _depth + 1)
             elif isinstance(extra_schema, Mapping):
                 validate_schema(item, extra_schema, root, f"{path}.{key}", _depth + 1)
             elif extra_schema is False:
@@ -979,9 +947,7 @@ def _matches_type(value: Any, expected: str) -> bool:
         return isinstance(value, str)
     if expected == "integer":
         if isinstance(value, bool) or not isinstance(value, int):
-            return (
-                isinstance(value, float) and math.isfinite(value) and value.is_integer()
-            )
+            return isinstance(value, float) and math.isfinite(value) and value.is_integer()
         return True
     if expected == "number":
         return not isinstance(value, bool) and isinstance(value, (int, float))
@@ -1182,9 +1148,7 @@ class ConsentSigner:
                 "consent was issued to a different principal",
                 {"reason": "principal_mismatch"},
             )
-        if payload.get("method") != method or payload.get("args") != fingerprint(
-            dict(arguments)
-        ):
+        if payload.get("method") != method or payload.get("args") != fingerprint(dict(arguments)):
             raise ToolError(
                 CONSENT_DENIED,
                 "consent does not cover these arguments",
@@ -1192,9 +1156,7 @@ class ConsentSigner:
             )
         nonce = payload.get("nonce")
         if not isinstance(nonce, str) or not nonce:
-            raise ToolError(
-                CONSENT_DENIED, "consent state rejected", {"reason": "tampered"}
-            )
+            raise ToolError(CONSENT_DENIED, "consent state rejected", {"reason": "tampered"})
         with self._lock:
             self._prune()
             if nonce in self._consumed_nonces:
@@ -1203,9 +1165,7 @@ class ConsentSigner:
                     "consent state was already used",
                     {"reason": "replayed"},
                 )
-        if payload.get("target") != fingerprint(
-            dict(target) if target is not None else None
-        ):
+        if payload.get("target") != fingerprint(dict(target) if target is not None else None):
             raise ToolError(
                 CONSENT_DENIED,
                 "consented target changed; new consent required",
@@ -1231,9 +1191,7 @@ class ConsentSigner:
         if action == "decline":
             raise ToolError(CONSENT_DENIED, "consent declined", {"reason": "declined"})
         if action == "cancel":
-            raise ToolError(
-                CONSENT_DENIED, "consent cancelled", {"reason": "cancelled"}
-            )
+            raise ToolError(CONSENT_DENIED, "consent cancelled", {"reason": "cancelled"})
         if action != "accept":
             raise repeat_challenge()
         content = response.get("content")

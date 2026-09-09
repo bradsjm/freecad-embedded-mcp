@@ -1,6 +1,6 @@
 """Server orchestration for the embedded MCP v2 add-on.
 
-Owns startup/shutdown, the exact 17-tool registry, request dispatch
+Owns startup/shutdown, the exact 23-tool registry, request dispatch
 (discovery, tools, tasks, subscriptions and document resources), the
 document observer with per-document generations, the shared consent
 preflight choreography and the one execution lifecycle for blocking calls
@@ -33,8 +33,9 @@ import queue
 import threading
 import time
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from typing import Any
 
 import FreeCAD
 import FreeCADGui
@@ -50,7 +51,6 @@ from mcp_server.protocol import (
     METHOD_NOT_FOUND,
     OBJECT_NOT_FOUND,
     PATH_NOT_ALLOWED,
-    SERVER_INFO,
     SUPPORTED_PROTOCOL_VERSION,
     VALIDATION_FAILED,
     ConsentSigner,
@@ -82,57 +82,104 @@ from mcp_server.tasks import (
 )
 from mcp_server.tools.documents import (
     HANDLERS as _DOCUMENT_HANDLERS,
+)
+from mcp_server.tools.documents import (
     TOOL_DEFINITIONS as _DOCUMENT_DEFS,
+)
+from mcp_server.tools.documents import (
     preflight as _documents_preflight,
 )
 from mcp_server.tools.export import (
     HANDLERS as _EXPORT_HANDLERS,
+)
+from mcp_server.tools.export import (
     TOOL_DEFINITIONS as _EXPORT_DEFS,
+)
+from mcp_server.tools.export import (
     preflight as _export_preflight,
+)
+from mcp_server.tools.features import (
+    HANDLERS as _FEATURES_HANDLERS,
+)
+from mcp_server.tools.features import (
+    TOOL_DEFINITIONS as _FEATURES_DEFS,
 )
 from mcp_server.tools.fem import (
     HANDLERS as _FEM_HANDLERS,
+)
+from mcp_server.tools.fem import (
     TOOL_DEFINITIONS as _FEM_DEFS,
 )
 from mcp_server.tools.geometry import (
     HANDLERS as _GEOMETRY_HANDLERS,
+)
+from mcp_server.tools.geometry import (
     TOOL_DEFINITIONS as _GEOMETRY_DEFS,
+)
+from mcp_server.tools.import_model import (
+    HANDLERS as _IMPORT_HANDLERS,
+)
+from mcp_server.tools.import_model import (
+    TOOL_DEFINITIONS as _IMPORT_DEFS,
+)
+from mcp_server.tools.import_model import (
+    preflight as _import_preflight,
 )
 from mcp_server.tools.objects import (
     HANDLERS as _OBJECTS_HANDLERS,
+)
+from mcp_server.tools.objects import (
     TOOL_DEFINITIONS as _OBJECTS_DEFS,
 )
 from mcp_server.tools.parameters import (
     HANDLERS as _PARAMETERS_HANDLERS,
+)
+from mcp_server.tools.parameters import (
     TOOL_DEFINITIONS as _PARAMETERS_DEFS,
 )
 from mcp_server.tools.script import (
     HANDLERS as _SCRIPT_HANDLERS,
+)
+from mcp_server.tools.script import (
     TOOL_DEFINITIONS as _SCRIPT_DEFS,
+)
+from mcp_server.tools.sketch import (
+    HANDLERS as _SKETCH_HANDLERS,
+)
+from mcp_server.tools.sketch import (
+    TOOL_DEFINITIONS as _SKETCH_DEFS,
 )
 from mcp_server.tools.view import (
     HANDLERS as _VIEW_HANDLERS,
+)
+from mcp_server.tools.view import (
     TOOL_DEFINITIONS as _VIEW_DEFS,
 )
 
 #: Tool errors are complete ``isError`` results, never JSON-RPC errors.
 SERVER_BUSY = "SERVER_BUSY"
 
-#: The 17 registered tools, in the exact plan section 5 order.
+#: The 23 registered tools, in the exact plan section 5 order.
 PLAN_TOOL_ORDER = (
     "discover_capabilities",
     "new_document",
     "open_document",
+    "import_model",
     "save_document",
     "close_document",
     "reload_document",
     "inspect_objects",
     "create_object",
     "edit_object",
+    "edit_objects",
     "delete_object",
     "validate_geometry",
     "measure",
+    "inspect_topology",
     "edit_parameters",
+    "inspect_sketch",
+    "edit_sketch",
+    "create_feature",
     "export",
     "capture_view",
     "run_fem",
@@ -156,6 +203,7 @@ _RESOURCE_READ_TIMEOUT_S = 10.0
 
 MAX_SCRIPT_SESSIONS = 32
 
+
 def _client_supports_form(client_capabilities: Mapping[str, Any] | None) -> bool:
     """True when the client can answer a form elicitation round trip.
 
@@ -171,6 +219,7 @@ def _client_supports_form(client_capabilities: Mapping[str, Any] | None) -> bool
     if not isinstance(elicitation, Mapping):
         return False
     return "form" in elicitation or len(elicitation) == 0
+
 
 #: Released ``CacheableResult`` hints, applied as TOP-LEVEL ``ttlMs`` /
 #: ``cacheScope`` fields on complete discovery/list/resource results (there
@@ -207,9 +256,7 @@ def _target_identity(target: Mapping[str, Any] | None) -> dict | None:
     if target is None:
         return None
     return {
-        key: value
-        for key, value in target.items()
-        if key not in ("requires_consent", "message")
+        key: value for key, value in target.items() if key not in ("requires_consent", "message")
     }
 
 
@@ -228,9 +275,7 @@ def _deadline_for(name: str, arguments: Mapping[str, Any]) -> float:
     """Operation deadline in seconds for one tool call (plan section 6)."""
 
     if name in ("run_script", "run_fem"):
-        default = (
-            FEM_TIMEOUT_DEFAULT_S if name == "run_fem" else SCRIPT_TIMEOUT_DEFAULT_S
-        )
+        default = FEM_TIMEOUT_DEFAULT_S if name == "run_fem" else SCRIPT_TIMEOUT_DEFAULT_S
         return _clamp_async_timeout(arguments.get("timeout_s"), default)
     return TOOL_DEADLINE_S.get(name, DEFAULT_DEADLINE_S)
 
@@ -246,13 +291,9 @@ def _check_freecad_version() -> None:
             f"MCP server requires FreeCAD 1.1.3+ but could not parse version {raw!r}"
         ) from None
     if (major, minor, patch) < (1, 1, 3):
-        raise RuntimeError(
-            f"MCP server requires FreeCAD 1.1.3+; found {major}.{minor}.{patch}"
-        )
+        raise RuntimeError(f"MCP server requires FreeCAD 1.1.3+; found {major}.{minor}.{patch}")
     if (major, minor) >= (1, 2):
-        raise RuntimeError(
-            f"MCP server supports FreeCAD < 1.2; found {major}.{minor}.{patch}"
-        )
+        raise RuntimeError(f"MCP server supports FreeCAD < 1.2; found {major}.{minor}.{patch}")
 
 
 class _DocumentObserver:
@@ -266,55 +307,55 @@ class _DocumentObserver:
     FreeCAD's observer dispatch is never disturbed.
     """
 
-    def __init__(self, server: "Server") -> None:
+    def __init__(self, server: Server) -> None:
         self._server = server
 
-    def slotCreatedDocument(self, doc) -> None:  # noqa: N802 - FreeCAD API
+    def slotCreatedDocument(self, doc) -> None:
         self._server._on_document_event(doc, bump=True, publish=True)
 
-    def slotDeletedDocument(self, doc) -> None:  # noqa: N802
+    def slotDeletedDocument(self, doc) -> None:
         # Deletion bumps the monotonic generation and publishes like any
         # other change; the entry is retained so stale instances of the
         # deleted document can never adopt or report a live identity.
         self._server._on_document_event(doc, bump=True, publish=True)
 
-    def slotRelabelDocument(self, doc) -> None:  # noqa: N802
+    def slotRelabelDocument(self, doc) -> None:
         self._server._on_document_event(doc, bump=True, publish=True)
 
-    def slotActivateDocument(self, doc) -> None:  # noqa: N802
+    def slotActivateDocument(self, doc) -> None:
         self._server._on_document_event(doc, bump=False, publish=True)
 
-    def slotBeforeRecomputeDocument(self, doc) -> None:  # noqa: N802
+    def slotBeforeRecomputeDocument(self, doc) -> None:
         self._server._on_document_event(doc, bump=True, publish=False)
 
-    def slotRecomputedDocument(self, doc) -> None:  # noqa: N802
+    def slotRecomputedDocument(self, doc) -> None:
         self._server._on_document_event(doc, bump=True, publish=False)
 
-    def slotCreatedObject(self, doc, obj) -> None:  # noqa: N802
+    def slotCreatedObject(self, doc, obj) -> None:
         self._server._on_document_event(doc, bump=True, publish=True)
 
-    def slotDeletedObject(self, doc, obj) -> None:  # noqa: N802
+    def slotDeletedObject(self, doc, obj) -> None:
         self._server._on_document_event(doc, bump=True, publish=True)
 
-    def slotBeforeChangeObject(self, doc, obj) -> None:  # noqa: N802
+    def slotBeforeChangeObject(self, doc, obj) -> None:
         self._server._on_document_event(doc, bump=True, publish=False)
 
-    def slotChangedObject(self, doc, obj) -> None:  # noqa: N802
+    def slotChangedObject(self, doc, obj) -> None:
         self._server._on_document_event(doc, bump=True, publish=True)
 
-    def slotRecomputedObject(self, doc, obj) -> None:  # noqa: N802
+    def slotRecomputedObject(self, doc, obj) -> None:
         self._server._on_document_event(doc, bump=True, publish=False)
 
-    def slotStartSaveDocument(self, doc) -> None:  # noqa: N802
+    def slotStartSaveDocument(self, doc) -> None:
         self._server._on_document_event(doc, bump=True, publish=False)
 
-    def slotFinishSaveDocument(self, doc) -> None:  # noqa: N802
+    def slotFinishSaveDocument(self, doc) -> None:
         self._server._on_document_event(doc, bump=True, publish=True)
 
-    def slotUndoDocument(self, doc) -> None:  # noqa: N802
+    def slotUndoDocument(self, doc) -> None:
         self._server._on_document_event(doc, bump=True, publish=True)
 
-    def slotRedoDocument(self, doc) -> None:  # noqa: N802
+    def slotRedoDocument(self, doc) -> None:
         self._server._on_document_event(doc, bump=True, publish=True)
 
 
@@ -333,7 +374,7 @@ class _Operation:
     deadline_noted: bool = False
     #: Dispatcher handle for submitted work (task path): lets the
     #: deadline sweep mark a detached job timed out without a waiter.
-    future: "concurrent.futures.Future" | None = None
+    future: concurrent.futures.Future | None = None
 
 
 class _OpContext:
@@ -347,15 +388,15 @@ class _OpContext:
 
     __slots__ = (
         "_server",
-        "operation",
-        "cancel_event",
         "approved_target",
+        "cancel_event",
         "deadline_mono",
+        "operation",
     )
 
     def __init__(
         self,
-        server: "Server",
+        server: Server,
         *,
         operation: _Operation,
         approved_target: dict | None,
@@ -408,9 +449,7 @@ class Server:
         registry: SubscriptionRegistry | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self.settings = (
-            dict(settings) if settings is not None else load_settings(settings_path)
-        )
+        self.settings = dict(settings) if settings is not None else load_settings(settings_path)
         self.signer = signer or ConsentSigner()
         self._task_store = task_store or TaskStore()
         self._registry = registry or SubscriptionRegistry(
@@ -457,6 +496,9 @@ class Server:
             (_VIEW_DEFS, _VIEW_HANDLERS, None),
             (_FEM_DEFS, _FEM_HANDLERS, None),
             (_SCRIPT_DEFS, _SCRIPT_HANDLERS, None),
+            (_SKETCH_DEFS, _SKETCH_HANDLERS, None),
+            (_FEATURES_DEFS, _FEATURES_HANDLERS, None),
+            (_IMPORT_DEFS, _IMPORT_HANDLERS, _import_preflight),
         )
         self._handlers: dict[str, Callable[[_OpContext, dict], Any]] = {}
         self._preflights: dict[str, Callable[..., Any]] = {}
@@ -481,9 +523,7 @@ class Server:
         name, description, input_schema, output_schema = _unpack_definition(definition)
         if name in self._definitions:
             raise RuntimeError(f"duplicate tool definition: {name}")
-        if not isinstance(input_schema, Mapping) or not isinstance(
-            output_schema, Mapping
-        ):
+        if not isinstance(input_schema, Mapping) or not isinstance(output_schema, Mapping):
             raise RuntimeError(f"tool {name} must declare finite input/output schemas")
         for schema in (input_schema, output_schema):
             check_schema(schema)  # rejects unsupported constructs at registration
@@ -548,14 +588,10 @@ class Server:
 
     def require_document(self, name: str) -> Any:
         if not isinstance(name, str) or not name:
-            raise ToolError(
-                DOCUMENT_NOT_FOUND, "document name must be a non-empty string"
-            )
+            raise ToolError(DOCUMENT_NOT_FOUND, "document name must be a non-empty string")
         doc = FreeCAD.listDocuments().get(name)
         if doc is None:
-            raise ToolError(
-                DOCUMENT_NOT_FOUND, f"no such document: {name}", {"name": name}
-            )
+            raise ToolError(DOCUMENT_NOT_FOUND, f"no such document: {name}", {"name": name})
         return doc
 
     def require_object(self, doc: Any, name: str) -> Any:
@@ -690,7 +726,6 @@ class Server:
         :class:`ProtocolError` for protocol-level failures only."""
 
         method = validated["method"]
-        request_id = validated["id"]
         if method == "server/discover":
             return self._dispatch_discover(validated)
         if method == "tools/list":
@@ -723,13 +758,9 @@ class Server:
             )
         refresh = params.get("refresh", False)
         if not isinstance(refresh, bool):
-            raise ProtocolError(
-                INVALID_PARAMS, "invalid parameters: refresh must be a boolean"
-            )
+            raise ProtocolError(INVALID_PARAMS, "invalid parameters: refresh must be a boolean")
         document = params.get("document")
-        if document is not None and (
-            not isinstance(document, str) or not document
-        ):
+        if document is not None and (not isinstance(document, str) or not document):
             raise ProtocolError(
                 INVALID_PARAMS,
                 "invalid parameters: document must be a non-empty string",
@@ -766,9 +797,7 @@ class Server:
 
     def _discover_payload(self, snapshot: dict, refresh_error: dict | None) -> dict:
         capabilities = {
-            key: value
-            for key, value in snapshot.items()
-            if key != "supportedTypesDocument"
+            key: value for key, value in snapshot.items() if key != "supportedTypesDocument"
         }
         return {
             "supportedVersions": [SUPPORTED_PROTOCOL_VERSION],
@@ -777,9 +806,7 @@ class Server:
             "refreshError": refresh_error,
         }
 
-    def _refresh_capabilities(
-        self, document: str | None
-    ) -> tuple[dict, dict | None]:
+    def _refresh_capabilities(self, document: str | None) -> tuple[dict, dict | None]:
         """Refresh the static capability snapshot on the GUI thread.
 
         The GUI callable only returns a candidate (or a structured
@@ -848,9 +875,7 @@ class Server:
 
     def _dispatch_tools_list(self, validated: dict) -> dict:
         payload = {"tools": [dict(d) for d in self._tool_defs]}
-        return _with_caching(
-            _rpc_result(validated["id"], complete_result(payload)), CACHE_PUBLIC
-        )
+        return _with_caching(_rpc_result(validated["id"], complete_result(payload)), CACHE_PUBLIC)
 
     def _tool_discover_capabilities(self, ctx: Any, arguments: dict) -> dict:
         """The private snapshot tool: no GUI dispatch, cached snapshot."""
@@ -930,16 +955,10 @@ class Server:
             )
 
         deadline_s = _deadline_for(name, arguments)
-        use_task = self._client_declares_tasks(validated) and name in (
-            TASK_ELIGIBLE_OPERATIONS
-        )
+        use_task = self._client_declares_tasks(validated) and name in (TASK_ELIGIBLE_OPERATIONS)
         if use_task:
-            return self._start_task_call(
-                validated, principal, name, arguments, target, deadline_s
-            )
-        return self._start_blocking_call(
-            validated, principal, name, arguments, target, deadline_s
-        )
+            return self._start_task_call(validated, principal, name, arguments, target, deadline_s)
+        return self._start_blocking_call(validated, principal, name, arguments, target, deadline_s)
 
     def _client_declares_tasks(self, validated: dict) -> bool:
         extensions = validated["client_capabilities"].get("extensions")
@@ -1089,9 +1108,7 @@ class Server:
                 principal=principal,
                 deadline_mono=self._clock() + deadline_s,
                 deadline_s=deadline_s,
-                cancel_event=(
-                    cancel_event if cancel_event is not None else threading.Event()
-                ),
+                cancel_event=(cancel_event if cancel_event is not None else threading.Event()),
             )
             self._ops[op.op_id] = op
             return op
@@ -1123,7 +1140,7 @@ class Server:
         value = outcome.value
         if outcome.error is None and isinstance(value, concurrent.futures.Future):
 
-            def on_resolved(_resolved: "concurrent.futures.Future") -> None:
+            def on_resolved(_resolved: concurrent.futures.Future) -> None:
                 self._remove_op(op)
 
             try:
@@ -1225,9 +1242,7 @@ class Server:
             )
         except ToolError as exc:
             return _rpc_result(request_id, tool_error_result(exc))
-        op_ctx = _OpContext(
-            self, operation=op, approved_target=_target_identity(target)
-        )
+        op_ctx = _OpContext(self, operation=op, approved_target=_target_identity(target))
         handler = self._handlers[name]
 
         def runner() -> Any:
@@ -1248,9 +1263,7 @@ class Server:
                     timeout=deadline_s,
                     operation_name=f"tools/call:{name}",
                     cancel_event=op.cancel_event,
-                    on_finished=lambda _outcome: self._release_operation_on_outcome(
-                        op, _outcome
-                    ),
+                    on_finished=lambda _outcome: self._release_operation_on_outcome(op, _outcome),
                 )
                 result = self._blocking_result(name, outcome, op)
             except ProtocolError as exc:
@@ -1262,9 +1275,7 @@ class Server:
             except BaseException as exc:  # never lose the stream silently
                 events.put(
                     error_response(
-                        ProtocolError(
-                            INTERNAL_ERROR, f"unexpected dispatch failure: {exc}"
-                        ),
+                        ProtocolError(INTERNAL_ERROR, f"unexpected dispatch failure: {exc}"),
                         request_id,
                     )
                 )
@@ -1273,9 +1284,7 @@ class Server:
             events.put(_rpc_result(request_id, result))
             events.put(None)  # terminal sentinel: zero-chunk after final result
 
-        threading.Thread(
-            target=produce, name=f"mcp-blocking-{name}", daemon=True
-        ).start()
+        threading.Thread(target=produce, name=f"mcp-blocking-{name}", daemon=True).start()
         return StreamResponse(
             events,
             on_disconnect=None if is_legacy else on_disconnect,
@@ -1304,8 +1313,7 @@ class Server:
         if _STUCK_RUNNING_MARKER in error:
             tool_exc = ToolError(
                 SERVER_BUSY,
-                f"operation deadline exceeded; '{name}' is still running on the "
-                "GUI thread",
+                f"operation deadline exceeded; '{name}' is still running on the GUI thread",
                 {"reason": "deadline_exceeded", "stillRunning": True},
             )
         else:
@@ -1314,7 +1322,7 @@ class Server:
         return tool_error_result(tool_exc)
 
     def _await_async_value(
-        self, name: str, future: "concurrent.futures.Future", op: _Operation
+        self, name: str, future: concurrent.futures.Future, op: _Operation
     ) -> Any:
         """Wait for the retained Future's real result, bounded by ``op``.
 
@@ -1336,8 +1344,7 @@ class Server:
             if remaining <= 0:
                 return ToolError(
                     SERVER_BUSY,
-                    f"operation deadline exceeded; '{name}' is still running "
-                    "on the GUI thread",
+                    f"operation deadline exceeded; '{name}' is still running on the GUI thread",
                     {"reason": "deadline_exceeded", "stillRunning": True},
                 )
             if op.cancel_event.is_set():
@@ -1351,10 +1358,8 @@ class Server:
         try:
             return future.result()
         except concurrent.futures.CancelledError as exc:
-            raise ProtocolError(
-                INTERNAL_ERROR, f"async operation '{name}' was cancelled"
-            ) from exc
-        except ToolError as exc:  # noqa: BLE001 - deliberate error channel
+            raise ProtocolError(INTERNAL_ERROR, f"async operation '{name}' was cancelled") from exc
+        except ToolError as exc:
             return exc
 
     # -- task execution ------------------------------------------------------
@@ -1393,9 +1398,7 @@ class Server:
         # set the very Event the dispatcher and ctx handlers poll. Built
         # before _OpContext so ctx.cancel_event is that same object.
         op.cancel_event = record.cancel_event
-        op_ctx = _OpContext(
-            self, operation=op, approved_target=_target_identity(target)
-        )
+        op_ctx = _OpContext(self, operation=op, approved_target=_target_identity(target))
         handler = self._handlers[name]
 
         def runner() -> Any:
@@ -1440,9 +1443,7 @@ class Server:
                     task_id, principal=principal, status_message=error_text
                 )
             else:
-                details = (
-                    {"traceback": outcome.traceback} if outcome.traceback else None
-                )
+                details = {"traceback": outcome.traceback} if outcome.traceback else None
                 tool_exc = ToolError(GUI_DISPATCH_FAILED, error_text, details)
                 self._task_store.complete(
                     task_id,
@@ -1485,9 +1486,7 @@ class Server:
             except (TypeError, ValueError) as exc:
                 self._task_store.fail(
                     task_id,
-                    ProtocolError(
-                        INTERNAL_ERROR, f"tool result not serializable: {exc}"
-                    ),
+                    ProtocolError(INTERNAL_ERROR, f"tool result not serializable: {exc}"),
                     principal=principal,
                 )
             else:
@@ -1497,7 +1496,7 @@ class Server:
 
     def _attach_async_finalizer(
         self,
-        future: "concurrent.futures.Future",
+        future: concurrent.futures.Future,
         *,
         name: str,
         task_id: str,
@@ -1512,11 +1511,11 @@ class Server:
         operations cannot cross wires.
         """
 
-        def on_done(resolved: "concurrent.futures.Future") -> None:
+        def on_done(resolved: concurrent.futures.Future) -> None:
             try:
                 value = resolved.result()
                 self._complete_task_from_value(task_id, op_id, principal, name, value)
-            except BaseException as exc:  # noqa: BLE001 - finalizer never raises
+            except BaseException as exc:
                 try:
                     if isinstance(exc, ToolError):
                         self._task_store.complete(
@@ -1595,9 +1594,7 @@ class Server:
 
     def _dispatch_tasks_get(self, validated: dict, principal: str) -> dict:
         require_tasks_capability(validated["client_capabilities"])
-        task = self._task_store.get(
-            validated["params"].get("taskId"), principal=principal
-        )
+        task = self._task_store.get(validated["params"].get("taskId"), principal=principal)
         return _rpc_result(validated["id"], complete_result(detailed_task_wire(task)))
 
     def _dispatch_tasks_update(self, validated: dict, principal: str) -> dict:
@@ -1611,9 +1608,7 @@ class Server:
 
     def _dispatch_tasks_cancel(self, validated: dict, principal: str) -> dict:
         require_tasks_capability(validated["client_capabilities"])
-        self._task_store.request_cancel(
-            validated["params"].get("taskId"), principal=principal
-        )
+        self._task_store.request_cancel(validated["params"].get("taskId"), principal=principal)
         # Honest acknowledgement: a terminal task is not re-cancelled, the
         # cancel event is only a cooperative request either way.
         return _rpc_result(validated["id"], complete_result({}))
@@ -1666,9 +1661,7 @@ class Server:
             ]
         }
         # Live document data: ttl 0, private scope.
-        return _with_caching(
-            _rpc_result(validated["id"], complete_result(payload)), CACHE_PRIVATE
-        )
+        return _with_caching(_rpc_result(validated["id"], complete_result(payload)), CACHE_PRIVATE)
 
     def _dispatch_resources_read(self, validated: dict) -> dict:
         uri = validated["params"].get("uri")
@@ -1685,9 +1678,7 @@ class Server:
         )
         if outcome.error is not None:
             details = {"traceback": outcome.traceback} if outcome.traceback else None
-            raise ProtocolError(
-                INTERNAL_ERROR, f"resource read failed: {outcome.error}", details
-            )
+            raise ProtocolError(INTERNAL_ERROR, f"resource read failed: {outcome.error}", details)
         documents = outcome.value
         # Native ReadResourceResult: one JSON content entry whose text is
         # the compact document listing. Live document data: ttl 0, private.
@@ -1995,7 +1986,7 @@ def _capture_static_capabilities(document: Any = None) -> dict:
     version = list(FreeCAD.Version())
     workbenches = _probe(lambda: sorted(FreeCADGui.listWorkbenches()))
     try:
-        import Part  # noqa: PLC0415 - FreeCAD bundled module
+        import Part
 
         occ_version = getattr(Part, "OCC_VERSION", None)
     except Exception as exc:

@@ -6,17 +6,17 @@ cooperative cancellation that cannot falsely end running work, and the
 initialize/shutdown/draining lifecycle.
 """
 
-from contextlib import contextmanager
 import concurrent.futures
 import importlib.util
-from pathlib import Path
-import pytest
 import sys
 import threading
 import time
 import types
-from typing import Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
+import pytest
 
 ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 GUI_DISPATCH_PATH = ADDON_DIR / "mcp_server" / "gui_dispatch.py"
@@ -80,9 +80,7 @@ def load_gui_dispatch() -> Iterator[types.ModuleType]:
     status_bar = FakeStatusBar()
     freecad_gui = types.ModuleType("FreeCADGui")
     freecad_gui.updateGui = lambda: None
-    freecad_gui.getMainWindow = lambda: types.SimpleNamespace(
-        statusBar=lambda: status_bar
-    )
+    freecad_gui.getMainWindow = lambda: types.SimpleNamespace(statusBar=lambda: status_bar)
 
     class FakeTimer:
         """Records QTimer.singleShot callbacks so tests can fire ticks."""
@@ -409,9 +407,7 @@ def test_failing_on_finished_does_not_break_the_dispatch_loop() -> None:
         waker.join()
         assert first.value == "fine"
 
-        second = gui_dispatch.dispatch_to_gui(
-            lambda: "after", timeout=5.0, operation_name="after"
-        )
+        second = gui_dispatch.dispatch_to_gui(lambda: "after", timeout=5.0, operation_name="after")
         waker.join()
         assert second.value == "after"
 
@@ -601,9 +597,7 @@ def test_shutdown_cancels_queued_and_requests_running_cancellation() -> None:
         assert len(finished) == 2
 
         # Draining refuses new submissions.
-        refused = gui_dispatch.submit_to_gui(
-            lambda: "never", operation_name="during_drain"
-        )
+        refused = gui_dispatch.submit_to_gui(lambda: "never", operation_name="during_drain")
         assert "draining" in refused.result(timeout=1.0).error
 
         # Re-initializing clears draining and dispatches again.
@@ -692,9 +686,7 @@ def test_initialize_refuses_while_previous_work_is_still_running() -> None:
 
         gui_dispatch.initialize()
         assert not gui_dispatch.is_draining()
-        again = gui_dispatch.dispatch_to_gui(
-            lambda: "back", timeout=5.0, operation_name="back"
-        )
+        again = gui_dispatch.dispatch_to_gui(lambda: "back", timeout=5.0, operation_name="back")
         waker.join()
         assert again.value == "back"
 

@@ -113,18 +113,18 @@ class _Job:
     """
 
     __slots__ = (
-        "task_id",
-        "operation",
-        "fn",
-        "cancel_event",
-        "on_finished",
-        "future",
-        "done_event",
+        "_cancelled",
+        "_finished_fired",
+        "_future_done",
         "_lock",
         "_started",
-        "_cancelled",
-        "_future_done",
-        "_finished_fired",
+        "cancel_event",
+        "done_event",
+        "fn",
+        "future",
+        "on_finished",
+        "operation",
+        "task_id",
     )
 
     def __init__(
@@ -140,7 +140,7 @@ class _Job:
         self.fn = fn
         self.cancel_event = cancel_event
         self.on_finished = on_finished
-        self.future: "concurrent.futures.Future[Outcome]" = concurrent.futures.Future()
+        self.future: concurrent.futures.Future[Outcome] = concurrent.futures.Future()
         self.done_event = threading.Event()
         self._lock = threading.Lock()
         self._started = False
@@ -205,9 +205,7 @@ def _operation_label(fn: Callable[[], Any], operation_name: str | None) -> str:
     return operation
 
 
-def _safe_set_result(
-    future: "concurrent.futures.Future[Outcome]", outcome: Outcome
-) -> None:
+def _safe_set_result(future: "concurrent.futures.Future[Outcome]", outcome: Outcome) -> None:
     try:
         future.set_result(outcome)
     except concurrent.futures.InvalidStateError:
@@ -228,9 +226,7 @@ def _fire_on_finished(job: _Job, outcome: Outcome) -> None:
 
 
 def _stuck_outcome(snapshot: dict[str, Any], *, just_timed_out: bool) -> Outcome:
-    return Outcome(
-        error=stuck_failure(snapshot, just_timed_out=just_timed_out)["error"]
-    )
+    return Outcome(error=stuck_failure(snapshot, just_timed_out=just_timed_out)["error"])
 
 
 def _queued_timeout_outcome(timeout: float) -> Outcome:
@@ -299,9 +295,7 @@ def _run_job(job: _Job) -> None:
     with job._lock:
         if job._finished_fired:
             return  # abandoned before start: queued timeout or shutdown won
-        if job._cancelled or (
-            job.cancel_event is not None and job.cancel_event.is_set()
-        ):
+        if job._cancelled or (job.cancel_event is not None and job.cancel_event.is_set()):
             # Cancellation won the race before FreeCAD was entered.
             job._future_done = True
             job._finished_fired = True
@@ -342,9 +336,7 @@ def _execute_job(job: _Job) -> None:
         if outcome is None:
             # Non-Exception escape (KeyboardInterrupt, SystemExit): the GUI
             # thread keeps it, but waiters must never hang on the Future.
-            outcome = Outcome(
-                error=f"'{job.operation}' ended without a catchable exception"
-            )
+            outcome = Outcome(error=f"'{job.operation}' ended without a catchable exception")
         _dispatch_health.finish(job.task_id)
         with job._lock:
             first = not job._finished_fired
@@ -412,10 +404,7 @@ def _flush_gui_events(delay_ms: int = 20) -> None:
 
     # ExcludeUserInputEvents: skip mouse/keyboard events to avoid re-entrancy
     # with ongoing navigation. ExcludeSocketNotifiers keeps network I/O out.
-    flags = (
-        QtCore.QEventLoop.ExcludeUserInputEvents
-        | QtCore.QEventLoop.ExcludeSocketNotifiers
-    )
+    flags = QtCore.QEventLoop.ExcludeUserInputEvents | QtCore.QEventLoop.ExcludeSocketNotifiers
     app.processEvents(flags, delay_ms)
     if delay_ms > 0:
         QtCore.QThread.msleep(delay_ms)
@@ -445,9 +434,7 @@ def _arm_heartbeat() -> None:
     QtCore.QTimer.singleShot(500, _tick)
 
 
-def process_gui_tasks(
-    reschedule: bool = True, *, generation: int | None = None
-) -> None:
+def process_gui_tasks(reschedule: bool = True, *, generation: int | None = None) -> None:
     """Drain queued GUI-thread jobs and optionally reschedule.
 
     Skips the current tick when any mouse button is held (e.g. 3D navigation
@@ -641,9 +628,7 @@ def initialize() -> None:
         if _waker is not None and not _draining:
             return  # already live: never arm a competing chain
         running = [
-            (job.task_id, job.operation)
-            for job in _inflight.values()
-            if _job_is_running(job)
+            (job.task_id, job.operation) for job in _inflight.values() if _job_is_running(job)
         ]
     if running:
         task_id, operation = running[0]
@@ -722,9 +707,7 @@ def shutdown() -> dict[str, int]:
             job._future_done = True
             job._finished_fired = True
             outcome = Outcome(
-                error=(
-                    f"'{job.operation}' was cancelled during GUI dispatcher shutdown"
-                )
+                error=(f"'{job.operation}' was cancelled during GUI dispatcher shutdown")
             )
         cancelled += 1
         with _state_lock:

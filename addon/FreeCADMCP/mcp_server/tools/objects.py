@@ -16,7 +16,12 @@ from typing import Any
 
 import FreeCAD
 
-from ..object_validation import geometry_report, mutation
+from ..object_validation import (
+    dependent_count,
+    document_bounds,
+    geometry_report,
+    mutation,
+)
 from ..protocol import DOMAIN_CURSOR, VALIDATION_FAILED, ToolError
 
 _MAX_LIMIT = 500
@@ -82,10 +87,7 @@ _FEM_FACTORIES: dict[str, tuple[str, dict[str, str]]] = {
     "Fem::ElementFluid1D": ("makeElementFluid1D", {}),
 }
 _FEM_FACTORIES.update(
-    {
-        f"Fem::Constraint{name}": (f"makeConstraint{name}", {})
-        for name in _FEM_CONSTRAINTS
-    }
+    {f"Fem::Constraint{name}": (f"makeConstraint{name}", {}) for name in _FEM_CONSTRAINTS}
 )
 
 # ---------------------------------------------------------------------------
@@ -148,8 +150,8 @@ def _value_defs() -> dict:
     for depth in range(1, 5):
         previous = {"$ref": f"#/$defs/value{depth - 1}"}
         defs[f"value{depth}"] = {
-            "anyOf": _json_scalars()
-            + [
+            "anyOf": [
+                *_json_scalars(),
                 {"type": "array", "items": previous, "maxItems": 64},
                 {"type": "object", "additionalProperties": previous},
             ]
@@ -277,11 +279,22 @@ _PLACEMENT_VALUE = {
     },
 }
 
+_LINK_VALUE = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["object", "subelement"],
+    "properties": {
+        "object": {"type": "string"},
+        "subelement": {"type": "string"},
+    },
+}
+
 _PROPERTY_VALUE = {
-    "anyOf": _json_scalars()
-    + [
+    "anyOf": [
+        *_json_scalars(),
         _XYZ,
         _PLACEMENT_VALUE,
+        _LINK_VALUE,
         {
             "type": "array",
             "items": {"anyOf": [{"type": "string"}, {"type": "number"}]},
@@ -357,9 +370,9 @@ _PROPERTY_METADATA = {
         },
         "enumerationCount": {"type": "integer", "minimum": 0},
         "enumerationTruncated": {"type": "boolean"},
+        "expression": {"type": ["string", "null"]},
     },
 }
-
 _OBJECT_ROW["required"].extend(
     [
         "propertyMetadata",
@@ -372,9 +385,7 @@ _OBJECT_ROW["properties"].update(
     {
         "propertyMetadata": {
             "type": "object",
-            "additionalProperties": {
-                "anyOf": [_PROPERTY_METADATA, {"type": "null"}]
-            },
+            "additionalProperties": {"anyOf": [_PROPERTY_METADATA, {"type": "null"}]},
         },
         "propertyCount": {"type": "integer", "minimum": 0},
         "nextPropertyOffset": {"type": ["integer", "null"], "minimum": 0},
@@ -392,6 +403,60 @@ _ROW_DEFS = {
     "propertyMetadata": _PROPERTY_METADATA,
 }
 
+_CHANGE_PROPERTY = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["name", "before", "after"],
+    "properties": {
+        "name": {"type": "string"},
+        "before": _PROPERTY_VALUE,
+        "after": _PROPERTY_VALUE,
+    },
+}
+
+_CHANGE_GEOMETRY = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "solidCountBefore",
+        "solidCountAfter",
+        "volumeBefore",
+        "volumeAfter",
+        "boundsBefore",
+        "boundsAfter",
+    ],
+    "properties": {
+        "solidCountBefore": {"type": ["integer", "null"], "minimum": 0},
+        "solidCountAfter": {"type": ["integer", "null"], "minimum": 0},
+        "volumeBefore": {"type": ["number", "null"]},
+        "volumeAfter": {"type": ["number", "null"]},
+        "boundsBefore": {
+            "type": ["array", "null"],
+            "items": {"type": "number"},
+            "minItems": 6,
+            "maxItems": 6,
+        },
+        "boundsAfter": {
+            "type": ["array", "null"],
+            "items": {"type": "number"},
+            "minItems": 6,
+            "maxItems": 6,
+        },
+    },
+}
+
+_CHANGE = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["properties", "geometry", "dependentCount"],
+    "properties": {
+        "properties": {"type": "array", "items": _CHANGE_PROPERTY},
+        "geometry": _CHANGE_GEOMETRY,
+        "dependentCount": {"type": "integer", "minimum": 0},
+    },
+}
+
+
 _MUTATION_OUTPUT_DEFS = {
     "geometryReport": _GEOMETRY_REPORT,
     "objectIdentity": _OBJECT_IDENTITY,
@@ -401,12 +466,34 @@ _MUTATION_OUTPUT_DEFS = {
 # Input schemas (defaults are applied by the handlers).
 # ---------------------------------------------------------------------------
 
+_DOCUMENT_FIELD = {"type": "string", "minLength": 1}
+_NAME_FIELD = {"type": "string", "minLength": 1}
+_EXPECTED_SOLIDS = {"type": "integer", "minimum": 0}
+_EXPECTED_BOUNDS = {
+    "type": "array",
+    "items": {"type": "number"},
+    "minItems": 6,
+    "maxItems": 6,
+}
+_BOUNDS_TOLERANCE = {
+    "type": "number",
+    "minimum": 0,
+    "maximum": 1000000,
+    "default": 0.000001,
+}
+_PROPERTIES_MAP = {"type": "object", "additionalProperties": _INPUT_VALUE}
 _INSPECT_INPUT = {
     "type": "object",
     "additionalProperties": False,
     "required": ["document"],
     "properties": {
         "document": _DOCUMENT_FIELD,
+        "objects": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "maxItems": 64,
+        },
         "cursor": {"type": ["string", "null"]},
         "property_filter": {
             "type": "array",
@@ -440,6 +527,8 @@ _CREATE_INPUT = {
         "name": _NAME_FIELD,
         "properties": _PROPERTIES_MAP,
         "expected_solids": _EXPECTED_SOLIDS,
+        "expected_bounds": _EXPECTED_BOUNDS,
+        "bounds_tolerance": _BOUNDS_TOLERANCE,
     },
     "$defs": _VALUE_DEFS,
 }
@@ -453,10 +542,48 @@ _EDIT_INPUT = {
         "object": _NAME_FIELD,
         "properties": _PROPERTIES_MAP,
         "expected_solids": _EXPECTED_SOLIDS,
+        "expected_bounds": _EXPECTED_BOUNDS,
+        "bounds_tolerance": _BOUNDS_TOLERANCE,
     },
     "$defs": _VALUE_DEFS,
 }
 
+
+_EDIT_OBJECTS_INPUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["document", "edits"],
+    "properties": {
+        "document": _DOCUMENT_FIELD,
+        "edits": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["object", "properties"],
+                "properties": {
+                    "object": _NAME_FIELD,
+                    "properties": _PROPERTIES_MAP,
+                },
+            },
+            "minItems": 1,
+            "maxItems": 32,
+        },
+        "expectations": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "expected_solids": _EXPECTED_SOLIDS,
+                    "expected_bounds": _EXPECTED_BOUNDS,
+                    "bounds_tolerance": _BOUNDS_TOLERANCE,
+                },
+            },
+        },
+    },
+    "$defs": _VALUE_DEFS,
+}
 
 _DELETE_INPUT = {
     "type": "object",
@@ -503,13 +630,21 @@ _INSPECT_OUTPUT = {
 _MUTATED_OUTPUT = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["document", "generation", "object", "report", "applied"],
+    "required": [
+        "document",
+        "generation",
+        "object",
+        "report",
+        "applied",
+        "change",
+    ],
     "properties": {
         "document": {"type": "string"},
         "generation": _GENERATION,
         "object": {"$ref": "#/$defs/objectIdentity"},
         "report": {"$ref": "#/$defs/geometryReport"},
         "applied": _APPLIED,
+        "change": _CHANGE,
     },
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
@@ -527,16 +662,40 @@ _DELETE_OUTPUT = {
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
 
+_EDIT_OBJECTS_OUTPUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["document", "generation", "objects", "changes", "applied"],
+    "properties": {
+        "document": {"type": "string"},
+        "generation": _GENERATION,
+        "objects": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/objectIdentity"},
+            "maxItems": 32,
+        },
+        "changes": {
+            "type": "array",
+            "items": _CHANGE,
+            "maxItems": 32,
+        },
+        "applied": _APPLIED,
+    },
+    "$defs": _MUTATION_OUTPUT_DEFS,
+}
+
 TOOL_DEFINITIONS = [
     {
         "name": "inspect_objects",
         "description": (
-            "List a document's objects sorted by Name. Compact rows carry "
+            "List a document's objects sorted by Name, or an explicit "
+            "selection of 1-64 objects resolved by name. Compact rows carry "
             "label, TypeId, state, placement, bounds, shape validity, solid "
             "count, Body tip and link identities; full detail adds requested "
-            "properties with typed unavailable markers. Pagination uses an "
-            "opaque signed cursor bound to the document generation and "
-            "filters; a stale cursor is a restart-pagination error."
+            "properties with typed unavailable markers and expression "
+            "metadata. Pagination uses an opaque signed cursor bound to the "
+            "document generation, the selection and the filters; a stale "
+            "cursor is a restart-pagination error."
         ),
         "inputSchema": _INSPECT_INPUT,
         "outputSchema": _INSPECT_OUTPUT,
@@ -547,8 +706,10 @@ TOOL_DEFINITIONS = [
             "Create an object of a supported type in a document. Generic "
             "Part/App types use doc.addObject; FEM types use an explicit "
             "factory mapping (modern analysis/solver/material plus "
-            "constraints and elements). Returns the actual sanitized "
-            "identity and post-recompute validation."
+            "constraints and elements). Optional expected_bounds (six "
+            "document-space mm coordinates plus bounds_tolerance) gate the "
+            "commit. Returns the actual sanitized identity, post-recompute "
+            "validation and a compact factual change summary."
         ),
         "inputSchema": _CREATE_INPUT,
         "outputSchema": _MUTATED_OUTPUT,
@@ -562,10 +723,29 @@ TOOL_DEFINITIONS = [
             "property leaves earlier ones unchanged. Preserves vector, "
             "placement, color, ViewObject and link conversions; "
             "FuzzyTolerance is honored only when the feature actually "
-            "exposes it."
+            "exposes it. Optional expected_bounds (six document-space mm "
+            "coordinates plus bounds_tolerance) gate the commit. Returns "
+            "before/after property values, geometry deltas, the dependent "
+            "count and post-recompute validation."
         ),
         "inputSchema": _EDIT_INPUT,
         "outputSchema": _MUTATED_OUTPUT,
+    },
+    {
+        "name": "edit_objects",
+        "description": (
+            "Edit several existing objects atomically: 1-32 {object, "
+            "properties} entries applied in request order inside one "
+            "transaction and one recompute, with optional per-object "
+            "expectations (expected_solids, expected_bounds, "
+            "bounds_tolerance) checked before commit. Duplicate object "
+            "names are rejected and every property is prevalidated before "
+            "the transaction opens. A failing expectation or recompute "
+            "rolls back the whole batch; the result reports actual "
+            "identities, per-object change summaries and applied names."
+        ),
+        "inputSchema": _EDIT_OBJECTS_INPUT,
+        "outputSchema": _EDIT_OBJECTS_OUTPUT,
     },
     {
         "name": "delete_object",
@@ -653,9 +833,11 @@ def _global_geometry(obj: Any) -> tuple[list[float] | None, dict | None, str | N
     except Exception as exc:
         message = getattr(exc, "message", None) or f"{type(exc).__name__}: {exc}"
         return None, None, str(message)
-    return _bounds(global_shape), _placement_row_value(
-        getattr(global_shape, "Placement", None)
-    ), None
+    return (
+        _bounds(global_shape),
+        _placement_row_value(getattr(global_shape, "Placement", None)),
+        None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -684,19 +866,15 @@ def _vector_value(value: Any, what: str) -> Any:
         )
     numbers = [
         _number(coordinate, f"{what}.{axis}")
-        for coordinate, axis in zip(coordinates, ("x", "y", "z"))
+        for coordinate, axis in zip(coordinates, ("x", "y", "z"), strict=True)
     ]
     return FreeCAD.Vector(*numbers)
 
 
 def _color_value(value: Any, what: str) -> tuple[float, float, float, float]:
     if not isinstance(value, (list, tuple)) or len(value) not in (3, 4):
-        raise ToolError(
-            VALIDATION_FAILED, f"{what} must be an RGB or RGBA number array"
-        )
-    parts = [
-        _number(component, f"{what}[{index}]") for index, component in enumerate(value)
-    ]
+        raise ToolError(VALIDATION_FAILED, f"{what} must be an RGB or RGBA number array")
+    parts = [_number(component, f"{what}[{index}]") for index, component in enumerate(value)]
     if len(parts) == 3:
         parts.append(1.0)
     return (parts[0], parts[1], parts[2], parts[3])
@@ -708,8 +886,7 @@ def _rotation_value(value: Any, what: str) -> Any:
     if not isinstance(value, dict):
         raise ToolError(
             VALIDATION_FAILED,
-            f"{what} must be an object with an Axis {{x, y, z}} and an Angle "
-            "in degrees",
+            f"{what} must be an object with an Axis {{x, y, z}} and an Angle in degrees",
         )
     axis = value.get("Axis") or {}
     angle = _number(value.get("Angle", 0), f"{what}.Angle")
@@ -765,9 +942,7 @@ def _resolve_one(ctx: Any, doc: Any, value: Any, what: str, *, allow_sub: bool) 
             VALIDATION_FAILED,
             f"{what} takes a plain object link and accepts no subelement",
         )
-    resolved, native = _resolve_reference(
-        ctx, doc, {"object": name, "subelement": subelement}
-    )
+    resolved, native = _resolve_reference(ctx, doc, {"object": name, "subelement": subelement})
     if allow_sub:
         return (resolved, native)
     return resolved
@@ -824,8 +999,7 @@ def _convert_value(ctx: Any, doc: Any, obj: Any, prop: str, value: Any) -> Any:
         return value
     if ptype == "App::PropertyStringList":
         return [
-            _string(entry, f"{prop}[{index}]")
-            for index, entry in enumerate(_as_array(value, prop))
+            _string(entry, f"{prop}[{index}]") for index, entry in enumerate(_as_array(value, prop))
         ]
     if ptype == "App::PropertyIntegerList":
         return [
@@ -834,8 +1008,7 @@ def _convert_value(ctx: Any, doc: Any, obj: Any, prop: str, value: Any) -> Any:
         ]
     if ptype == "App::PropertyFloatList":
         return [
-            _number(entry, f"{prop}[{index}]")
-            for index, entry in enumerate(_as_array(value, prop))
+            _number(entry, f"{prop}[{index}]") for index, entry in enumerate(_as_array(value, prop))
         ]
     # Unmapped property types pass through; FreeCAD rejects mismatches and
     # the mutation gate rolls the assignment back.
@@ -871,9 +1044,7 @@ def _enumerations(obj: Any, prop: str) -> list[str] | None:
     return [str(entry) for entry in found] if found else None
 
 
-def _plan_create(
-    ctx: Any, doc: Any, obj_type: str, properties: dict
-) -> tuple[Any, dict[str, Any]]:
+def _plan_create(ctx: Any, doc: Any, obj_type: str, properties: dict) -> tuple[Any, dict[str, Any]]:
     """Validate the requested type before the transaction opens.
 
     Returns ``(factory, kwargs)``; a ``None`` factory means plain
@@ -887,10 +1058,7 @@ def _plan_create(
 
         spec = _FEM_FACTORIES.get(obj_type)
         if spec is None:
-            message = (
-                f"FEM type '{obj_type}' has no explicit creation factory in "
-                "this protocol"
-            )
+            message = f"FEM type '{obj_type}' has no explicit creation factory in this protocol"
             if obj_type.startswith("Fem::FemMesh"):
                 message += (
                     "; FEM mesh objects are not created by create_object, "
@@ -914,8 +1082,7 @@ def _plan_create(
             if raw is None:
                 raise ToolError(
                     VALIDATION_FAILED,
-                    f"FEM type '{obj_type}' requires a canonical '{key}' "
-                    "link in properties",
+                    f"FEM type '{obj_type}' requires a canonical '{key}' link in properties",
                 )
             kwargs[param] = _resolve_one(ctx, doc, raw, key, allow_sub=False)
         return factory, kwargs
@@ -933,9 +1100,7 @@ def _plan_create(
     return None, {}
 
 
-def _call_factory(
-    factory: Any, doc: Any, requested_name: str, kwargs: dict[str, Any]
-) -> Any:
+def _call_factory(factory: Any, doc: Any, requested_name: str, kwargs: dict[str, Any]) -> Any:
     try:
         return factory(doc, name=requested_name, **kwargs)
     except Exception as exc:
@@ -983,8 +1148,7 @@ def _view_value(prop: str, value: Any) -> Any:
         return _number(value, prop)
     raise ToolError(
         VALIDATION_FAILED,
-        f"ViewObject property '{prop}' accepts only scalars or colors over "
-        "this protocol",
+        f"ViewObject property '{prop}' accepts only scalars or colors over this protocol",
     )
 
 
@@ -992,14 +1156,12 @@ def _check_view_property(obj: Any, view: Any, prop: str) -> None:
     if not _property_exists(view, prop):
         raise ToolError(
             VALIDATION_FAILED,
-            f"ViewObject of '{getattr(obj, 'Name', '<unknown>')}' has no "
-            f"property '{prop}'",
+            f"ViewObject of '{getattr(obj, 'Name', '<unknown>')}' has no property '{prop}'",
         )
     if _is_read_only(view, prop):
         raise ToolError(
             VALIDATION_FAILED,
-            f"ViewObject property '{prop}' of "
-            f"'{getattr(obj, 'Name', '<unknown>')}' is read-only",
+            f"ViewObject property '{prop}' of '{getattr(obj, 'Name', '<unknown>')}' is read-only",
         )
 
 
@@ -1008,9 +1170,7 @@ def _check_document_property(obj: Any, prop: str) -> None:
     if not _property_exists(obj, prop):
         raise ToolError(VALIDATION_FAILED, f"object '{name}' has no property '{prop}'")
     if _is_read_only(obj, prop):
-        raise ToolError(
-            VALIDATION_FAILED, f"property '{prop}' of object '{name}' is read-only"
-        )
+        raise ToolError(VALIDATION_FAILED, f"property '{prop}' of object '{name}' is read-only")
 
 
 def _assign_converted(ctx: Any, doc: Any, obj: Any, prop: str, value: Any) -> None:
@@ -1034,7 +1194,7 @@ def _apply_properties(ctx: Any, doc: Any, obj: Any, properties: dict) -> None:
         elif prop == "ShapeColor":
             view = _viewobject(obj)
             _check_view_property(obj, view, "ShapeColor")
-            setattr(view, "ShapeColor", _color_value(value, "ShapeColor"))
+            view.ShapeColor = _color_value(value, "ShapeColor")
         else:
             _assign_converted(ctx, doc, obj, prop, value)
 
@@ -1183,10 +1343,22 @@ def _jsonify(value: Any) -> Any:
         if hasattr(value, "UserString"):
             return str(value)
         if hasattr(value, "Name") and hasattr(value, "TypeId"):
-            return str(value.Name)
+            # Inspection-only descriptive identity; mutation input keeps
+            # accepting opaque signed references.
+            return {"object": str(value.Name), "subelement": ""}
     except Exception:
         return _unavailable(type(value).__name__)
     if isinstance(value, (list, tuple)):
+        if len(value) == 2:
+            first, second = value
+            if hasattr(first, "Name") and hasattr(first, "TypeId"):
+                # A (link, subelement) pair: the native subelement string is
+                # descriptive only and is never an accepted edit selector.
+                sub = second
+                if isinstance(sub, (list, tuple)):
+                    sub = sub[0] if sub else ""
+                if isinstance(sub, str):
+                    return {"object": str(first.Name), "subelement": sub}
         converted: list[Any] = []
         for item in value[:_PROPERTY_LIST_LIMIT]:
             if isinstance(item, (bool, int, str)) and not isinstance(item, float):
@@ -1217,14 +1389,13 @@ def _all_property_names(obj: Any) -> list[str]:
     property is silently omitted.
     """
 
-    doc_props = {
-        str(prop) for prop in (getattr(obj, "PropertiesList", ()) or ())
-    }
+    doc_props = {str(prop) for prop in (getattr(obj, "PropertiesList", ()) or ())}
     view = getattr(obj, "ViewObject", None)
-    view_props = {
-        "ViewObject." + str(prop)
-        for prop in (getattr(view, "PropertiesList", ()) or ())
-    } if view is not None else set()
+    view_props = (
+        {"ViewObject." + str(prop) for prop in (getattr(view, "PropertiesList", ()) or ())}
+        if view is not None
+        else set()
+    )
     return sorted(doc_props | view_props)
 
 
@@ -1260,12 +1431,28 @@ def _property_metadata(holder: Any, prop: str) -> dict:
         enumeration = enums[:_ENUMERATION_LIMIT]
         count = len(enums)
         truncated = count > _ENUMERATION_LIMIT
+    expression = None
+    expression_getter = getattr(holder, "getExpression", None)
+    if callable(expression_getter):
+        try:
+            raw_expression = expression_getter(prop)
+        except Exception:
+            raw_expression = None
+        if isinstance(raw_expression, str):
+            expression = raw_expression or None
+        elif isinstance(raw_expression, (list, tuple)) and raw_expression:
+            # FreeCAD returns a (expression string, path) tuple; keep the
+            # expression-string member.
+            member = raw_expression[0]
+            if isinstance(member, str) and member:
+                expression = member
     return {
         "type": property_type,
         "readOnly": read_only,
         "enumeration": enumeration,
         "enumerationCount": count,
         "enumerationTruncated": truncated,
+        "expression": expression,
     }
 
 
@@ -1278,7 +1465,7 @@ def _resolve_property_holder(obj: Any, name: str) -> tuple[Any, str] | None:
     """
 
     if name.startswith("ViewObject."):
-        plain = name[len("ViewObject."):]
+        plain = name[len("ViewObject.") :]
         view = getattr(obj, "ViewObject", None)
         if view is not None and _property_exists(view, plain):
             return view, plain
@@ -1383,6 +1570,7 @@ def _cursor_payload(
     *,
     property_offset: int = 0,
     property_limit: int = _MAX_PROPERTY_PAGE,
+    selection: list[str] | None = None,
 ) -> dict:
     return {
         "kind": "objects-page",
@@ -1393,6 +1581,7 @@ def _cursor_payload(
         "filter": sorted(str(prop) for prop in props),
         "propertyOffset": property_offset,
         "propertyLimit": property_limit,
+        "selection": sorted(selection) if selection else None,
         "last": last,
     }
 
@@ -1415,6 +1604,7 @@ def _make_cursor(
     *,
     property_offset: int = 0,
     property_limit: int = _MAX_PROPERTY_PAGE,
+    selection: list[str] | None = None,
 ) -> str:
     return ctx.signer.sign(
         DOMAIN_CURSOR,
@@ -1427,6 +1617,7 @@ def _make_cursor(
             last,
             property_offset=property_offset,
             property_limit=property_limit,
+            selection=selection,
         ),
     )
 
@@ -1441,6 +1632,7 @@ def _open_cursor(
     *,
     property_offset: int = 0,
     property_limit: int = _MAX_PROPERTY_PAGE,
+    selection: list[str] | None = None,
 ) -> dict:
     payload = ctx.signer.verify(DOMAIN_CURSOR, cursor)
     expected = _cursor_payload(
@@ -1452,6 +1644,7 @@ def _open_cursor(
         "",
         property_offset=property_offset,
         property_limit=property_limit,
+        selection=selection,
     )
     if payload.get("kind") != "objects-page":
         raise _stale_cursor()
@@ -1465,13 +1658,14 @@ def _open_cursor(
         "filter",
         "propertyOffset",
         "propertyLimit",
+        "selection",
     ):
         if payload.get(key) != expected[key]:
             raise _stale_cursor()
     last = payload.get("last")
     if not isinstance(last, str):
         raise _stale_cursor()
-    return {"last": last}
+    return {"last": last, "selection": payload.get("selection")}
 
 
 # ---------------------------------------------------------------------------
@@ -1492,15 +1686,31 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
     property_offset = 0 if property_offset is None else int(property_offset)
     property_offset = max(0, property_offset)
     property_limit = args.get("property_limit")
-    property_limit = (
-        _MAX_PROPERTY_PAGE if property_limit is None else int(property_limit)
-    )
+    property_limit = _MAX_PROPERTY_PAGE if property_limit is None else int(property_limit)
     property_limit = max(1, min(_MAX_PROPERTY_PAGE, property_limit))
+
+    selection: list[str] | None = None
+    requested = args.get("objects")
+    if requested is not None:
+        if not isinstance(requested, list) or not (1 <= len(requested) <= 64):
+            raise ToolError(
+                VALIDATION_FAILED,
+                "objects must be an array of 1 to 64 object names",
+            )
+        names = [str(name) for name in requested]
+        if any(not name for name in names):
+            raise ToolError(VALIDATION_FAILED, "objects names must be non-empty")
+        if len(set(names)) != len(names):
+            raise ToolError(VALIDATION_FAILED, "objects names must be unique")
+        # Resolve every requested name before producing rows; the cursor
+        # binds the actual sanitized Names, sorted into page order.
+        resolved = [ctx.require_object(doc, name) for name in names]
+        selection = sorted({str(getattr(obj, "Name", "")) for obj in resolved})
 
     start_after: str | None = None
     cursor = args.get("cursor")
     if cursor:
-        start_after = _open_cursor(
+        opened = _open_cursor(
             ctx,
             doc,
             str(cursor),
@@ -1509,17 +1719,25 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
             props,
             property_offset=property_offset,
             property_limit=property_limit,
-        )["last"]
+            selection=selection,
+        )
+        start_after = opened["last"]
+        if selection is None and opened["selection"]:
+            cursor_selection = [str(name) for name in opened["selection"]]
+            resolved = [ctx.require_object(doc, name) for name in cursor_selection]
+            selection = sorted({str(getattr(obj, "Name", "")) for obj in resolved})
 
-    objects = sorted(
-        list(getattr(doc, "Objects", ()) or ()),
-        key=lambda obj: str(getattr(obj, "Name", "")),
-    )
+    if selection is not None:
+        by_name = {str(getattr(obj, "Name", "")): obj for obj in getattr(doc, "Objects", ()) or ()}
+        objects = [by_name[name] for name in selection if name in by_name]
+    else:
+        objects = sorted(
+            getattr(doc, "Objects", ()) or (),
+            key=lambda obj: str(getattr(obj, "Name", "")),
+        )
     total = len(objects)
     if start_after is not None:
-        objects = [
-            obj for obj in objects if str(getattr(obj, "Name", "")) > start_after
-        ]
+        objects = [obj for obj in objects if str(getattr(obj, "Name", "")) > start_after]
     page = objects[:limit]
     rows = [
         _row(
@@ -1542,6 +1760,7 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
             str(getattr(page[-1], "Name", "")),
             property_offset=property_offset,
             property_limit=property_limit,
+            selection=selection,
         )
     return {
         "document": str(getattr(doc, "Name", "")),
@@ -1554,18 +1773,85 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
     }
 
 
+_DEFAULT_BOUNDS_TOLERANCE = 0.000001
+
+
+def _snapshot_requested(obj: Any, properties: dict) -> list[tuple[str, Any]]:
+    """Read the requested document/ViewObject properties for a delta row.
+
+    Values pass through ``_jsonify`` so the rows use the same bounded
+    inspection encoding as ``inspect_objects``.
+    """
+
+    rows: list[tuple[str, Any]] = []
+    for key, value in properties.items():
+        if key == "ViewObject" and isinstance(value, dict):
+            view = getattr(obj, "ViewObject", None)
+            for sub in value:
+                if view is not None and _property_exists(view, sub):
+                    rows.append(("ViewObject." + sub, _jsonify(getattr(view, sub, None))))
+                else:
+                    rows.append(("ViewObject." + sub, _unavailable("no-such-property")))
+        elif key == "ShapeColor":
+            view = getattr(obj, "ViewObject", None)
+            if view is not None and _property_exists(view, "ShapeColor"):
+                rows.append((key, _jsonify(getattr(view, "ShapeColor", None))))
+            else:
+                rows.append((key, _unavailable("no-such-property")))
+        else:
+            rows.append((key, _read_value(obj, key)))
+    return rows
+
+
+def _change_summary(
+    properties: list[dict],
+    *,
+    solid_before: int | None,
+    solid_after: int | None,
+    volume_before: float | None,
+    volume_after: float | None,
+    bounds_before: list[float] | None,
+    bounds_after: list[float] | None,
+    dependents: int,
+) -> dict:
+    """Build the compact factual ``change`` summary for one target."""
+
+    return {
+        "properties": properties,
+        "geometry": {
+            "solidCountBefore": solid_before,
+            "solidCountAfter": solid_after,
+            "volumeBefore": volume_before,
+            "volumeAfter": volume_after,
+            "boundsBefore": bounds_before,
+            "boundsAfter": bounds_after,
+        },
+        "dependentCount": dependents,
+    }
+
+
 def create_object(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
     obj_type = str(args["type"])
     requested_name = str(args["name"])
     properties = dict(args.get("properties") or {})
     expected_solids = args.get("expected_solids")
+    expected_bounds = args.get("expected_bounds")
+    bounds_tolerance = args.get("bounds_tolerance")
+    if bounds_tolerance is None:
+        bounds_tolerance = _DEFAULT_BOUNDS_TOLERANCE
 
     factory, factory_kwargs = _plan_create(ctx, doc, obj_type, properties)
 
     created: list[Any] = []
     with mutation(
-        ctx, doc, "create_object", lambda: created, expected_solids=expected_solids
+        ctx,
+        doc,
+        "create_object",
+        lambda: created,
+        expected_solids=expected_solids,
+        expected_bounds=expected_bounds,
+        bounds_tolerance=float(bounds_tolerance),
     ) as applied:
         if factory is not None:
             created.append(_call_factory(factory, doc, requested_name, factory_kwargs))
@@ -1575,6 +1861,8 @@ def create_object(ctx: Any, args: dict) -> dict:
             _apply_properties(ctx, doc, created[0], properties)
 
     obj = created[0]
+    report = geometry_report(obj, expected_solids)
+    after_rows = _snapshot_requested(obj, properties)
     return {
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
@@ -1583,8 +1871,18 @@ def create_object(ctx: Any, args: dict) -> dict:
             "label": _label(obj),
             "typeId": str(getattr(obj, "TypeId", "")),
         },
-        "report": geometry_report(obj, expected_solids),
+        "report": report,
         "applied": applied,
+        "change": _change_summary(
+            [{"name": name, "before": None, "after": after} for name, after in after_rows],
+            solid_before=None,
+            solid_after=report["solid_count"],
+            volume_before=None,
+            volume_after=report["volume"],
+            bounds_before=None,
+            bounds_after=document_bounds(obj),
+            dependents=dependent_count([obj]),
+        ),
     }
 
 
@@ -1595,13 +1893,30 @@ def edit_object(ctx: Any, args: dict) -> dict:
     if not isinstance(properties, dict) or not properties:
         raise ToolError(VALIDATION_FAILED, "properties must be a non-empty object")
     expected_solids = args.get("expected_solids")
+    expected_bounds = args.get("expected_bounds")
+    bounds_tolerance = args.get("bounds_tolerance")
+    if bounds_tolerance is None:
+        bounds_tolerance = _DEFAULT_BOUNDS_TOLERANCE
     prepared = _prepare_properties(ctx, doc, obj, properties)
 
+    before_rows = _snapshot_requested(obj, properties)
+    before_report = geometry_report(obj)
+    bounds_before = document_bounds(obj)
+    dependents = dependent_count([obj])
+
     with mutation(
-        ctx, doc, f"edit_object:{obj.Name}", [obj], expected_solids=expected_solids
+        ctx,
+        doc,
+        f"edit_object:{obj.Name}",
+        [obj],
+        expected_solids=expected_solids,
+        expected_bounds=expected_bounds,
+        bounds_tolerance=float(bounds_tolerance),
     ) as applied:
         _apply_prepared(obj, prepared)
 
+    after_rows = _snapshot_requested(obj, properties)
+    report = geometry_report(obj, expected_solids)
     return {
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
@@ -1610,8 +1925,21 @@ def edit_object(ctx: Any, args: dict) -> dict:
             "label": _label(obj),
             "typeId": str(getattr(obj, "TypeId", "")),
         },
-        "report": geometry_report(obj, expected_solids),
+        "report": report,
         "applied": applied,
+        "change": _change_summary(
+            [
+                {"name": name, "before": before, "after": after}
+                for (name, before), (_after, after) in zip(before_rows, after_rows, strict=True)
+            ],
+            solid_before=before_report["solid_count"],
+            solid_after=report["solid_count"],
+            volume_before=before_report["volume"],
+            volume_after=report["volume"],
+            bounds_before=bounds_before,
+            bounds_after=document_bounds(obj),
+            dependents=dependents,
+        ),
     }
 
 
@@ -1657,9 +1985,103 @@ def delete_object(ctx: Any, args: dict) -> dict:
     }
 
 
+def edit_objects(ctx: Any, args: dict) -> dict:
+    doc = ctx.require_document(args["document"])
+    edits = args["edits"]
+    if not isinstance(edits, list) or not (1 <= len(edits) <= 32):
+        raise ToolError(VALIDATION_FAILED, "edits must be an array of 1 to 32 entries")
+    names: list[str] = []
+    targets: list[Any] = []
+    prepared: dict[str, list[tuple[str, str, Any]]] = {}
+    for position, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            raise ToolError(VALIDATION_FAILED, f"edits[{position}] must be an object")
+        properties = edit.get("properties")
+        if not isinstance(properties, dict) or not properties:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"edits[{position}].properties must be a non-empty object",
+            )
+        obj = ctx.require_object(doc, str(edit.get("object")))
+        if obj.Name in prepared:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"edits list object '{obj.Name}' more than once",
+            )
+        prepared[obj.Name] = _prepare_properties(ctx, doc, obj, properties)
+        names.append(obj.Name)
+        targets.append(obj)
+
+    expectations = args.get("expectations") or {}
+    if not isinstance(expectations, dict):
+        raise ToolError(VALIDATION_FAILED, "expectations must be an object")
+    unknown = sorted(set(expectations) - set(prepared))
+    if unknown:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"expectations name objects that are not edited: {unknown}",
+        )
+
+    before_rows: dict[str, list[tuple[str, Any]]] = {}
+    before_reports: dict[str, dict] = {}
+    before_bounds: dict[str, list[float] | None] = {}
+    for obj, edit in zip(targets, edits, strict=True):
+        before_rows[obj.Name] = _snapshot_requested(obj, edit["properties"])
+        before_reports[obj.Name] = geometry_report(obj)
+        before_bounds[obj.Name] = document_bounds(obj)
+    dependent_counts = {obj.Name: dependent_count([obj]) for obj in targets}
+
+    with mutation(
+        ctx,
+        doc,
+        "edit_objects",
+        targets,
+        expectations=expectations,
+    ) as applied:
+        for obj in targets:
+            _apply_prepared(obj, prepared[obj.Name])
+
+    changes = []
+    for obj, edit in zip(targets, edits, strict=True):
+        after_rows = _snapshot_requested(obj, edit["properties"])
+        report = geometry_report(obj)
+        changes.append(
+            _change_summary(
+                [
+                    {"name": name, "before": before, "after": after}
+                    for (name, before), (_after, after) in zip(
+                        before_rows[obj.Name], after_rows, strict=True
+                    )
+                ],
+                solid_before=before_reports[obj.Name]["solid_count"],
+                solid_after=report["solid_count"],
+                volume_before=before_reports[obj.Name]["volume"],
+                volume_after=report["volume"],
+                bounds_before=before_bounds[obj.Name],
+                bounds_after=document_bounds(obj),
+                dependents=dependent_counts[obj.Name],
+            )
+        )
+    return {
+        "document": str(getattr(doc, "Name", "")),
+        "generation": int(ctx.document_generation(doc)),
+        "objects": [
+            {
+                "name": str(getattr(obj, "Name", "")),
+                "label": _label(obj),
+                "typeId": str(getattr(obj, "TypeId", "")),
+            }
+            for obj in targets
+        ],
+        "changes": changes,
+        "applied": applied,
+    }
+
+
 HANDLERS = {
     "inspect_objects": inspect_objects,
     "create_object": create_object,
     "edit_object": edit_object,
+    "edit_objects": edit_objects,
     "delete_object": delete_object,
 }

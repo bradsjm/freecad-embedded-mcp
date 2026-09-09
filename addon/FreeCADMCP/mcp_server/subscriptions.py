@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import queue
 import threading
-from typing import Any, Callable, Collection
+from collections.abc import Callable, Collection
+from typing import Any
 
 from .protocol import (
     INVALID_PARAMS,
@@ -93,18 +94,14 @@ def honor_filter(
         if value is None:
             continue
         if not isinstance(value, bool):
-            raise ProtocolError(
-                INVALID_PARAMS, f"subscriptions filter {key!r} must be a boolean"
-            )
+            raise ProtocolError(INVALID_PARAMS, f"subscriptions filter {key!r} must be a boolean")
         if value and supported_booleans[key]:
             honored[key] = True
     for key in _FILTER_LIST_KEYS:
         value = requested.get(key)
         if value is None:
             continue
-        if not isinstance(value, list) or not all(
-            isinstance(item, str) and item for item in value
-        ):
+        if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
             raise ProtocolError(
                 INVALID_PARAMS,
                 f"subscriptions filter {key!r} must be a list of nonempty strings",
@@ -300,11 +297,7 @@ class SubscriptionRegistry:
         cancellation of detached work only ever happens via tasks/cancel.
         """
         with self._lock:
-            doomed = [
-                key
-                for key, sub in self._subscriptions.items()
-                if key[0] == connection_id
-            ]
+            doomed = [key for key, sub in self._subscriptions.items() if key[0] == connection_id]
             for key in doomed:
                 self._subscriptions.pop(key).close()
             return len(doomed)
@@ -319,13 +312,9 @@ class SubscriptionRegistry:
         """
         with self._lock:
             self._prune_locked()
-            open_subscriptions = [
-                sub for sub in self._subscriptions.values() if not sub.closed
-            ]
+            open_subscriptions = [sub for sub in self._subscriptions.values() if not sub.closed]
             for subscription in open_subscriptions:
-                self._subscriptions.pop(
-                    (subscription.connection_id, subscription.subscription_id)
-                )
+                self._subscriptions.pop((subscription.connection_id, subscription.subscription_id))
         for subscription in open_subscriptions:
             subscription.close(
                 final={
@@ -344,9 +333,7 @@ class SubscriptionRegistry:
 
     # -- lookups ----------------------------------------------------------
 
-    def subscription(
-        self, connection_id: Any, subscription_id: Any
-    ) -> Subscription | None:
+    def subscription(self, connection_id: Any, subscription_id: Any) -> Subscription | None:
         with self._lock:
             self._prune_locked()
             return self._subscriptions.get((connection_id, subscription_id))
@@ -382,16 +369,12 @@ class SubscriptionRegistry:
         """
         task_id = task.get("taskId")
         with self._lock:
-            targets = self._targets_locked(
-                lambda sub: task_id in sub.honored.get("taskIds", ())
-            )
+            targets = self._targets_locked(lambda sub: task_id in sub.honored.get("taskIds", ()))
         return self._deliver(targets, TASKS_NOTIFICATION_METHOD, lambda sub: dict(task))
 
     # -- internals ---------------------------------------------------------
 
-    def _targets_locked(
-        self, predicate: Callable[[Subscription], bool]
-    ) -> list[Subscription]:
+    def _targets_locked(self, predicate: Callable[[Subscription], bool]) -> list[Subscription]:
         self._prune_locked()
         return [sub for sub in self._subscriptions.values() if predicate(sub)]
 
@@ -409,9 +392,7 @@ class SubscriptionRegistry:
                     "method": method,
                     "params": {
                         **params_for(subscription),
-                        "_meta": {
-                            SUBSCRIPTION_ID_META_KEY: subscription.subscription_id
-                        },
+                        "_meta": {SUBSCRIPTION_ID_META_KEY: subscription.subscription_id},
                     },
                 }
             ):

@@ -23,7 +23,8 @@ import concurrent.futures
 import os
 import tempfile
 import traceback
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from mcp_server.protocol import (
     OBJECT_NOT_FOUND,
@@ -270,8 +271,7 @@ def _select_solver(ctx: Any, doc: Any, analysis: Any) -> tuple[Any, bool]:
     if len(modern) > 1:
         raise ToolError(
             SOLVER_FAILED,
-            "ambiguous CalculiX setup: the analysis contains more than one "
-            "modern solver",
+            "ambiguous CalculiX setup: the analysis contains more than one modern solver",
             details={"solvers": _names(modern)},
         )
     if modern:
@@ -290,9 +290,9 @@ def _select_solver(ctx: Any, doc: Any, analysis: Any) -> tuple[Any, bool]:
 
 def _create_modern_solver(ctx: Any, doc: Any, analysis: Any) -> Any:
     """Create one modern solver inside the shared mutation gate."""
-    from mcp_server.object_validation import mutation
-
     import ObjectsFem
+
+    from mcp_server.object_validation import mutation
 
     created: list[Any] = []
 
@@ -507,8 +507,7 @@ class _FemSolve:
         if generation != self.generation:
             raise ToolError(
                 VALIDATION_FAILED,
-                "document changed during the solve; results were not "
-                "loaded; run run_fem again",
+                "document changed during the solve; results were not loaded; run run_fem again",
                 details={
                     "expected_generation": self.generation,
                     "actual_generation": generation,
@@ -565,9 +564,7 @@ class _FemSolve:
         """QProcess.errorOccurred slot; only failed-to-start finalizes here."""
         if self.finished:
             return
-        process_error = getattr(
-            getattr(self.tool, "process", None), "ProcessError", None
-        )
+        process_error = getattr(getattr(self.tool, "process", None), "ProcessError", None)
         failed_to_start = getattr(process_error, "FailedToStart", None)
         if failed_to_start is not None and error == failed_to_start:
             self._finalize(
@@ -592,17 +589,12 @@ class _FemSolve:
             self._finalize(
                 error=ToolError(
                     SOLVER_FAILED,
-                    "CalculiX exited with code 0 but the native result "
-                    "loader did not complete",
-                    details=self._exit_details(
-                        exit_code=code, exit_status="NormalExit"
-                    ),
+                    "CalculiX exited with code 0 but the native result loader did not complete",
+                    details=self._exit_details(exit_code=code, exit_status="NormalExit"),
                 )
             )
             return
-        failed_to_start = getattr(
-            getattr(process, "ProcessError", None), "FailedToStart", None
-        )
+        failed_to_start = getattr(getattr(process, "ProcessError", None), "FailedToStart", None)
         actual_error = getattr(process, "error", None)
         process_error = actual_error() if callable(actual_error) else None
         if failed_to_start is not None and process_error == failed_to_start:
@@ -815,9 +807,7 @@ def _collect_blocks(node: Any, blocks: list[dict[str, Any]]) -> None:
             array = arrays.GetArray(array_index)
             name = arrays.GetArrayName(array_index)
             if not name:
-                name = (
-                    getattr(array, "GetName", lambda: None)() or f"array_{array_index}"
-                )
+                name = getattr(array, "GetName", lambda: None)() or f"array_{array_index}"
             summary = _array_range(array)
             if summary is None:
                 continue

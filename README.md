@@ -236,23 +236,29 @@ For Network access, add the bearer header to the arguments. Keep the token out o
 
 ## Tools
 
-The server exposes 17 tools.
+The server exposes 23 tools.
 
 | Tool | Purpose |
 | --- | --- |
 | `discover_capabilities` | Report FreeCAD/OCC versions, workbenches, supported types, exporter and FEM availability, and GUI dispatch health. |
 | `new_document` | Create an empty document and return its actual sanitized `Name`, `Label`, and object count. |
 | `open_document` | Open an FCStd file. |
+| `import_model` | Import a STEP or STL file behind file consent, reporting created objects, bounds, validity, and units. |
 | `save_document` | Save to the existing path or save as a new path. |
 | `close_document` | Close a document. |
 | `reload_document` | Close and reopen a saved document from its file. |
-| `inspect_objects` | List document objects with placement, bounds, shape validity, and solid counts. Results are paginated with a signed cursor. |
+| `inspect_objects` | List document objects, or a 1–64 object selection, with placement, bounds, shape validity, and solid counts. Results are paginated with a signed cursor. |
 | `create_object` | Create a supported Part/App type or FEM object through an explicit factory mapping, including modern analysis, `Fem::SolverCalculiX`, materials, and constraints. |
-| `edit_object` | Assign properties with prevalidation so an invalid property leaves earlier properties unchanged. Supports canonical `{object, subelement}` links only. |
+| `edit_object` | Assign properties with prevalidation so an invalid property leaves earlier properties unchanged. Supports canonical `{object, subelement}` links only, optional commit-time bounds expectations, and returns before/after property and geometry deltas. |
+| `edit_objects` | Edit 1–32 existing objects atomically in one transaction with optional per-object expectations. |
 | `delete_object` | Remove an object, refusing objects that still have dependents instead of cascading silently. |
-| `edit_parameters` | Add, rename, and bind expressions on dynamic properties with full validation and rollback. |
 | `validate_geometry` | Report per-object state and shape validity, solid count, volume, bounds, and tolerance diagnostics, optionally against expected bounds. |
-| `measure` | Measure distance, interference, section, and face relationships between objects or their subshapes. |
+| `measure` | Measure distance, interference, section, and face relationships between objects, bbox-selected subshapes, or signed topology references. |
+| `inspect_topology` | Page through an object's faces or edges with bounds, sampled centers/normals, native type names, and signed references. |
+| `edit_parameters` | Add, rename, bind expressions on, and clear expressions from dynamic properties with full validation and rollback. |
+| `inspect_sketch` | Report sketch geometry and constraint rows in native index order with the solver degree-of-freedom summary and expression bindings. |
+| `edit_sketch` | Apply one atomic batch of sketch operations: add geometry or constraints, set datums, and delete geometry or constraints. |
+| `create_feature` | Create a datum plane, sketch, pad, pocket, or hole inside a PartDesign Body, wiring profile and support and validating the Body's final geometry. |
 | `export` | Write STL, STEP, 3MF, or a native FCStd copy, verifying every file by reading it back. |
 | `capture_view` | Capture a PNG of a document's 3D view with an explicit orientation (Isometric, Front, Top, and more), framed on one existing object while preserving the caller's selection and active document. |
 | `run_fem` | Run a FEM analysis through the modern `Fem::SolverCalculiX` pipeline and return the loaded VTK result summary (`.vtm` and `.vtu` blocks, point/cell counts, and finite result ranges). |
@@ -292,7 +298,7 @@ At most 32 sessions are kept. New sessions are refused rather than evicting live
 
 ## Agent skill
 
-The repository ships an [agent skill](skills/freecad-mcp/SKILL.md). It teaches coding agents how to drive this server: the 17-tool contract, FreeCAD modeling patterns, geometry validation, FEM, and export. It complements the MCP connection: the agent still talks to `http://127.0.0.1:9876/mcp`, while the skill explains how to use the tools effectively.
+The repository ships an [agent skill](skills/freecad-mcp/SKILL.md). It teaches coding agents how to drive this server: the 23-tool contract, FreeCAD modeling patterns, geometry validation, FEM, and export. It complements the MCP connection: the agent still talks to `http://127.0.0.1:9876/mcp`, while the skill explains how to use the tools effectively.
 
 [`npx skills`](https://github.com/vercel-labs/skills) is the official installer for the open agent skills ecosystem. It requires Node.js and supports Claude Code, Codex, Cursor, and more than 75 other agents.
 
@@ -353,7 +359,7 @@ The project targets Python 3.11+ and has no runtime dependencies.
 | --- | --- |
 | **Architecture** | The PyPI proxy package (`src/freecad_mcp`, FastMCP over stdio) and the in-FreeCAD XML-RPC server are gone. One embedded server speaks MCP over Streamable HTTP (JSON-RPC + SSE) at `http://127.0.0.1:9876/mcp`. No pip or uvx install and no client config file are needed. |
 | **Protocol** | XML-RPC with ad-hoc dictionaries became the MCP JSON-RPC wire protocol, version `2026-07-28`, with request-metadata headers, capability negotiation, and session-based support for the 2025 Streamable HTTP revisions. |
-| **Tools** | Fifteen loosely typed tools became 17 tools validated against JSON input and output schemas, with structured error codes and paginated results. `execute_code` became `run_script`; `get_view` became `capture_view`; `get_rpc_status` became `discover_capabilities`; `insert_part_from_library` and `get_parts_list` were dropped because the parts library is reachable through `run_script`. |
+| **Tools** | Fifteen loosely typed tools became 23 tools validated against JSON input and output schemas, with structured error codes and paginated results. `execute_code` became `run_script`; `get_view` became `capture_view`; `get_rpc_status` became `discover_capabilities`; `insert_part_from_library` and `get_parts_list` were dropped because the parts library is reachable through `run_script`. |
 | **Security** | The IP allow-list alone became two explicit modes: local (loopback bind, Host/Origin checks, no token) and remote (bind to all interfaces, mandatory bearer token, optional CIDR allow-list), plus `allowed_roots` path containment for file-touching tools. |
 | **Document safety** | Unvalidated success/error dictionaries became MCP-owned transactions with prevalidation, rollback, dependent-object checks, and solid-count baselines. |
 | **Long-running work** | Blocking calls with client-side timeouts became detached tasks under the `io.modelcontextprotocol/tasks` extension, with polling and cooperative cancellation. |

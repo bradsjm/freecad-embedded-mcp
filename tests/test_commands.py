@@ -10,7 +10,6 @@ endpoint mapping, token masking in Connection Details, and the draining
 to stopped transition only after true completion.
 """
 
-import importlib
 import sys
 import types
 from pathlib import Path
@@ -24,7 +23,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 
-import test_server as ts  # noqa: E402 - shared FreeCAD/server stub harness
+import test_server as ts
 
 # ---------------------------------------------------------------------------
 # Rich fake PySide (replaces the minimal harness stub before commands loads).
@@ -260,6 +259,7 @@ class FakeWidget:
 
     def isEnabled(self) -> bool:
         return self._enabled
+
     def isChecked(self) -> bool:
         return self.checked
 
@@ -340,6 +340,7 @@ class FakeDialogButtonBox:
         self.rejected = FakeSignal()
         FakeDialogButtonBox.instances.append(self)
 
+
 def _build_fake_pyside():
     qt_core = types.SimpleNamespace(
         QObject=FakeQObject,
@@ -366,9 +367,7 @@ def _build_fake_pyside():
         QFormLayout=lambda *_a, **_k: FakeLayout(),
         QHBoxLayout=lambda *_a, **_k: FakeLayout(),
         QDialogButtonBox=FakeDialogButtonBox,
-        QInputDialog=types.SimpleNamespace(
-            getText=lambda *_a, **_k: ("", False)
-        ),
+        QInputDialog=types.SimpleNamespace(getText=lambda *_a, **_k: ("", False)),
         QWidget=types.SimpleNamespace(setTabOrder=lambda *_a: None),
     )
     pyside = types.ModuleType("PySide")
@@ -394,11 +393,12 @@ for _name in [
 ]:
     del sys.modules[_name]
 
-import mcp_server.commands as commands  # noqa: E402
-import mcp_server.gui_dispatch as gui_dispatch  # noqa: E402
-import mcp_server.protocol as protocol  # noqa: E402
-import mcp_server.server as server_module  # noqa: E402
-from mcp_server.settings import SettingsError  # noqa: E402
+import mcp_server.server as server_module
+from mcp_server import (
+    commands,
+    gui_dispatch,
+    protocol,
+)
 
 SAVED_SETTINGS = {
     "port": 9876,
@@ -442,12 +442,8 @@ def _clean_commands_state(monkeypatch):
     gui_dispatch._dispatch_health._timed_out = False
     gui_dispatch._dispatch_health._timeout_seconds = 0.0
     ts._drain_gui_queue()
-    monkeypatch.setattr(
-        commands, "load_settings", lambda: dict(SAVED_SETTINGS)
-    )
-    monkeypatch.setattr(
-        commands, "save_settings", lambda settings: None
-    )
+    monkeypatch.setattr(commands, "load_settings", lambda: dict(SAVED_SETTINGS))
+    monkeypatch.setattr(commands, "save_settings", lambda settings: None)
     monkeypatch.setattr(FakeMessageBox, "warnings", [])
     FakeClipboard.calls = []
     FakeTimer.instances = []
@@ -476,13 +472,25 @@ def test_indicator_state_mapping_covers_every_state():
         ("stopped", 0, "MCP: Stopped", "Start MCP Server", "mcp-start.svg", True),
         ("starting", 0, "MCP: Starting", "Starting MCP Server…", "mcp-start.svg", False),
         ("running", 0, "MCP: Running (Local only)", "Stop MCP Server", "mcp-stop.svg", True),
-        ("draining", 3, "MCP: Stopping (3 operations)", "Stopping MCP Server…", "mcp-stop.svg", False),
-        ("unknown", 0, "MCP: State unknown", "MCP Server State Unknown", "mcp-workbench.svg", False),
+        (
+            "draining",
+            3,
+            "MCP: Stopping (3 operations)",
+            "Stopping MCP Server…",
+            "mcp-stop.svg",
+            False,
+        ),
+        (
+            "unknown",
+            0,
+            "MCP: State unknown",
+            "MCP Server State Unknown",
+            "mcp-workbench.svg",
+            False,
+        ),
     ]
     for state, pending, text, action_text, icon, enabled in cases:
-        mapping = commands._indicator_state(
-            _status(state=state, pendingOperations=pending)
-        )
+        mapping = commands._indicator_state(_status(state=state, pendingOperations=pending))
         assert mapping["text"] == text
         assert mapping["action_text"] == action_text
         assert mapping["action_icon"] == icon
@@ -501,9 +509,7 @@ def test_running_network_and_stuck_gui_have_truthful_status():
         )
     )
     assert network["text"] == "MCP: Running (Network enabled)"
-    stuck = commands._indicator_state(
-        _status(state="running", gui={"state": "stuck"})
-    )
+    stuck = commands._indicator_state(_status(state="running", gui={"state": "stuck"}))
     assert stuck["text"] == "MCP: Running — GUI blocked"
     assert stuck["action_text"] == "Stop MCP Server"
     assert stuck["action_enabled"] is True
@@ -615,9 +621,7 @@ def test_contextual_command_stops_when_running(monkeypatch):
         lambda: _status(state="draining", pendingOperations=3),
     )
     commands.ToggleMCPServerCommand().Activated()
-    assert window.status_bar.messages[-1][0] == (
-        "MCP is stopping; 3 operations are still active."
-    )
+    assert window.status_bar.messages[-1][0] == ("MCP is stopping; 3 operations are still active.")
 
 
 def test_contextual_command_failure_is_visible(monkeypatch):
@@ -772,14 +776,9 @@ def test_connection_details_dialog_masks_token_and_maps_endpoint(monkeypatch):
     # The local endpoint is the loopback mapping; the wildcard address is
     # only ever the bind address. The active token is never echoed into
     # the status bar, console output or tooltips.
-    endpoint_texts = [
-        call[0]
-        for call in window.status_bar.messages
-    ]
+    endpoint_texts = [call[0] for call in window.status_bar.messages]
     assert endpoint_texts == []
-    assert all(
-        "0.0.0.0" not in message for message in ts.FakeConsole.messages
-    )
+    assert all("0.0.0.0" not in message for message in ts.FakeConsole.messages)
     assert all("0.0.0.0" not in message for message, _ms in window.status_bar.messages)
     # The dialog used the ACTIVE server's token, never a stale saved one.
     active_token = active.settings["token"]

@@ -181,13 +181,9 @@ class FreeCadMcpClient:
             "params": {"_meta": self._meta(), **(params or {})},
         }
         body = json.dumps(envelope).encode("utf-8")
-        conn = http.client.HTTPConnection(
-            self._host, self._port, timeout=HTTP_TIMEOUT_S
-        )
+        conn = http.client.HTTPConnection(self._host, self._port, timeout=HTTP_TIMEOUT_S)
         try:
-            conn.request(
-                "POST", self._path, body=body, headers=self._headers(method, name)
-            )
+            conn.request("POST", self._path, body=body, headers=self._headers(method, name))
             return self._read_response(conn, request_id)
         finally:
             conn.close()
@@ -205,22 +201,16 @@ class FreeCadMcpClient:
         if result.get("resultType") == "input_required":
             request_state = result.get("requestState")
             if request_state is None:
-                raise ProtocolFailure(
-                    "input_required result without a requestState token"
-                )
+                raise ProtocolFailure("input_required result without a requestState token")
             params["requestState"] = request_state
             params["inputResponses"] = {
                 "confirm": {"action": "accept", "content": {"confirmed": True}}
             }
             result = self.request("tools/call", params, name=name)
         if result.get("isError"):
-            raise ToolFailure(
-                name, result.get("structuredContent", {}).get("error", {})
-            )
+            raise ToolFailure(name, result.get("structuredContent", {}).get("error", {}))
         if result.get("resultType") != "complete":
-            raise ProtocolFailure(
-                f"unexpected resultType: {result.get('resultType')!r}"
-            )
+            raise ProtocolFailure(f"unexpected resultType: {result.get('resultType')!r}")
         return result.get("structuredContent", {})
 
     def run_script(self, code: str, session_id: str = "cantilever-example") -> dict:
@@ -381,9 +371,7 @@ def prepare_fem_model(
     if not result.get("executed"):
         raise RuntimeError("run_script reports the code did not execute")
     if "FIXTURE_READY" not in result.get("stdout", ""):
-        raise RuntimeError(
-            "fixture script did not complete; stdout:\n" + result.get("stdout", "")
-        )
+        raise RuntimeError("fixture script did not complete; stdout:\n" + result.get("stdout", ""))
     if result.get("stderr"):
         print("   script stderr:", result["stderr"].strip())
 
@@ -410,17 +398,11 @@ def main() -> int:
     listing = tool_payload("tools/list", client.request("tools/list"))
     tool_names = [tool["name"] for tool in listing["tools"]]
     if len(tool_names) != EXPECTED_TOOLS:
-        print(
-            f"FATAL: expected {EXPECTED_TOOLS} tools, got {len(tool_names)}: "
-            f"{tool_names}"
-        )
+        print(f"FATAL: expected {EXPECTED_TOOLS} tools, got {len(tool_names)}: {tool_names}")
         return 3
-    server_info = (discover.get("_meta") or {}).get(
-        "io.modelcontextprotocol/serverInfo", {}
-    )
+    server_info = (discover.get("_meta") or {}).get("io.modelcontextprotocol/serverInfo", {})
     print(
-        f"   server {server_info.get('name')} {server_info.get('version')}, "
-        f"{len(tool_names)} tools"
+        f"   server {server_info.get('name')} {server_info.get('version')}, {len(tool_names)} tools"
     )
 
     doc_name, beam_name, analysis_name = build_fixture(client)

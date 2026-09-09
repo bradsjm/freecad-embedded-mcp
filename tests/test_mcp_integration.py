@@ -5,7 +5,7 @@ shared ``test_server`` harness); the wire is REAL: a bound
 ``McpHTTPServer`` on an OS-assigned port driven through ``http.client``.
 Covers the plan's acceptance chain — legacy initialize on every revision
 with a session header, the initialized notification, tools/list with
-exactly 17 tools, discover_capabilities and a harmless run_script as
+exactly 23 tools, discover_capabilities and a harmless run_script as
 legacy-shaped final results — plus the guarantee that modern requests
 still validate unchanged and never acquire a legacy session implicitly.
 """
@@ -24,7 +24,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 
-import test_server as ts  # noqa: E402 - shared FreeCAD/server stub harness
+import test_server as ts
 
 # server.py has already bound the harness's stub tool modules; drop the
 # fake tool package so later test files import the real modules again.
@@ -35,12 +35,11 @@ for _name in [
 ]:
     del sys.modules[_name]
 
-from mcp_server.http_server import McpHTTPServer  # noqa: E402
-from mcp_server.legacy_protocol import (  # noqa: E402
+from mcp_server.http_server import McpHTTPServer
+from mcp_server.legacy_protocol import (
     LEGACY_PROTOCOL_VERSIONS,
-    has_modern_metadata,
 )
-from mcp_server.protocol import (  # noqa: E402
+from mcp_server.protocol import (
     META_CLIENT_CAPABILITIES,
     META_CLIENT_INFO,
     META_PROTOCOL_VERSION,
@@ -162,7 +161,7 @@ def test_legacy_session_flow_delivers_final_results_over_sse(wired_server):
     assert initialized.status == 202
     assert initialized.read() == b""
 
-    # tools/list: exactly 17 tools, no modern envelope metadata.
+    # tools/list: exactly 23 tools, no modern envelope metadata.
     response = _post(
         http,
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
@@ -171,7 +170,8 @@ def test_legacy_session_flow_delivers_final_results_over_sse(wired_server):
     status, body, _headers = _read_json(response)
     assert status == 200
     result = body["result"]
-    assert len(result["tools"]) == 17
+    assert len(result["tools"]) == 23
+    assert [tool["name"] for tool in result["tools"]] == list(ts.server_module.PLAN_TOOL_ORDER)
     assert "resultType" not in result
     assert "ttlMs" not in result
 
@@ -250,12 +250,12 @@ def test_legacy_formless_client_falls_back_to_execution(wired_server):
 def test_modern_requests_validate_unchanged_and_skip_legacy_sessions(
     wired_server,
 ):
-    server, http, _waker = wired_server
+    _server, http, _waker = wired_server
     message, headers = _modern("tools/list", 11)
     response = _post(http, message, headers)
     status, body, response_headers = _read_json(response)
     assert status == 200
-    assert len(body["result"]["tools"]) == 17
+    assert len(body["result"]["tools"]) == 23
     assert body["result"]["resultType"] == "complete"
     # A modern request never acquires a legacy session implicitly.
     assert response_headers.get("mcp-session-id") is None
