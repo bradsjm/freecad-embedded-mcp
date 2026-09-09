@@ -325,13 +325,24 @@ def dispatch(server, method, params=None, *, rpc_id=1, capabilities=None):
     return server.dispatch(view, PRINCIPAL, CONN)
 
 
+_POLL_COND = threading.Condition()
+
+
 def wait_until(predicate, timeout: float = 3.0, interval: float = 0.005) -> bool:
+    """Poll predicate on a condition variable until the deadline passes.
+
+    Bounded condition wait for cross-thread completion that has no event
+    surface (task publication, dispatch drain). Not a blind sleep: a notify
+    can wake it early.
+    """
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(interval)
-    return predicate()
+    with _POLL_COND:
+        while not predicate():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _POLL_COND.wait(min(interval, remaining))
+    return True
 
 
 def _drain_gui_queue() -> int:
@@ -455,9 +466,15 @@ def test_discover_capabilities_tool_never_touches_the_gui():
         gui_dispatch.dispatch_to_gui = original
     result = response["result"]
     assert result["resultType"] == "complete"
-    assert result["structuredContent"] == {
-        "capabilities": {"paths": {"home": "/fc"}},
-        "gui": result["structuredContent"]["gui"],
+    assert set(result["structuredContent"]) == {"capabilities", "gui"}
+    assert result["structuredContent"]["capabilities"] == {"paths": {"home": "/fc"}}
+    assert set(result["structuredContent"]["gui"]) == {
+        "state",
+        "operation",
+        "runningForSeconds",
+        "timeoutSeconds",
+        "queuedJobs",
+        "draining",
     }
     assert STUB_CALLS == []
     # Machine-specific capability data: cached, private, GUI independent.
@@ -1867,7 +1884,7 @@ def test_discover_refresh_publishes_full_sorted_types_and_scope():
     types.append("App::Document")  # duplicate name in native order
     FC_STATE["documents"] = {"Zed": FakeDoc("Zed"), "Alpha": _TypesDoc("Alpha", types)}
     try:
-        response = dispatch(server, "server/discover", {"refresh": True})
+        dispatch(server, "server/discover", {"refresh": True})
         assert wait_until(
             lambda: (
                 server._static_capabilities is not None
@@ -1875,7 +1892,6 @@ def test_discover_refresh_publishes_full_sorted_types_and_scope():
             )
         )
         waker.join()
-        response["result"] if isinstance(response, dict) else None
     finally:
         FC_STATE["documents"] = {}
     # Re-read through the published cache (the dispatch thread published it).

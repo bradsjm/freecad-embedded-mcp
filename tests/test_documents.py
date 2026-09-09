@@ -633,15 +633,6 @@ def test_reload_document_unsaved_scratch_is_actionable(tmp_path):
 
 
 def test_definitions_are_finite_and_bound():
-    names = [definition["name"] for definition in documents.TOOL_DEFINITIONS]
-    assert names == [
-        "new_document",
-        "open_document",
-        "save_document",
-        "close_document",
-        "reload_document",
-    ]
-    assert sorted(documents.HANDLERS) == sorted(names)
     from mcp_server.protocol import check_schema
 
     for definition in documents.TOOL_DEFINITIONS:

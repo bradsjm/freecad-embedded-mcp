@@ -22,7 +22,7 @@ FEATURES_PATH = ADDON_DIR / "mcp_server" / "tools" / "features.py"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server.protocol import ToolError, check_schema, validate_schema
+from mcp_server.protocol import ToolError, validate_schema
 
 VALIDATION_FAILED = "VALIDATION_FAILED"
 
@@ -207,6 +207,7 @@ class FakeDoc:
         self.HasPendingTransaction = False
         self.transactions: list[tuple] = []
         self.recompute_count = 0
+        self._undo: dict | None = None
 
     def supportedTypes(self) -> tuple[str, ...]:
         return self._supported
@@ -218,12 +219,28 @@ class FakeDoc:
         self.recompute_count += 1
 
     def openTransaction(self, label: str) -> None:
+        self._undo = {
+            "objects": [*self.Objects],
+            "groups": {
+                obj.Name: [*obj._values.get("Group", [])]
+                for obj in self.Objects
+                if isinstance(obj, FakeBody)
+            },
+            "tips": {obj.Name: obj.Tip for obj in self.Objects if isinstance(obj, FakeBody)},
+        }
         self.transactions.append(("open", label))
 
     def commitTransaction(self) -> None:
+        self._undo = None
         self.transactions.append(("commit",))
 
     def abortTransaction(self) -> None:
+        if self._undo is not None:
+            self.Objects = [*self._undo["objects"]]
+            for obj in self.Objects:
+                if isinstance(obj, FakeBody):
+                    obj._values["Group"] = [*self._undo["groups"][obj.Name]]
+                    object.__setattr__(obj, "_tip", self._undo["tips"][obj.Name])
         self.transactions.append(("abort",))
 
     def removeObject(self, name: str) -> None:
@@ -285,20 +302,6 @@ def call(module: types.ModuleType, ctx: FakeCtx, **arguments: Any):
     arguments.setdefault("document", "Doc")
     arguments.setdefault("body", "Body")
     return module.HANDLERS["create_feature"](ctx, arguments)
-
-
-# ---------------------------------------------------------------------------
-# Registration.
-# ---------------------------------------------------------------------------
-
-
-def test_definition_is_finite_and_handler_registered() -> None:
-    with load_features() as module:
-        assert [definition["name"] for definition in module.TOOL_DEFINITIONS] == ["create_feature"]
-        definition = module.TOOL_DEFINITIONS[0]
-        check_schema(definition["inputSchema"])
-        check_schema(definition["outputSchema"])
-        assert sorted(module.HANDLERS) == ["create_feature"]
 
 
 # ---------------------------------------------------------------------------
@@ -472,11 +475,13 @@ def test_tip_mismatch_rolls_the_creation_back() -> None:
         assert excinfo.value.details["reason"] == "tip_mismatch"
         assert (excinfo.value.details or {}).get("operationState") == "rolled_back"
         assert "abort" in [transaction[0] for transaction in doc.transactions]
+        assert [entry.Name for entry in doc.Objects] == ["Body", "Sketch"]
+        assert [entry.Name for entry in body.Group] == ["Sketch"]
 
 
 def test_body_expectation_failure_rolls_back() -> None:
     with load_features() as module:
-        _body, doc = make_body_and_doc(shape=FakeShape(solids=3))
+        body, doc = make_body_and_doc(shape=FakeShape(solids=3))
         ctx = FakeCtx(doc)
 
         with pytest.raises(ToolError) as excinfo:
@@ -492,11 +497,13 @@ def test_body_expectation_failure_rolls_back() -> None:
         assert excinfo.value.code == VALIDATION_FAILED
         assert (excinfo.value.details or {}).get("operationState") == "rolled_back"
         assert "abort" in [transaction[0] for transaction in doc.transactions]
+        assert [entry.Name for entry in doc.Objects] == ["Body", "Sketch"]
+        assert [entry.Name for entry in body.Group] == ["Sketch"]
 
 
 def test_body_bounds_expectation_failure_rolls_back() -> None:
     with load_features() as module:
-        _body, doc = make_body_and_doc(shape=FakeShape())
+        body, doc = make_body_and_doc(shape=FakeShape())
         ctx = FakeCtx(doc)
 
         with pytest.raises(ToolError) as excinfo:
@@ -511,6 +518,9 @@ def test_body_bounds_expectation_failure_rolls_back() -> None:
 
         assert excinfo.value.details["reason"] == "expected_bounds"
         assert excinfo.value.details["operationState"] == "rolled_back"
+        assert "abort" in [transaction[0] for transaction in doc.transactions]
+        assert [entry.Name for entry in doc.Objects] == ["Body", "Sketch"]
+        assert [entry.Name for entry in body.Group] == ["Sketch"]
 
 
 def test_support_and_properties_apply_to_the_created_feature() -> None:

@@ -1551,10 +1551,12 @@ class Server:
         """Validate handler output against its registered schema, then wrap.
 
         ``capture_view``-style image payloads (``mimeType``/``data``) are
-        converted into released PNG image content blocks (no ``width``/
-        ``height`` fields). A schema violation is a -32603 protocol
-        infrastructure failure — never a -32602 input error — and
-        non-finite values are rejected.
+        released as PNG image content blocks, and their structured payload
+        — including the real ``width``/``height`` — is kept as
+        ``structuredContent`` so clients that resolve results through the
+        declared output schema get the promised fields. A schema violation
+        is a -32603 protocol infrastructure failure — never a -32602 input
+        error — and non-finite values are rejected.
         """
 
         if isinstance(value, ToolError):
@@ -1572,9 +1574,12 @@ class Server:
                 exc.data,
             ) from None
         payload: Any = value
+        structured: dict | None = None
         if isinstance(payload, Mapping) and payload.get("mimeType") == "image/png":
-            # Released image content block: content fields only, no
-            # width/height dimensions.
+            # Released both ways: the image content block carries the pixels
+            # for visual clients, and the structured payload — including the
+            # real width/height — satisfies the declared output schema.
+            structured = dict(payload)
             payload = [
                 {
                     "type": "image",
@@ -1583,12 +1588,15 @@ class Server:
                 }
             ]
         try:
-            return tool_result(payload)
+            result = tool_result(payload)
         except (TypeError, ValueError) as exc:
             raise ProtocolError(
                 INTERNAL_ERROR,
                 f"tool '{name}' produced a non-serializable result: {exc}",
             ) from exc
+        if structured is not None:
+            result["structuredContent"] = structured
+        return result
 
     # -- task methods ---------------------------------------------------------
 

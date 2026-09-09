@@ -305,8 +305,7 @@ def load_export_module() -> Iterator[types.ModuleType]:
         sys.modules.pop(name, None)
     sys.modules.pop("mcp_server.object_validation", None)
     sys.modules.pop("mcp_server.tools.export", None)
-    if "mcp_server.tools" not in sys.modules:
-        import mcp_server.tools  # noqa: F401  (real docstring-only package)
+    importlib.import_module("mcp_server.tools")
 
     hooks.__init__()
     FakeMesh.instances.clear()

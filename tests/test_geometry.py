@@ -7,6 +7,7 @@ real module is not present yet, so the same assertions run against the real
 implementation once it lands.
 """
 
+import importlib
 import math
 import sys
 import types
@@ -24,7 +25,7 @@ def _ensure_object_validation() -> None:
     """Use the real module when present; otherwise install the pinned stub."""
 
     try:
-        import mcp_server.object_validation  # noqa: F401
+        importlib.import_module("mcp_server.object_validation")
     except Exception:
         module = types.ModuleType("mcp_server.object_validation")
 
@@ -783,7 +784,8 @@ def test_measure_faces_truncates_and_single_face_selection():
     shell = FakeObject("Shell", FakeShape(volume=0.0, solids=0, faces=faces))
     ctx = FakeCtx({"Shell": shell})
     result = geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Shell", "mode": "faces"})
-    assert len(result["faces"]) == geometry._MAX_FACES
+    limit = _definition("measure")["outputSchema"]["properties"]["faces"]["maxItems"]
+    assert len(result["faces"]) == limit
     assert result["truncated"] is True
     selected = geometry.HANDLERS["measure"](
         ctx,

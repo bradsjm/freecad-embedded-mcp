@@ -629,19 +629,14 @@ def test_cross_session_response_injection_is_rejected():
     }
     reply_a = send(adapter, sid_a, call_tool("new_document", 7))
     reply_b = send(adapter, sid_b, call_tool("new_document", 7))
-    events = {}
+    prompt_a = next_event(reply_a.stream)
 
-    def on_elicitation_for(sid):
-        def on_elicitation(event):
-            events[sid] = event
-
-        return on_elicitation
-
-    # Inject session A's response through session B: rejected.
+    # Inject session A's real pending elicitation response through session B:
+    # pending ids are session-scoped, so the injection is rejected.
     injected = adapter.handle(
         {
             "jsonrpc": "2.0",
-            "id": events.get(sid_a, {}).get("id", "elicitation-x"),
+            "id": prompt_a["id"],
             "result": {"action": "accept", "content": {"confirmed": True}},
         },
         {"mcp-session-id": sid_b},
@@ -649,10 +644,10 @@ def test_cross_session_response_injection_is_rejected():
     )
     assert injected.status == 400
 
-    def on_elicitation(event):
-        answer_elicitation(adapter, sid_a, event)
-
-    event_a = final_event(adapter, reply_a, sid_a, on_elicitation=on_elicitation)
+    # Session A is unaffected: its own answer completes the consent round.
+    answer = answer_elicitation(adapter, sid_a, prompt_a)
+    assert answer.status == 202
+    event_a = final_event(adapter, reply_a, sid_a)
     assert event_a["result"].get("isError") is not True
 
     def on_elicitation_b(event):

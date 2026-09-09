@@ -98,8 +98,8 @@ Manual run: symlink `addon/FreeCADMCP` into FreeCAD's `Mod/` directory (paths in
 
 ## Testing & QA
 
-- pytest only; `testpaths = ["tests"]`; **no conftest.py** — each test file is self-contained, with its own stubs and its own `ADDON_DIR` sys.path preamble. Follow that convention for new tests.
+- pytest only; `testpaths = ["tests"]`; **no conftest.py**. Self-contained test files (own stubs, own `ADDON_DIR` sys.path preamble) are preferred but not required. Files MAY import a shared helper module (for example a non-collected `tests/_harness.py`) when a shared import-time binding — such as `mcp_server.server` binding one set of stub tool modules at first import — requires it. Prefer the per-file convention for new tests; deviate deliberately and note the reason in the file docstring.
 - Tests never import real FreeCAD. Stubbing tiers used across the suite: pure modules imported directly (with `FakeClock`); lazy-import tool modules exercised through `FakeCtx`/`FakeDoc` doubles; FreeCAD/Qt-importing modules loaded via `importlib` under unique names with `sys.modules` stubs; `test_http_server.py` runs a real HTTP server on port 0 through `http.client`/raw sockets; `test_server.py` drives the real `Server.dispatch` over contract-shaped fake tool modules.
-- Zero-sleep discipline: use `FakeClock` and `threading.Event` barriers, never `time.sleep`.
+- Zero-sleep discipline: use `FakeClock` and `threading.Event` barriers, never `time.sleep`. One sanctioned exception: the shared `wait_until` predicate poll in `test_server.py`, a bounded condition-variable wait for cross-thread completion that has no event surface.
 - CI gates to keep green (`.github/workflows/test.yml`): `uv lock --check`; `uv run ruff check .`; `uv run ruff format --check .`; `uv run python -m compileall addon` on 3.11/3.12/3.13; `uv run pytest -q`.
-- Known thin spots: `InitGui.py` is untested; `test_script.py` and `test_dispatch_health.py` are small; there is no end-to-end test wiring the real HTTP server into the real `Server.dispatch`.
+- Known thin spots: `InitGui.py` is untested; `test_script.py` and `test_dispatch_health.py` are small. `test_mcp_integration.py` wires a real `McpHTTPServer` to the real `Server.dispatch`, but through the shared stub tool modules, so real tool registration is exercised only by the per-file schema tests.

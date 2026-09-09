@@ -245,6 +245,9 @@ class FakeWidget:
     def setReadOnly(self, value) -> None:
         self._read_only = bool(value)
 
+    def isReadOnly(self) -> bool:
+        return getattr(self, "_read_only", False)
+
     def setPlaceholderText(self, text) -> None:
         self._placeholder = text
 
@@ -753,6 +756,7 @@ def test_connection_details_stopped_reports_configured_endpoint():
 def test_connection_details_dialog_masks_token_and_maps_endpoint(monkeypatch):
     status = _status(
         state="running",
+        running=True,
         port=9876,
         endpoint="http://0.0.0.0:9876/mcp",
         connection={
@@ -762,7 +766,7 @@ def test_connection_details_dialog_masks_token_and_maps_endpoint(monkeypatch):
         },
     )
     active = server_module.Server(
-        settings=dict(SAVED_SETTINGS),
+        settings=dict(SAVED_SETTINGS, token="active-token-value"),
         signer=protocol.ConsentSigner(),
         task_store=ts.tasks_module.TaskStore(),
         registry=ts.subs_module.SubscriptionRegistry(),
@@ -784,6 +788,14 @@ def test_connection_details_dialog_masks_token_and_maps_endpoint(monkeypatch):
     active_token = active.settings["token"]
     assert active_token not in window.status_bar.messages
     assert active_token not in "".join(ts.FakeConsole.messages)
+    # Masking: one token field, holding the ACTIVE token, password-echoed
+    # and read-only.
+    token_fields = [
+        widget for widget in FakeWidget.instances if widget.echoMode() == FakeWidget.Password
+    ]
+    assert len(token_fields) == 1
+    assert token_fields[0].text() == active_token
+    assert token_fields[0].isReadOnly() is True
 
 
 def test_status_snapshots_never_contain_the_token():

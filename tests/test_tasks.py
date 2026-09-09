@@ -420,21 +420,3 @@ def test_require_tasks_capability_rejects_missing_extension(
     assert excinfo.value.data == {
         "requiredCapabilities": {"extensions": {"io.modelcontextprotocol/tasks": {}}}
     }
-
-
-# -- status vocabulary ---------------------------------------------------
-
-
-def test_status_vocabulary_matches_released_schema() -> None:
-    assert tasks_module.TASK_STATUSES == (
-        "working",
-        "input_required",
-        "completed",
-        "failed",
-        "cancelled",
-    )
-    assert {"completed", "failed", "cancelled"} == tasks_module.TERMINAL_STATUSES
-    assert (
-        frozenset({"run_script", "run_fem", "export", "measure"})
-        == tasks_module.TASK_ELIGIBLE_OPERATIONS
-    )

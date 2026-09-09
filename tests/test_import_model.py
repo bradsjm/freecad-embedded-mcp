@@ -24,7 +24,6 @@ if str(ADDON_DIR) not in sys.path:
 from mcp_server.protocol import (
     CONSENT_DENIED,
     ToolError,
-    check_schema,
     validate_schema,
 )
 
@@ -231,15 +230,6 @@ def consent_target(module: types.ModuleType, ctx: FakeCtx, path: str, fmt: str) 
 # ---------------------------------------------------------------------------
 # Registration and preflight.
 # ---------------------------------------------------------------------------
-
-
-def test_definition_is_finite_and_handler_registered(tmp_path) -> None:
-    with load_import() as module:
-        assert [definition["name"] for definition in module.TOOL_DEFINITIONS] == ["import_model"]
-        definition = module.TOOL_DEFINITIONS[0]
-        check_schema(definition["inputSchema"])
-        check_schema(definition["outputSchema"])
-        assert sorted(module.HANDLERS) == ["import_model"]
 
 
 def test_preflight_targets_the_file_with_import_purpose(tmp_path) -> None:

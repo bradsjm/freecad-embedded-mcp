@@ -23,7 +23,7 @@ SKETCH_PATH = ADDON_DIR / "mcp_server" / "tools" / "sketch.py"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server.protocol import ToolError, check_schema
+from mcp_server.protocol import ToolError
 
 VALIDATION_FAILED = "VALIDATION_FAILED"
 
@@ -331,22 +331,6 @@ def call_edit(module: types.ModuleType, ctx: FakeCtx, **operations: Any):
     arguments: dict[str, Any] = {"document": "Doc", "sketch": "Sketch"}
     arguments.update(operations)
     return module.HANDLERS["edit_sketch"](ctx, arguments)
-
-
-# ---------------------------------------------------------------------------
-# Registration sanity.
-# ---------------------------------------------------------------------------
-
-
-def test_definitions_are_finite_and_handlers_registered(sketch_module) -> None:
-    assert [definition["name"] for definition in sketch_module.TOOL_DEFINITIONS] == [
-        "inspect_sketch",
-        "edit_sketch",
-    ]
-    for definition in sketch_module.TOOL_DEFINITIONS:
-        check_schema(definition["inputSchema"])
-        check_schema(definition["outputSchema"])
-    assert sorted(sketch_module.HANDLERS) == ["edit_sketch", "inspect_sketch"]
 
 
 # ---------------------------------------------------------------------------

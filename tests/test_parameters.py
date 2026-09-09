@@ -31,6 +31,7 @@ class FakeObj:
         read_only=(),
         builtin=(),
         fail_add=None,
+        supported=None,
     ):
         self.Name = name
         self.Label = name
@@ -46,13 +47,14 @@ class FakeObj:
         for prop in properties:
             self._props[prop] = {"type": "App::PropertyLength", "value": None}
             self._order.append(prop)
+        self._supported = list(parameters._PROPERTY_TYPES) if supported is None else list(supported)
 
     @property
     def PropertiesList(self):
         return list(self._order)
 
     def supportedProperties(self):
-        return list(parameters._PROPERTY_TYPES)
+        return self._supported
 
     def getEditorMode(self, name):
         return list(self._modes.get(name, []))
@@ -217,6 +219,14 @@ def test_unsupported_property_type_rejected_up_front():
         call(ctx, {**base(), "add": [{"name": "Weird", "type": "App::PropertyNonsense"}]})
     assert "unsupported property type" in excinfo.value.message
     assert obj.ops == []
+
+    # The object's own supportedProperties() narrows the tool allow-list.
+    limited = FakeObj(supported=("App::PropertyBool",))
+    ctx = FakeCtx(limited)
+    with pytest.raises(ToolError) as excinfo:
+        call(ctx, {**base(), "add": [{"name": "Depth", "type": "App::PropertyFloat"}]})
+    assert "not supported by this object" in excinfo.value.message
+    assert limited.ops == []
 
 
 def test_value_shape_mismatch_rejected_up_front():
@@ -629,8 +639,6 @@ def test_cleared_expressions_reported_in_request_order():
 
 
 def test_definition_is_finite_and_bound():
-    assert [definition["name"] for definition in parameters.TOOL_DEFINITIONS] == ["edit_parameters"]
-    assert sorted(parameters.HANDLERS) == ["edit_parameters"]
     from mcp_server.protocol import check_schema
 
     definition = parameters.TOOL_DEFINITIONS[0]

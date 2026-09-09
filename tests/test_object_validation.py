@@ -147,23 +147,23 @@ def test_tolerance_zero_rejects_any_deviation() -> None:
 # ---------------------------------------------------------------------------
 
 
-class CountObj:
-    def __init__(self, name: str, in_list: tuple["CountObj", ...] = ()) -> None:
+class FakeCountObj:
+    def __init__(self, name: str, in_list: tuple["FakeCountObj", ...] = ()) -> None:
         self.Name = name
         self.InList = list(in_list)
 
 
 def test_dependent_count_walks_the_transitive_closure() -> None:
-    source = CountObj("Source")
-    middle = CountObj("Middle", (source,))
-    top = CountObj("Top", (middle,))
+    source = FakeCountObj("Source")
+    middle = FakeCountObj("Middle", (source,))
+    top = FakeCountObj("Top", (middle,))
 
     assert dependent_count([top]) == 2
 
 
 def test_dependent_count_is_capped_at_the_limit() -> None:
-    fan = [CountObj(f"D{index}") for index in range(8)]
-    source = CountObj("Source", tuple(fan))
+    fan = [FakeCountObj(f"D{index}") for index in range(8)]
+    source = FakeCountObj("Source", tuple(fan))
 
     assert dependent_count([source], limit=3) == 3
     assert dependent_count([source]) == 8
@@ -174,7 +174,7 @@ def test_dependent_count_is_capped_at_the_limit() -> None:
 # ---------------------------------------------------------------------------
 
 
-class ShapeObj:
+class FakeShapeObj:
     """Minimal valid solid-shaped object for gate drives."""
 
     def __init__(self, name: str, in_list: tuple[Any, ...] = ()) -> None:
@@ -191,7 +191,7 @@ class ShapeObj:
         return ""
 
 
-class GateDoc:
+class FakeGateDoc:
     def __init__(self, objects: list[Any]) -> None:
         self.Name = "Doc"
         self.Objects = list(objects)
@@ -217,28 +217,28 @@ class GateDoc:
             raise RuntimeError("recompute exploded")
 
 
-class GateApp:
+class FakeGateApp:
     def getActiveTransaction(self) -> None:
         return None
 
 
-class GateCtx:
-    def __init__(self, doc: GateDoc) -> None:
-        self.App = GateApp()
+class FakeGateCtx:
+    def __init__(self, doc: FakeGateDoc) -> None:
+        self.App = FakeGateApp()
         self._doc = doc
 
-    def check_document_idle(self, doc: GateDoc) -> None:
+    def check_document_idle(self, doc: FakeGateDoc) -> None:
         pass
 
 
-def run_gate(doc: GateDoc, obj: ShapeObj, body: Any) -> None:
-    with mutation(GateCtx(doc), doc, "gate", [obj]):
+def run_gate(doc: FakeGateDoc, obj: FakeShapeObj, body: Any) -> None:
+    with mutation(FakeGateCtx(doc), doc, "gate", [obj]):
         body()
 
 
 def test_body_failure_with_successful_rollback_reports_rolled_back() -> None:
-    obj = ShapeObj("Box")
-    doc = GateDoc([obj])
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
 
     with pytest.raises(ToolError) as excinfo:
         run_gate(doc, obj, lambda: (_ for _ in ()).throw(RuntimeError("nope")))
@@ -249,8 +249,8 @@ def test_body_failure_with_successful_rollback_reports_rolled_back() -> None:
 
 
 def test_failed_abort_reports_rollback_failed() -> None:
-    obj = ShapeObj("Box")
-    doc = GateDoc([obj])
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
     doc.fail_abort = True
 
     with pytest.raises(ToolError) as excinfo:
@@ -264,8 +264,8 @@ def test_failed_abort_reports_rollback_failed() -> None:
 
 
 def test_failed_rollback_recompute_reports_rollback_failed() -> None:
-    obj = ShapeObj("Box")
-    doc = GateDoc([obj])
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
     doc.fail_recompute = True
 
     with pytest.raises(ToolError) as excinfo:
@@ -277,8 +277,8 @@ def test_failed_rollback_recompute_reports_rollback_failed() -> None:
 
 
 def test_failed_commit_reports_may_have_changed_with_inspect_action() -> None:
-    obj = ShapeObj("Box")
-    doc = GateDoc([obj])
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
     doc.fail_commit = True
 
     with pytest.raises(ToolError) as excinfo:
@@ -291,8 +291,8 @@ def test_failed_commit_reports_may_have_changed_with_inspect_action() -> None:
 
 
 def test_expected_bounds_failure_after_recompute_rolls_back() -> None:
-    obj = ShapeObj("Box")
-    doc = GateDoc([obj])
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
 
     # document_bounds resolves through the stubbed geometry module in
     # heavier suites; here it returns None (unavailable), which must fail
@@ -300,7 +300,7 @@ def test_expected_bounds_failure_after_recompute_rolls_back() -> None:
     with (
         pytest.raises(ToolError) as excinfo,
         mutation(
-            GateCtx(doc),
+            FakeGateCtx(doc),
             doc,
             "gate",
             [obj],
@@ -316,13 +316,13 @@ def test_expected_bounds_failure_after_recompute_rolls_back() -> None:
 
 
 def test_prevalidation_failure_has_no_operation_state() -> None:
-    obj = ShapeObj("Box")
-    doc = GateDoc([obj])
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
 
     # A busy document is rejected before the transaction opens: nothing
     # started, so no operationState may appear.
-    class BusyCtx(GateCtx):
-        def check_document_idle(self, doc: GateDoc) -> None:
+    class BusyCtx(FakeGateCtx):
+        def check_document_idle(self, doc: FakeGateDoc) -> None:
             raise ToolError(SERVER_BUSY_LIKE, "busy")
 
     with pytest.raises(ToolError) as excinfo, mutation(BusyCtx(doc), doc, "gate", [obj]):

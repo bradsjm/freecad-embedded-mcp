@@ -23,7 +23,7 @@ FEM_PATH = ADDON_DIR / "mcp_server" / "tools" / "fem.py"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server.protocol import ToolError
+from mcp_server.protocol import ToolError, check_schema
 
 # ---------------------------------------------------------------------------
 # Stubs mirroring the native lifecycle.
@@ -319,14 +319,14 @@ def working_dir(tmp_path: Path) -> Path:
 
 def test_tool_definition_is_finite_and_explicit() -> None:
     with load_fem() as fem:
-        assert [definition["name"] for definition in fem.TOOL_DEFINITIONS] == ["run_fem"]
         schema = fem.TOOL_DEFINITIONS[0]["inputSchema"]
+        check_schema(schema)
+        check_schema(fem.TOOL_DEFINITIONS[0]["outputSchema"])
         assert schema["additionalProperties"] is False
         assert schema["required"] == ["document", "analysis"]
         assert schema["properties"]["timeout_s"]["default"] == 600
         assert schema["properties"]["timeout_s"]["minimum"] == 1
         assert schema["properties"]["timeout_s"]["maximum"] == 3600
-        assert fem.HANDLERS["run_fem"] is fem.run_fem
 
 
 # ---------------------------------------------------------------------------

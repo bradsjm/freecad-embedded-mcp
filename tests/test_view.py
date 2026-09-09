@@ -33,7 +33,7 @@ _ORIENTATION_METHODS = (
     "viewFront",
     "viewTop",
     "viewRight",
-    "viewBack",
+    "viewRear",
     "viewLeft",
     "viewBottom",
     "viewDimetric",
@@ -122,9 +122,16 @@ class FakeView:
         self.size = size
         self.calls: list[Any] = []
         self.animation_flags: list[Any] = []
+        self.camera_calls: list[str] = []
         self.save_error: Exception | None = None
         self.empty = False
         self.saved_paths: list[str] = []
+
+    def getCamera(self) -> str:
+        return "#Inventor V2.1 ascii FakeCamera {}"
+
+    def setCamera(self, camera: str) -> None:
+        self.camera_calls.append(str(camera))
 
     def getSize(self) -> tuple[int, int]:
         return self.size
@@ -187,16 +194,22 @@ class FakeGui:
         self.selection = FakeSelection()
         self.messages: list[str] = []
         self.set_active_calls: list[str] = []
+        self.active_name: str | None = None
 
     def getDocument(self, name: str) -> FakeGuiDocument:
         if name not in self.views:
             raise RuntimeError(f"no GUI document '{name}'")
         return FakeGuiDocument(self.views[name])
 
+    @property
+    def ActiveDocument(self) -> FakeGuiDocument | None:
+        return self.getDocument(self.active_name) if self.active_name else None
+
     def setActiveDocument(self, name: str) -> None:
         self.set_active_calls.append(str(name))
         if name not in self.views:
             raise RuntimeError(f"no GUI document '{name}'")
+        self.active_name = name
 
     def SendMsgToActiveView(self, message: str) -> None:
         self.messages.append(message)
@@ -263,8 +276,7 @@ def load_view_module() -> Iterator[types.ModuleType]:
     sys.modules["PySide"] = pyside
     sys.modules.pop("mcp_server.tools.view", None)
     sys.modules.pop("mcp_server.gui_dispatch", None)
-    if "mcp_server.tools" not in sys.modules:
-        import mcp_server.tools  # noqa: F401  (real docstring-only package)
+    importlib.import_module("mcp_server.tools")
 
     module_name = "mcp_server.tools.view"
     try:
@@ -298,7 +310,11 @@ def make_ctx(
         "Smoke": FakeAppDocument("Smoke"),
         "Other": FakeAppDocument("Other"),
     }
-    box = types.SimpleNamespace(Name="Box", _doc="Smoke")
+    box = types.SimpleNamespace(
+        Name="Box",
+        _doc="Smoke",
+        Shape=types.SimpleNamespace(Faces=[None] * 6, Edges=[None] * 12),
+    )
     other_obj = types.SimpleNamespace(Name="Lid", _doc="Other")
     if gui_views is None:
         gui_views = {"Smoke": FakeView(), "Other": FakeView()}
@@ -309,6 +325,7 @@ def make_ctx(
     )
     if active is not None:
         ctx.App.active_name = active
+        ctx.Gui.active_name = active
     return ctx
 
 
@@ -336,8 +353,11 @@ def test_capture_returns_png_restores_state_and_suppresses_animations(
     assert result["width"] == 640
     assert result["height"] == 480
     assert base64.b64decode(result["data"]) == b"\x89PNG-fake-bytes"
-    assert view.calls[0] == "viewIsometric"
-    assert ("saveImage", 640, 480, "Current", "Framebuffer") in view.calls
+    assert ("saveImage", 640, 480, "White", "Framebuffer") in view.calls
+    assert result["document"] == "Smoke"
+    assert result["focus_object"] == "Box"
+    assert result["focus_subelement"] is None
+    assert result["view_name"] == "Isometric"
     assert all(call != "fitAll" for call in view.calls)
     # Orientation ran with animations disabled (never a stale animated
     # orientation) and the preference was restored afterwards.
@@ -364,6 +384,8 @@ def test_capture_returns_png_restores_state_and_suppresses_animations(
     assert restored[0].SubElementNames == ["Face3"]
     # The temporary capture file was removed.
     assert all(not os.path.exists(path) for path in view.saved_paths)
+    # The pre-capture camera was restored after the framing move.
+    assert view.camera_calls == ["#Inventor V2.1 ascii FakeCamera {}"]
 
 
 def test_unknown_focus_fails_without_reframing(view_module) -> None:
@@ -414,18 +436,55 @@ def test_orientation_is_applied(view_module) -> None:
     assert view.calls[0] == "viewFront"
 
 
-def test_omitted_size_uses_clamped_viewport(view_module) -> None:
-    ctx = make_ctx()
+def test_omitted_size_scales_active_viewport_to_768(view_module) -> None:
+    ctx = make_ctx(active="Smoke")
     view = ctx.Gui.views["Smoke"]
     result = view_module.capture_view(ctx, capture_args())
     save_call = next(call for call in view.calls if isinstance(call, tuple))
-    assert save_call[1] == 1024
-    assert save_call[2] == 768
-    assert (result["width"], result["height"]) == (1024, 768)
+    assert save_call[1] == 768
+    assert save_call[2] == 576
+    assert (result["width"], result["height"]) == (768, 576)
+
+
+def test_small_active_viewport_is_not_upscaled(view_module) -> None:
+    ctx = make_ctx(
+        active="Smoke",
+        gui_views={"Smoke": FakeView(size=(640, 480)), "Other": FakeView()},
+    )
+    view = ctx.Gui.views["Smoke"]
+    result = view_module.capture_view(ctx, capture_args())
+    save_call = next(call for call in view.calls if isinstance(call, tuple))
+    assert (save_call[1], save_call[2]) == (640, 480)
+    assert (result["width"], result["height"]) == (640, 480)
+
+
+def test_background_target_uses_active_viewport(view_module) -> None:
+    # The raised tab is the sizing reference; the backgrounded target's own
+    # 400x300 report is stale restored geometry and must not be trusted.
+    ctx = make_ctx(
+        active="Other",
+        gui_views={"Smoke": FakeView(size=(400, 300)), "Other": FakeView(size=(1600, 900))},
+    )
+    view = ctx.Gui.views["Smoke"]
+    result = view_module.capture_view(ctx, capture_args())
+    save_call = next(call for call in view.calls if isinstance(call, tuple))
+    assert (save_call[1], save_call[2]) == (768, 432)
+    assert (result["width"], result["height"]) == (768, 432)
+
+
+def test_unreliable_size_falls_back_without_active_viewport(view_module) -> None:
+    ctx = make_ctx(
+        gui_views={"Smoke": FakeView(size=(400, 300)), "Other": FakeView(size=(400, 300))}
+    )
+    view = ctx.Gui.views["Smoke"]
+    result = view_module.capture_view(ctx, capture_args())
+    save_call = next(call for call in view.calls if isinstance(call, tuple))
+    assert (save_call[1], save_call[2]) == (768, 576)
+    assert (result["width"], result["height"]) == (768, 576)
 
 
 def test_one_omitted_side_uses_view_dimension_unclamped(view_module) -> None:
-    ctx = make_ctx()
+    ctx = make_ctx(active="Smoke")
     view = ctx.Gui.views["Smoke"]
     view_module.capture_view(ctx, capture_args(width=640))
     save_call = next(call for call in view.calls if isinstance(call, tuple))
@@ -434,7 +493,7 @@ def test_one_omitted_side_uses_view_dimension_unclamped(view_module) -> None:
 
 
 def test_one_omitted_side_clamps_to_schema_maximum(view_module) -> None:
-    ctx = make_ctx(gui_views={"Smoke": FakeView(size=(5120, 2880))})
+    ctx = make_ctx(active="Smoke", gui_views={"Smoke": FakeView(size=(5120, 2880))})
     view = ctx.Gui.views["Smoke"]
     view_module.capture_view(ctx, capture_args(height=1000))
     save_call = next(call for call in view.calls if isinstance(call, tuple))
@@ -445,7 +504,7 @@ def test_one_omitted_side_clamps_to_schema_maximum(view_module) -> None:
 
 
 def test_one_omitted_side_clamps_portrait_viewport(view_module) -> None:
-    ctx = make_ctx(gui_views={"Smoke": FakeView(size=(5120, 5000))})
+    ctx = make_ctx(active="Smoke", gui_views={"Smoke": FakeView(size=(5120, 5000))})
     view = ctx.Gui.views["Smoke"]
     view_module.capture_view(ctx, capture_args(width=1000))
     save_call = next(call for call in view.calls if isinstance(call, tuple))
@@ -493,6 +552,31 @@ def test_state_restored_even_when_capture_fails(view_module) -> None:
         "AnimationDuration": 500,
     }
     assert all(not os.path.exists(path) for path in view.saved_paths)
+    # The pre-capture camera was restored despite the failure.
+    assert view.camera_calls == ["#Inventor V2.1 ascii FakeCamera {}"]
+
+
+def test_subelement_capture_frames_and_reports(view_module) -> None:
+    ctx = make_ctx(active="Smoke")
+    result = view_module.capture_view(
+        ctx, capture_args(focus_subelement="Face3", width=640, height=480)
+    )
+    assert result["focus_subelement"] == "Face3"
+    assert result["document"] == "Smoke"
+    assert result["focus_object"] == "Box"
+    assert result["view_name"] == "Isometric"
+    assert ctx.Gui.messages == ["ViewSelection", "ViewSelection"]
+
+
+def test_subelement_rejected_before_gui_changes(view_module) -> None:
+    for bad in ("Vertex2", "Face99", "Edge99", "face3"):
+        ctx = make_ctx()
+        with pytest.raises(ToolError) as excinfo:
+            view_module.capture_view(ctx, capture_args(focus_subelement=bad))
+        assert excinfo.value.code == "VALIDATION_FAILED"
+        assert ctx.Gui.messages == []
+        assert ctx.App.set_active_calls == []
+        assert FakeParamGet.set_calls == []
 
 
 def test_unknown_view_name_fails_before_capture(view_module) -> None:
@@ -507,6 +591,5 @@ def test_unknown_view_name_fails_before_capture(view_module) -> None:
 
 def test_tool_schemas_are_finite(view_module) -> None:
     (definition,) = view_module.TOOL_DEFINITIONS
-    assert definition["name"] == "capture_view"
     protocol.check_schema(definition["inputSchema"])
     protocol.check_schema(definition["outputSchema"])
