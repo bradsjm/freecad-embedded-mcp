@@ -69,7 +69,35 @@ print({
 
 Inspect at least `Bottom`, `Front`, `Top`, and `Isometric` views with `capture_view(document, focus_object=<final object>, view_name=...)` to catch accidental rotations, offsets, or missed features.
 
-Do not use screenshot appearance as a substitute for BRep validation.
+Read the capture against this list, and report the answer for each group:
+
+**Shape and proportions**
+
+- The overall form matches what the user asked for, not an approximation of it.
+- No wall is thin enough to become a weak point. None is so thick that it wastes material or warps.
+- Every requested feature appears in the view: each hole, slot, cutout, and boss.
+
+**Printability**
+
+- One large flat face is available for bed adhesion at the print orientation.
+- No overhang above the printable angle is left unsupported without a stated reason. See [Printability and print orientation](printability.md).
+- Every freestanding wall, pin, and tab is thick enough to print.
+- Each boss and standoff connects to a wall or a rib instead of standing alone.
+- Bottom edges are chamfered rather than filleted.
+
+**Geometry quality**
+
+- No feature is missing, doubled, or in the wrong place.
+- Boolean results are clean, with no floating fragment and no leftover tool body in the export set.
+- Each fillet and chamfer sits on the intended edge, and none failed silently.
+- A hollow part is actually hollow, with the intended wall thickness.
+
+**Dimensions**
+
+- Each bound in the report matches the stated requirement. Each critical fit dimension matches the value recorded in the model.
+- The exported selection contains the final object and not a helper, a sketch, or a per-feature intermediate.
+
+Do not use screenshot appearance as a substitute for BRep validation. A view can look correct while the BRep carries an invalid or non-manifold region.
 
 ## 6. Mesh sanity before export
 
@@ -87,6 +115,8 @@ Before reporting the CAD export as validated:
 - [ ] Single-solid requirement satisfied or multi-part intent explicitly confirmed.
 - [ ] Bounding box matches the asserted expected bounds.
 - [ ] Result reviewed through `capture_view` where visual evidence is useful.
+- [ ] Print orientation chosen, with a flat bed face and no unexplained overhang. Recommendations reported.
+- [ ] Every sourced real-world dimension records its source and date, and every assumed value is marked as assumed.
 - [ ] Every mating interface has a named fit class and per-side clearance; uncalibrated values are reported as assumptions.
 - [ ] Snap-fit arms/hooks have load orientation, root fillet, lead-in, and deflection/fatigue review.
 - [ ] Fastener bosses, insert pilots, captive-nut pockets, or self-tapping pilots have vendor or material data, or are marked test heuristics.

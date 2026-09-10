@@ -42,7 +42,44 @@ print([t for t in App.ActiveDocument.supportedTypes() if t.startswith(("Part::",
 
 `create_object` uses `doc.addObject(type, name)` for generic Part/App types and an explicit `ObjectsFem` factory mapping for FEM types. The registered object type determines which properties exist. Inspect `PropertiesList` through `inspect_objects(detail="full")` before editing unfamiliar objects.
 
+`create_object` fails and rolls back for a type that has no shape after recompute. Those types include `PartDesign::Body` and a bare `Part::Feature`: the mutation gate cannot report a null shape. Create those through `run_script`. See [Null-shape objects block the mutation gate](sketcher.md#null-shape-objects-block-the-mutation-gate).
+
 A Part feature stores BRep geometry in `Shape`; a mesh feature stores mesh data in `Mesh`; a Body stores a feature history and exposes a `Tip`. Do not assign a mesh to a Shape property or overwrite a parametric feature casually.
+
+## Property types
+
+The value shape must match the property type. `create_object`, `edit_object`, and `edit_objects` map these forms.
+
+| Property type | Send |
+|---|---|
+| `App::PropertyBool`, `Integer`, `Float` | JSON boolean, integer, or number. |
+| `App::PropertyString` | String. |
+| `App::PropertyLength`, `Distance`, `Angle`, `Quantity`, `Area`, `Volume`, `Speed`, `Percent` | A finite JSON number in the property's internal unit. A unit string such as `"5 mm"` is rejected. Strip the unit, or use `run_script`. |
+| `App::PropertyVector`, `VectorDistance`, `Direction` | `[x, y, z]` or `{"x": n, "y": n, "z": n}`. |
+| `App::PropertyPlacement` | `{"position": [x, y, z], "axis": [x, y, z], "angle_deg": n}`. |
+| `App::PropertyLink`, `LinkSub`, `XLink`, `XLinkSub` | `{"object": "<Name>", "subelement": ""}`. A link-sub may carry `"Face1"`. |
+| `App::PropertyLinkList`, `LinkSubList`, `XLinkList`, `XLinkSubList` | Array of the link form. |
+| `App::PropertyColor` | `[r, g, b]` or `[r, g, b, a]`. |
+| `App::PropertyEnumeration` | The exact allowed string. |
+| `Part::PropertyPartShape` and other unmapped types | The raw JSON value passes through and FreeCAD rejects most of them. Assign a shape through `run_script`. |
+
+Every mapped number must be a JSON number, not a numeric string, and must be finite.
+
+`edit_parameters` adds dynamic properties, renames dynamic properties, and binds or clears expressions. The added property types are `App::PropertyBool`, `Integer`, `Float`, `String`, `Length`, `Distance`, `Angle`, `Vector`, `Color`, `StringList`, `FloatList`, and `IntegerList`. It refuses to rename a built-in property.
+
+A `Part::FeaturePython` object keeps a custom property such as `Side` across a save and reload. Its Python proxy does not survive unless the proxy class is importable from an installed module. See [Parametric and scripted workflows](workflows.md).
+
+## Dependency queries
+
+Use the dependency lists before a delete or a repair. `delete_object` refuses an object that has dependents. These queries show which objects those are.
+
+```python
+obj.OutList            # objects this object references
+obj.InList             # objects that reference this object
+obj.InListRecursive    # full set of ancestors
+```
+
+Verified on a `Part::Cut` with `Base` and `Tool` links: `Result.OutList` reports `['Base', 'Tool']`, and `Base.InList` reports `['Result']`. `inspect_objects` also reports a `links` field per row.
 
 ## Recompute discipline
 
@@ -58,6 +95,17 @@ print(obj.State, obj.Shape.isValid())
 ## Units and quantities
 
 Use millimetres for CAD dimensions and state the unit assumption. FreeCAD quantity properties accept plain numbers through `edit_object` in the property's internal unit, or explicit strings such as `"5 mm"`, `"100 N"`, `"210 GPa"` through `run_script`. STL has no unit metadata; the FreeCAD export guidance assumes millimetres.
+
+The unit API, verified on FreeCAD 1.1.3:
+
+```python
+App.Units.Quantity("1 in")                 # 25.4, in the internal length unit
+App.Units.Quantity("1 in").getValueAs("mm")  # "25.4" (a string)
+App.Units.parseQuantity("2.5 in")          # 63.5 mm
+float(App.Units.parseQuantity("2.5 in"))   # 63.5
+```
+
+`float()` on a quantity yields the internal unit value. Constraint datums and native property assignments in `run_script` need a `Quantity`, not a bare string.
 
 ## Sources
 

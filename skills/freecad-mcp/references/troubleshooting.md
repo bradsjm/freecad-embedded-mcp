@@ -26,6 +26,31 @@ Then choose a registered type, load the relevant workbench/module if appropriate
 
 Inspect property names, types, and metadata with `inspect_objects(document, detail="full")`. `edit_object` prevalidates every property before the transaction opens, so a failed call assigns nothing. Use plain numbers for quantity properties (internal units apply) and canonical `{"object", "subelement"}` links for references. Feature-specific assignments the mapper cannot express go through `run_script`.
 
+## `RuntimeError: shape is invalid` on a create or edit
+
+The mutation aborted and rolled back. The cause is a null-shape object in the validated set, not bad arguments. On FreeCAD 1.1.3 a fresh object raises `RuntimeError: shape is invalid` for `.Volume`, `.Area`, `.ShapeType`, and `.isValid()` until geometry is assigned.
+
+Common triggers, all verified:
+
+- `create_object` for `PartDesign::Body` or `Part::Feature`. `create_object` for `Part::Box` works.
+- `create_feature` for the first sketch, datum plane, or pad inside a Body that has no solid.
+- `edit_sketch` on a sketch inside a Body that has no solid. The Body is a validated dependent.
+
+Do not retry the same call. Bootstrap the Body, its first sketch, and its first Pad through `run_script`, then use the structured tools. For a standalone sketch, create it through `run_script` and `edit_sketch` works immediately. See [Null-shape objects block the mutation gate](sketcher.md#null-shape-objects-block-the-mutation-gate).
+
+A related argument error: `feature '...' exposes no Support property` means the target type uses `AttachmentSupport` instead. That is the case for `Sketcher::SketchObject` and `PartDesign::Plane`. Set `AttachmentSupport` and `MapMode` through `run_script`. Do not pass `support` to `create_feature` for those kinds.
+
+## Sketch edit failed
+
+`edit_sketch` is atomic: a rejected entry rolls back the whole batch and reports `nextAction: retry_from_original_state`. The document is unchanged, so no cleanup is needed.
+
+- `TypeError: Wrong arguments` from a `setDatums` entry is expected in FreeCAD 1.1.3. The server passes a string where the native `setDatum` needs a `FreeCAD.Units.Quantity`. Re-add the constraint with the corrected `datum`, or set the value through `run_script` with `sketch.setDatum(index, App.Units.Quantity("45 mm"))`. See [Sketcher profiles through MCP](sketcher.md).
+- `TypeError: Invalid parameters` names a constraint type whose native constructor does not accept the documented argument list. `Collinear`, `InternalAlignment`, `SnellsLaw`, `AngleViaPoint`, and some `Weight` forms rejected their wiki argument lists on FreeCAD 1.1.3. Use `Tangent` between two lines, or assert the exact native form before you rely on it.
+- A batch that used geometry indices for constraints added in the same batch fails or constrains the wrong element. Add the geometry, read the returned `addedGeometry` indices, then add the constraints.
+- Deleting geometry or constraints renumbers the remaining rows. Never reuse a pre-delete index after a delete.
+
+A sketch that reports `Invalid` after a batch accepted a conflicting or redundant constraint. The native `addConstraint` does not reject it. Delete the redundant constraint, then re-read the sketch. A conflicting pair and a redundant pair each produced a negative `solve()` result and state `['Touched', 'Invalid']` on FreeCAD 1.1.3.
+
 ## Invalid or touched object
 
 The mutation tools validate after recompute and reject states such as `Invalid`, `Error`, and `Touched`, as well as `isValid()==False`; a failed mutation rolls the document back and reports rollback failures separately. Find the first failed dependency:
@@ -47,6 +72,22 @@ A tool deadline (60 s default) does not prove that the operation failed or rolle
 3. Once healthy, inspect the target document's actual object names, states, Body Tip, and shape validity with `inspect_objects` and `validate_geometry`, plus output-file existence where relevant. Do not rely solely on variables assigned by the interrupted call.
 4. Resume only the missing stage. Never blindly replay document creation, feature additions, save, or export after an unknown outcome.
 5. Keep geometry mutation, expensive boolean audits, export, and screenshot capture in separate bounded calls. Save a valid milestone with `save_document` before expensive checks; this does not authorize exporting unvalidated geometry.
+
+## Checkpoint and crash recovery
+
+Save each validated milestone with `save_document`; do not wait until export. Preserve the last known-good source and exports during experiments. A transaction or `finally` block cannot guarantee restoration after a process crash.
+
+1. Create a separate validation document before parameter sweeps or expensive geometry checks.
+2. Separate each mutation, recompute, inspection, and restoration into bounded calls.
+3. Start with the smallest functional probe. Avoid large GUI-thread loops of booleans or point-in-solid queries.
+4. After an aborted call, check `discover_capabilities` before issuing another document request. A busy server is not proof of a crash.
+5. After relaunch, enumerate documents again. Recovery can change document names, restore older values, or leave no documents open.
+6. Inspect Body membership, Tip, states, and parameter values before resuming. Discard stale Python object references from the previous process.
+7. Save the recovered valid state before further experiments. Resume only stages whose completion is confirmed.
+
+Observed on 2026-09-09: crashes followed a combined parameter/boolean batch and a large `isInside()` surface-travel loop. The operation preceding each crash was known, but no crash-log diagnosis established the cause. Do not claim either API is inherently unsafe. Do not repeat the same workload unchanged after a crash. Isolated height-change, point-probe, and restoration calls later completed successfully; this is limited evidence, not a general stability guarantee.
+
+Deleting a Body did not remove its old feature chains in this session. Inspect dependencies before cleanup. A clean document made with `copyObject([active bodies], recursive=True)` retained the active dependency graphs without those obsolete chains. Verify copied names, links, states, and external workbench dependencies before using this approach. Preserve the source until the clean checkpoint is saved and checked.
 
 ## GUI dispatch stuck
 

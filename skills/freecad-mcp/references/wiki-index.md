@@ -66,8 +66,21 @@ Use only the English canonical URLs below. These links are durable references to
 - [Sketcher CreateRectangle](https://wiki.freecad.org/Sketcher_CreateRectangle)
 - [Sketcher ConstrainCoincident](https://wiki.freecad.org/Sketcher_ConstrainCoincident)
 - [Sketcher ConstrainDistance](https://wiki.freecad.org/Sketcher_ConstrainDistance)
+- [Sketcher ConstrainDistanceX](https://wiki.freecad.org/Sketcher_ConstrainDistanceX)
+- [Sketcher ConstrainDistanceY](https://wiki.freecad.org/Sketcher_ConstrainDistanceY)
+- [Sketcher ConstrainRadius](https://wiki.freecad.org/Sketcher_ConstrainRadius)
+- [Sketcher ConstrainDiameter](https://wiki.freecad.org/Sketcher_ConstrainDiameter)
+- [Sketcher ConstrainAngle](https://wiki.freecad.org/Sketcher_ConstrainAngle)
 - [Sketcher ConstrainHorizontal](https://wiki.freecad.org/Sketcher_ConstrainHorizontal)
 - [Sketcher ConstrainVertical](https://wiki.freecad.org/Sketcher_ConstrainVertical)
+- [Sketcher ConstrainParallel](https://wiki.freecad.org/Sketcher_ConstrainParallel)
+- [Sketcher ConstrainPerpendicular](https://wiki.freecad.org/Sketcher_ConstrainPerpendicular)
+- [Sketcher ConstrainTangent](https://wiki.freecad.org/Sketcher_ConstrainTangent)
+- [Sketcher ConstrainEqual](https://wiki.freecad.org/Sketcher_ConstrainEqual)
+- [Sketcher ConstrainSymmetric](https://wiki.freecad.org/Sketcher_ConstrainSymmetric)
+- [Sketcher ConstrainPointOnObject](https://wiki.freecad.org/Sketcher_ConstrainPointOnObject)
+- [Sketcher ConstrainBlock](https://wiki.freecad.org/Sketcher_ConstrainBlock)
+- [Sketcher ValidateSketch](https://wiki.freecad.org/Sketcher_ValidateSketch)
 
 ## Draft
 

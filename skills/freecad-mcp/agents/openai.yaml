@@ -1,4 +1,4 @@
 interface:
   display_name: "FreeCAD MCP"
-  short_description: "Create, validate, and export FreeCAD models through MCP"
-  default_prompt: "Use $freecad-mcp to create or refine a model in FreeCAD, validate the geometry, and export the result."
+  short_description: "Design, validate, and 3D-print parts in FreeCAD via MCP"
+  default_prompt: "Use $freecad-mcp to design a part for my 3D printer, validate the geometry, and export it."

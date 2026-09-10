@@ -18,6 +18,32 @@ The [Part Workbench](https://wiki.freecad.org/Part_Workbench) uses constructive 
 
 Use PartDesign when the result should be one coherent component with a feature history. A `PartDesign::Body` owns the sequence; its `Tip` is the exposed result. Common features are `Pad`, `Pocket`, `Revolution`, `Hole`, `Fillet`, `Chamfer`, dress-up, and pattern features. Read [PartDesign Workbench](https://wiki.freecad.org/PartDesign_Workbench), [PartDesign Body](https://wiki.freecad.org/PartDesign_Body), and [Feature editing](https://wiki.freecad.org/Feature_editing).
 
+Bootstrap the Body and its first feature through `run_script`. An empty Body has a null shape, so `create_object` cannot create it and `create_feature` cannot add the first sketch to it. Once the Body holds one solid, the structured tools work on it normally. The verified sequence is:
+
+```python
+import FreeCAD as App, Part, Sketcher
+from FreeCAD import Vector
+
+doc = App.ActiveDocument
+body = doc.addObject("PartDesign::Body", "Body")
+sketch = body.newObject("Sketcher::SketchObject", "Profile")
+sketch.AttachmentSupport = [(doc.getObject("XY_Plane"), "")]
+sketch.MapMode = "FlatFace"
+for start, end in (((0, 0), (40, 0)), ((40, 0), (40, 30)),
+                   ((40, 30), (0, 30)), ((0, 30), (0, 0))):
+    sketch.addGeometry(Part.LineSegment(Vector(*start, 0), Vector(*end, 0)), False)
+for index in range(3):
+    sketch.addConstraint(Sketcher.Constraint("Coincident", index, 2, index + 1, 1))
+sketch.addConstraint(Sketcher.Constraint("Coincident", 3, 2, 0, 1))
+pad = body.newObject("PartDesign::Pad", "Pad")
+pad.Profile = sketch
+pad.Length = 10.0
+doc.recompute()
+print(body.Tip.Name, len(body.Shape.Solids), round(body.Shape.Volume, 3))
+```
+
+See [Sketcher profiles](sketcher.md) for the constraint arguments and the null-shape limits.
+
 Prefer sketches attached to Body Origin planes or stable datum geometry. Avoid attaching critical sketches to generated faces when the model will be edited: face numbering can change after upstream edits (the [topological naming problem](https://wiki.freecad.org/Topological_naming_problem)).
 
 ### Draft and Sketcher
@@ -25,6 +51,53 @@ Prefer sketches attached to Body Origin planes or stable datum geometry. Avoid a
 Use Draft for simple planar construction, annotations, working-plane geometry, arrays, and shape strings. Use Sketcher for constrained profiles used by Part or PartDesign. `create_object` and `run_script` can create many FreeCAD types even when a workbench GUI command is not exposed. Read [Draft Workbench](https://wiki.freecad.org/Draft_Workbench), [Sketcher Workbench](https://wiki.freecad.org/Sketcher_Workbench), and [Sketcher scripting](https://wiki.freecad.org/Sketcher_scripting).
 
 If `create_object` fails with `not a document object type`, do not keep retrying the same type. Read the `supportedTypes` list from `discover_capabilities` and use a registered type or build the equivalent shape with `Part` in a `Part::Feature`.
+
+## Establish the requirements before the geometry
+
+Resolve these before the first feature. Ask only the ones that change the geometry, and ask them a few at a time rather than as one list. Use a stated default and say so when the user has no preference.
+
+1. **What is it, and what does it hold or attach to?** Get a concrete mental model. For example: a bracket for a specific motor, a case for a specific phone, a tray for a specific slot.
+2. **Which dimensions are non-negotiable?** Board outline, screw spacing, the diameter of the part it wraps, the device footprint. These drive every other dimension.
+3. **How does it attach?** Bolted, threaded insert, self-tapping screw, snap fit, adhesive, magnet, or freestanding. This sets wall thickness, boss geometry, and the load path.
+4. **How will the part be made?** When fused-filament fabrication will constrain the geometry, ask for the material, nozzle, layer height, build volume, and relevant calibration data. See [Design for fused-filament fabrication](printability.md).
+5. **Which functional requirements matter?** Airflow, cable routing, water resistance, an access panel, a visibility window, stacking, or a weight limit. Ask only the relevant ones.
+6. **Any aesthetic direction?** Rounded compared with sharp, minimal compared with industrial. Ask briefly. Function usually outranks form.
+
+A non-negotiable fit dimension is a correctness input, not a preference. Never guess one, and never quietly round it.
+
+## Source the fit dimensions of real products
+
+When the part interfaces with an existing product, a connector, or a device, obtain the real dimensions before you write geometry. A small error makes the part unusable, and the error is invisible in a render.
+
+Method:
+
+1. Search for the exact product or component with an explicit unit, for example `"<product> dimensions mm"`, `"<component> mechanical drawing"`, or `"<component> datasheet"`.
+2. Prefer a primary source: the manufacturer datasheet, the mechanical drawing, or a published standard. A vendor drawing beats a blog post.
+3. Cross-check at least two independent sources when the fit is tight, and record both.
+4. Verify that the source matches the exact variant, revision, and generation of the product.
+5. Record each sourced value as a named parameter with its source and date next to it.
+6. Convert and check the unit. Many drawings publish inches.
+7. Add a per-side clearance for a fit, and mark it uncalibrated until a test print confirms it.
+
+```python
+# Interface dimensions researched 2026-09-09.
+usb_c_opening_w = 8.34    # USB Type-C receptacle opening, per USB-IF Type-C spec
+usb_c_opening_h = 2.56    # mm; the opening runs 6.20 mm deep
+usb_c_wall_clearance = 0.35   # per side; UNVERIFIED until a test print
+```
+
+Two worked corrections, because both values are widely repeated in a wrong form:
+
+| Interface | Verified value | Why the common figure misleads |
+|---|---|---|
+| USB Type-C receptacle opening | 8.34 mm × 2.56 mm, 6.20 mm deep | The popular "8.4 × 2.6" is rounded. The depth is usually omitted, and the depth controls how far the connector body inserts. |
+| Apple 25 W MagSafe charger (A2580) | 55.5 mm diameter, 4.45 mm thick | Measured in a 2024 teardown. The circulating "56 mm × 5.6 mm" is not this product's measured value. A magnetic mount also needs a recess depth and a cable-exit clearance, which a bare diameter does not describe. |
+
+These two cases show the rule: a number without a named source, a variant, and a date is a guess. State the number, its source, and its uncertainty. Otherwise leave it as an explicitly named parameter for the user to confirm.
+
+For electronic components specifically, also read [Electronic component models](electronic-components.md). Use the manufacturer datasheet, and treat an imported model as an envelope rather than a complete keep-out. Model connector openings, mating travel, and cable bend separately from the visible shell.
+
+Never present a researched dimension as a measured one. Distinguish a datasheet value, a third-party measurement, a user measurement, and your own estimate.
 
 ## Design decisions before detailing
 
@@ -46,6 +119,26 @@ Use this order unless the requested model requires a different graph:
 8. Recompute, inspect, validate, and export.
 
 Keep intermediate helpers named clearly (`Base`, `CutTool`, `MountingSketch`, `FinalSolid`). Hide helpers instead of deleting them until the final result is verified. For an export, select exactly the intended final object or use a script that exports exactly that object.
+
+## Build in reviewable stages
+
+Build a shape, verify it, and save a checkpoint before you add the next layer of detail. Do not write the whole model in one script and validate only at the end. A late failure hides its cause, and the user cannot steer a design they have not seen.
+
+| Stage | Build | Verify before continuing |
+|---|---|---|
+| 1. Base form | Outer envelope, walls, base plate. No cutouts, no fillets. | Overall bounds match the requirements. A flat face lies on the bed. |
+| 2. Features | Holes, cutouts, bosses, slots, vents, internal structure. | Each feature is present and correctly placed. Booleans are clean. |
+| 3. Finish | Fillets, chamfers, edge cleanup, cosmetic detail. | Final geometry validation, view review, and the printability checks. |
+
+After each stage:
+
+1. Run `capture_view` from at least `Isometric`, `Top`, and `Front`.
+2. Run `validate_geometry` for the bounds, solid count, and validity.
+3. Save the milestone with `save_document` before the next stage. See [checkpoint and crash recovery](troubleshooting.md#checkpoint-and-crash-recovery).
+
+Show the user the stage result and the key dimensions, then continue. Treat the user's design approval as a real decision point. A wrong overall envelope or mounting layout is expensive to change after detail work. Do not stall on a stage the user already specified or approved. Do not ask for approval of a detail the requirements already decide.
+
+Add finishing features largest first and late in the graph. Apply fillets after the shell or thickness operation, and revalidate after each dress-up, because a fillet changes the topology that later features reference.
 
 ## Start with a state snapshot
 

@@ -1,6 +1,6 @@
 ---
 name: freecad-mcp
-description: "Automate creation, inspection, editing, validation, and export of FreeCAD models through the FreeCAD MCP tools. Use for new or existing mechanical parts, parametric CAD, boolean geometry, geometry validation, FEM-assisted design, STL/STEP/3MF export, and electronics enclosures."
+description: "Automate creation, inspection, editing, validation, and export of FreeCAD models through the FreeCAD MCP tools. Use for new or existing mechanical parts, parametric CAD, boolean geometry, geometry validation, FEM-assisted design, STL/STEP/3MF export, and electronics enclosures. Also use when a part must fit a real device or connector, or when print orientation and printability shape the design."
 ---
 
 # FreeCAD MCP automation
@@ -9,6 +9,8 @@ Use this skill only when a language model is driving a live FreeCAD 1.1 installa
 
 Prefer a small, valid, inspectable model over a long unverified script. Keep dimensions in millimetres unless FreeCAD explicitly reports another unit.
 
+When the user will manufacture the part by fused-filament fabrication, design for the manufacturing process and the real product the part must fit. Source each fit dimension from a primary reference. Choose the build orientation with the geometry, not after it.
+
 Honor this user's preference: handle complex CAD design and model mutation directly, without subagents unless explicitly requested. Keep one owner of the live FreeCAD document and the persistent `run_script` sessions.
 
 ## Navigate the references
@@ -16,10 +18,12 @@ Honor this user's preference: handle complex CAD design and model mutation direc
 - [MCP tools and runtime contract](references/mcp-tools.md): exact tools, arguments, return data, consent, tasks, deadlines, failures, and security.
 - [FreeCAD fundamentals](references/fundamentals.md): documents, object identity, properties, units, recompute, and App/GUI boundaries.
 - [Part topology](references/part-topsolids.md): deterministic Part geometry, booleans, topology, validity, and refinement.
-- [Modeling patterns](references/modeling.md): choosing Part vs PartDesign vs scripted geometry, dependency order, property payloads, placement, and robust edits.
+- [Modeling patterns](references/modeling.md): intake, dimension research, representation choice, dependency order, staged review, placement.
 - [Parametric workflows](references/workflows.md): PartDesign, Sketcher, Draft, topological naming, and editing an existing model.
+- [Sketcher profiles](references/sketcher.md): `inspect_sketch`/`edit_sketch` index model, verified constraint arguments, the rectangle recipe, and the `setDatums` limitation.
 - [Placement and attachment](references/placement-attachment.md): transforms, supports, attachment offsets, links, and FreeCAD 1.1 orientation changes.
-- [Geometry validation](references/validation.md): FreeCAD validity, topology, bounds, solid checks, and the final inspection gate.
+- [Geometry validation](references/validation.md): FreeCAD validity, topology, bounds, solid checks, the visual review checklist, and the final inspection gate.
+- [Printability](references/printability.md): process constraints, build orientation, overhangs, minimum features, clearances, and machine-profile examples.
 - [Python and export](references/python-export.md): safe `run_script` patterns, persistent script sessions, shape construction, and the structured export tool.
 - [Mesh export, import, and repair](references/export-print.md): tessellation control, mesh formats, mesh import and repair routes, and the export report.
 - [FEM through MCP](references/fem.md): analysis setup, Gmsh/CalculiX prerequisites, constraints, results, and known property limitations.
@@ -31,19 +35,27 @@ Honor this user's preference: handle complex CAD design and model mutation direc
 ## Default operating procedure
 
 1. **Check server health.** Call `discover_capabilities` first; it never waits for the GUI thread. Read `gui.state`. If it is not healthy, do not issue more GUI-thread operations. Call `discover_capabilities` again after a suspected timeout.
-2. **Inspect before mutating.** Track the actual document `name` returned by `new_document` or `open_document`. There is no list-documents tool; when the name is unknown, call `run_script` with `App.listDocuments()`. Call `inspect_objects(document)` for the target document. Preserve unrelated user work; do not assume the active document is intended.
-3. **Choose the modeling strategy.** Use PartDesign for a coherent single solid with a feature history; use Part primitives/booleans or scripted Part shapes for deterministic CSG; use `run_script` for operations not expressible reliably through the structured tools.
-4. **Build in dependency order.** Create base geometry, references/sketches/features, cuts/dress-ups/patterns. `create_object` and `edit_object` recompute inside an MCP-owned transaction and validate dependents and solid counts. Inspect returned names and states after each meaningful stage.
-5. **Use returned names.** FreeCAD sanitizes and de-duplicates names. Use actual internal `Name` values for all later edits, references, and deletes.
-6. **Keep document and GUI work on the GUI thread.** Use the structured tools for their covered operations: `new_document`, `open_document`, `save_document`, `close_document`, `reload_document`, `create_object`, `edit_object`, `edit_parameters`, `delete_object`, `export`, `validate_geometry`, `measure`, `capture_view`, and `run_fem`. Use `run_script` for `FreeCADGui`, selection, imports, and anything else the structured tools do not cover. There is no asynchronous execution tool. `run_fem`, `run_script`, `export`, and `measure` may detach as tasks; poll `tasks/get`, and treat the terminal task result as the only completion signal.
-7. **Validate before export.** Require valid recomputed geometry, positive-volume solids where intended, and correct topology. Run `validate_geometry(document, objects=[...])` for state, validity, solid count, volume, bounds, and tolerance; assert `expected_bounds` when the intended placement is known; run `measure` for distance, interference, section, and face screens. See [Geometry validation](references/validation.md) for the full gate.
-8. **Export the result.** Save the editable source with `save_document`. Use the `export` tool for STL, STEP, 3MF, or a native FCStd copy; it writes to a temporary sibling file, verifies the result by readback, and requires consent to overwrite an existing destination. Report the readback values.
-9. **Report limits honestly.** Distinguish source facts, computed results, and heuristics. State when work is outside the available MCP boundary.
+2. **Establish the requirements.** Resolve what the object is, its non-negotiable fit dimensions, and how it attaches. When the part will be printed, also resolve the process, material, nozzle, layer height, and relevant machine limits. Research each real-world interface dimension from a primary source, then record it as a named parameter with its source. Never guess a fit-critical value. See [requirements intake](references/modeling.md#establish-the-requirements-before-the-geometry) and [printability](references/printability.md#collect-process-inputs-only-when-they-matter).
+3. **Inspect before mutating.** Track the actual document `name` returned by `new_document` or `open_document`. There is no list-documents tool. When the name is unknown, call `run_script` with `App.listDocuments()`. Call `inspect_objects(document)` for the target document. Preserve unrelated user work. Do not assume the active document is intended.
+4. **Choose the modeling strategy.** Use PartDesign for a coherent single solid with a feature history. Use Part primitives, booleans, or scripted Part shapes for deterministic CSG. Use `run_script` for operations the structured tools cannot express reliably.
+5. **Never leave a null-shape object in the validated set.** Such a call rolls back with `RuntimeError: shape is invalid`. On FreeCAD 1.1.3 that blocks `create_object` for `PartDesign::Body` and `Part::Feature`. It also blocks structured calls inside a Body that has no solid. Bootstrap the Body, its first sketch, and its first Pad through `run_script`. See [the null-shape limits](references/sketcher.md#null-shape-objects-block-the-mutation-gate) before you retry any rejected call.
+6. **Build in reviewable stages.** Build the base form, verify it, and save a checkpoint before you add the functional features. Finish with fillets, chamfers, and edge cleanup. Capture a view and validate at each stage. See [build in reviewable stages](references/modeling.md#build-in-reviewable-stages).
+7. **Build in dependency order.** Create base geometry, references/sketches/features, cuts/dress-ups/patterns. `create_object` and `edit_object` recompute inside an MCP-owned transaction and validate dependents and solid counts. Inspect returned names and states after each meaningful stage.
+   Save a checkpoint after each validated modeling stage, before expensive checks or cleanup. Run parameter experiments in a separate validation copy. Change, check, and restore one parameter at a time. See [checkpoint and crash recovery](references/troubleshooting.md#checkpoint-and-crash-recovery).
+8. **Use returned names.** FreeCAD sanitizes and de-duplicates names. Use actual internal `Name` values for all later edits, references, and deletes.
+9. **Keep document and GUI work on the GUI thread.** Use the structured tools for their covered operations: `new_document`, `open_document`, `save_document`, `close_document`, `reload_document`, `create_object`, `edit_object`, `edit_parameters`, `delete_object`, `export`, `validate_geometry`, `measure`, `capture_view`, and `run_fem`. Use `run_script` for `FreeCADGui`, selection, imports, and anything else the structured tools do not cover. There is no asynchronous execution tool. `run_fem`, `run_script`, `export`, and `measure` may detach as tasks. Poll `tasks/get`, and treat the terminal task result as the only completion signal.
+10. **Validate before export.** Require valid recomputed geometry, positive-volume solids where intended, and correct topology. Run `validate_geometry(document, objects=[...])` for state, validity, solid count, volume, bounds, and tolerance. Assert `expected_bounds` when the intended placement is known. Run `measure` for distance, interference, section, and face screens. Do not list a zero-solid sketch in a call that carries `expected_solids`. See [Geometry validation](references/validation.md) for the full gate.
+11. **Export the result.** Save the editable source with `save_document`. Use the `export` tool for STL, STEP, 3MF, or a native FCStd copy. It writes to a temporary sibling file, verifies the result by readback, and requires consent to overwrite an existing destination. Report the readback values.
+12. **Report manufacturing recommendations when applicable.** For a printed part, state the build orientation, support requirement, starting process profile, and material. Distinguish source facts, computed results, and heuristics. Mark each uncalibrated clearance or fit value as an assumption. State when work is outside the available MCP boundary.
 
 ## Fast decision tree
 
 - **Electronic component in an enclosure:** read [Electronic component models](references/electronic-components.md), research exact part metadata, import neutral CAD through `run_script`, and check keep-outs separately from the visible shell.
-- **Parametric mechanical part:** create a `PartDesign::Body`, then use registered sketch/feature types or scripted PartDesign operations; validate the Body tip after every feature.
+- **Anything that wraps, clips onto, or mates with a real product:** source every fit dimension from a primary reference. Record the source next to the parameter. Never round a non-negotiable fit. See [source the fit dimensions](references/modeling.md#source-the-fit-dimensions-of-real-products).
+- **Part intended for fused-filament fabrication:** confirm the process inputs that affect the geometry. Derive wall thickness, minimum features, clearances, and build orientation from those inputs. Use a known machine profile only as an example or explicit user constraint. See [Printability](references/printability.md).
+- **Parametric mechanical part:** bootstrap the `PartDesign::Body`, its first sketch, and its first Pad through `run_script`. Then use `create_feature` and `edit_sketch` for later features. Validate the Body tip after every feature.
+- **Constrained profile:** read the sketch with `inspect_sketch`, then change it with `edit_sketch` in one atomic batch. Confirm the returned geometry and constraint indices before you add dependents. See [Sketcher profiles](references/sketcher.md).
+- **Null shape object:** if any call fails with `RuntimeError: shape is invalid`, the final state contains an object with no geometry. Do not retry it unchanged. Route the creation through `run_script` instead. See [Null-shape objects block the mutation gate](references/sketcher.md#null-shape-objects-block-the-mutation-gate).
 - **Unregistered generic type:** `discover_capabilities` returns the complete `supportedTypes` list. If the type is absent, build the shape with `Part` and assign it to `Part::Feature` through `run_script`.
 - Treat `run_script` as arbitrary code execution inside FreeCAD. Never paste untrusted code, credentials, or destructive filesystem operations without a clear user request.
 - Keep remote mode disabled unless necessary. Remote mode rebinds the server to all interfaces and makes the bearer token mandatory on every request; the token is full local code-execution authority. Never log or print it.

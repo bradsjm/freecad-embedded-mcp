@@ -49,6 +49,24 @@ Use `run_script` with the registered FreeCAD modules to inspect holes, normals, 
 
 This is not guaranteed repair. FreeCAD has no universal automatic BRep repair; if the source modeling operation created a fault, rebuild or correct it. Preserve the source mesh and report every repair/conversion operation.
 
+### Mesh to shape, exact API
+
+Verified on FreeCAD 1.1.3: `makeShapeFromMesh` returns `None` and modifies the shape in place, so do not assign its return value.
+
+```python
+import MeshPart
+import Part
+
+mesh = MeshPart.meshFromShape(Shape=source.Shape, LinearDeflection=0.5, AngularDeflection=0.5)
+shape = Part.Shape()
+shape.makeShapeFromMesh(mesh.Topology, 0.05)   # returns None; sews into a Shell
+assert shape.isValid(), "sewing failed"
+solid = Part.makeSolid(shape)                  # Shell -> Solid
+print(solid.ShapeType, len(solid.Solids))
+```
+
+The tolerance argument controls the sewing distance. A tolerance that is too small leaves an open shell and `makeSolid` then produces a shell-like result instead of a solid. Assert `ShapeType == "Solid"` and `len(Solids) == 1` before you use the result.
+
 ## Export report
 
 When reporting an export, include from the export result and `run_script` output:

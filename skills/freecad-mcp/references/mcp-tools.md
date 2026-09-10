@@ -74,9 +74,22 @@ Compact `inspect_objects` rows carry `name`, `label`, `typeId`, `state`, `placem
 
 Use `typeId` and internal `name` for automation. Use `label` only for human presentation.
 
+## `create_feature` details
+
+`create_feature` creates the feature through `body.newObject`, so Body membership and the Body Tip are native. The `pad`, `pocket`, and `hole` kinds require a `profile` object that already belongs to the same Body. A `support` reference requires an explicit `properties.MapMode`. The tool never invents an attachment mode.
+
+Two verified limits on FreeCAD 1.1.3:
+
+- The call cannot act on a Body that has no solid yet. Creating the first sketch or the first Pad fails with `RuntimeError: shape is invalid` and rolls back. Build the first feature through `run_script`. See [Null-shape objects block the mutation gate](sketcher.md#null-shape-objects-block-the-mutation-gate).
+- `support` fails for `kind: "sketch"` and `kind: "datum_plane"` with `feature '...' exposes no Support property`, because those types expose `AttachmentSupport` instead. Set `AttachmentSupport` and `MapMode` through `run_script`.
+
+An enumeration property such as `PartDesign::Pocket.Type` takes the exact string (`"Length"`), never an index.
+
 ## `create_object` details
 
 Generic Part/App types go through `doc.addObject(type, name)`. FEM types use an explicit factory mapping through `ObjectsFem`: `Fem::FemAnalysis` (and the legacy alias `Fem::AnalysisPython`) to `makeAnalysis`, `Fem::SolverCalculiX` to `makeSolverCalculiX`, `Fem::MaterialCommon` to `makeMaterialSolid`, plus materials, element definitions, and `Fem::Constraint*` names. An unsupported or ambiguous type is an explicit error, not a guess.
+
+The call fails and rolls back for a type whose shape stays null after recompute. Verified on FreeCAD 1.1.3: `Part::Box` succeeds, while `PartDesign::Body` and `Part::Feature` fail with `RuntimeError: shape is invalid`. Create those through `run_script`. See [Null-shape objects block the mutation gate](sketcher.md#null-shape-objects-block-the-mutation-gate).
 
 The result carries the actual internal name and a post-recompute geometry report. FreeCAD sanitizes and de-duplicates names (`Box` may become `Box001`). Always use the returned name in later calls.
 

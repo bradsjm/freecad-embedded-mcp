@@ -6,11 +6,11 @@ Use this reference to choose a stable modeling history and to recover from featu
 
 A PartDesign Body represents one component and contains cumulative features. A typical sequence is:
 
-1. Create a `PartDesign::Body`.
-2. Create a sketch on an Origin plane or stable datum.
-3. Constrain a closed profile.
-4. Pad or revolve it into a base.
-5. Add pockets, holes, additive/subtractive features, patterns, and dress-ups.
+1. Create a `PartDesign::Body` through `run_script`. No structured tool can create it, because an empty Body has a null shape.
+2. Create a sketch in the Body with `body.newObject("Sketcher::SketchObject", ...)` and attach it with `AttachmentSupport` and `MapMode`.
+3. Constrain a closed profile. Build it through `edit_sketch`, or natively in the same script. See [Sketcher profiles](sketcher.md).
+4. Pad or revolve it into a base with `body.newObject("PartDesign::Pad", ...)`. This first feature also has to be native: `create_feature` cannot act on a Body that has no solid yet.
+5. Add pockets, holes, additive/subtractive features, patterns, and dress-ups with `create_feature`, now that the Body holds a solid.
 6. Keep fillets/chamfers/thickness late where possible.
 7. Inspect the Body `Tip` after each feature.
 
@@ -20,30 +20,9 @@ PartDesign is best when the user wants editable design intent. It is not automat
 
 ## Sketcher scripting
 
-Sketcher geometry and constraints are indexed. When using `run_script`, create the sketch, add geometry, then add constraints that refer to the correct geometry indices. Recompute and inspect solver state before using the sketch as a PartDesign profile.
-
-```python
-import Sketcher
-import Part
-from FreeCAD import Vector
-
-sketch = doc.addObject("Sketcher::SketchObject", "Profile")
-geo = sketch.addGeometry(
-    [
-        Part.LineSegment(Vector(0, 0, 0), Vector(40, 0, 0)),
-        Part.LineSegment(Vector(40, 0, 0), Vector(40, 30, 0)),
-        Part.LineSegment(Vector(40, 30, 0), Vector(0, 30, 0)),
-        Part.LineSegment(Vector(0, 30, 0), Vector(0, 0, 0)),
-    ],
-    False,
-)
-# Add only constraints whose indices and geometry are known.
-doc.recompute()
-```
+Sketcher geometry and constraints are index-based. A wrong index either fails the operation or silently constrains the wrong element. Use `inspect_sketch` to read the current rows. Use `edit_sketch` to change them in one atomic batch. Read [Sketcher profiles through MCP](sketcher.md) for the index model, the per-type constraint arguments, the verified rectangle recipe, and the `setDatums` limitation. That reference records the FreeCAD 1.1.3 findings.
 
 The exact sketch object type and feature integration depend on the current FreeCAD registration. Query `supportedTypes()` and inspect the running installation if a direct `create_object` call fails.
-
-Sources: [Sketcher Workbench](https://wiki.freecad.org/Sketcher_Workbench), [Sketcher scripting](https://wiki.freecad.org/Sketcher_scripting), [Sketcher SketchObject](https://wiki.freecad.org/Sketcher_SketchObject), and [Sketcher constraints](https://wiki.freecad.org/Sketcher_ConstrainCoincident).
 
 ## Topological naming risk
 
@@ -56,6 +35,16 @@ See [Topological naming problem](https://wiki.freecad.org/Topological_naming_pro
 Draft objects are useful for planar construction, working-plane geometry, arrays, and shape strings. The [Draft Workbench](https://wiki.freecad.org/Draft_Workbench) and [Draft scripting/API](https://wiki.freecad.org/Draft_API) pages document the available commands and scripting, but the wiki marks the API page as outdated. In FreeCAD 1.1, verify the current object type and function signature in the running Python help.
 
 The MCP’s generic `create_object` path may reject an apparently documented Draft type if the module is not registered in the current session. Do not treat that as a reason to mutate the document with guessed properties; use `supportedTypes()` or a deterministic Part shape instead.
+
+## Python objects and proxy persistence
+
+A `Part::FeaturePython` object stores its custom properties in the document. Its Python proxy class is not part of the file. Verified on FreeCAD 1.1.3: after a save and reopen, the custom property and the generated `Shape` survived. The value of `obj.Proxy` was `None` until some installed module rebound the class.
+
+Treat a proxy object as session state:
+
+- Do not promise a reloadable parametric object from a proxy defined only in a `run_script` session. Put the class in a module on the FreeCAD path when it must survive a reload.
+- Prefer native registered types, or a plain `Part::Feature` with an assigned shape, when the model must reopen predictably.
+- Do not rebind a foreign proxy. Inspect the object first and report the missing proxy instead of overwriting it.
 
 ## Editing an existing model
 
