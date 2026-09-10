@@ -1361,9 +1361,15 @@ TOOL_DEFINITIONS = [
             " objects or bbox-selected faces/edges (selector boxes are"
             " document-space mm): distance (distToShape), interference (common"
             " volume), planar section curves (z plane or normal+point in"
-            " document space) or face areas with sampled normals. Subshape"
-            " results return signed topology references; units are mm, mm2"
-            " and mm3."
+            " document space) or face areas with sampled normals. Semantics:"
+            " distance is the raw distToShape value and a positive result"
+            " does not prove separation (OCC can report a positive distance"
+            " for intersecting shapes; FreeCAD issue #25158); interference"
+            " detects positive common volume only, so tangential or"
+            " surface/edge-only contact reports common_volume 0 and overlaps"
+            " false. Clearance-critical decisions must combine both modes"
+            " and apply the application tolerance. Subshape results return"
+            " signed topology references; units are mm, mm2 and mm3."
         ),
         "inputSchema": _MEASURE_INPUT,
         "outputSchema": _MEASURE_OUTPUT,

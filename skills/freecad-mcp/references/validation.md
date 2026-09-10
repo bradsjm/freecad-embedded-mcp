@@ -65,7 +65,15 @@ print({
 })
 ```
 
-## 5. Review the result visually
+## 5. Measure fit and clearance with both modes
+
+`measure` reports Open CASCADE results. Each mode answers one narrow question.
+
+- `distance` returns the raw `distToShape` value. Treat a positive distance as necessary but not sufficient evidence of separation: OCC can report a positive distance while the shapes intersect (upstream issue: [distToShape returns positive value for intersecting parts](https://github.com/FreeCAD/FreeCAD/issues/25158)).
+- `interference` returns the common volume and reports `overlaps: true` only when that volume is positive. Surface-only, edge-only, or tangential contact has zero common volume and reports `overlaps: false`.
+- Use `distance` for clearance magnitude, `interference` for volumetric overlap, and both together with the stated tolerance for a fit decision. Report which modes a decision used.
+
+## 6. Review the result visually
 
 Inspect at least `Bottom`, `Front`, `Top`, and `Isometric` views with `capture_view(document, focus_object=<final object>, view_name=...)` to catch accidental rotations, offsets, or missed features.
 
@@ -99,13 +107,13 @@ Read the capture against this list, and report the answer for each group:
 
 Do not use screenshot appearance as a substitute for BRep validation. A view can look correct while the BRep carries an invalid or non-manifold region.
 
-## 6. Mesh sanity before export
+## 7. Mesh sanity before export
 
 STL is a triangle mesh, not a parametric solid. For curved parts, choose a tessellation deviation small enough that the faceted surface does not affect fit or function. The [Export to STL or OBJ](https://wiki.freecad.org/Export_to_STL_or_OBJ) tutorial notes that default export settings may produce visibly jagged curves; verify current exporter/tessellation behavior programmatically in FreeCAD 1.1 with `FreeCAD.getExporters()`, `dir(MeshPart)`, and `supportedTypes()`.
 
 If importing an existing mesh, read [Mesh to Part](https://wiki.freecad.org/Mesh_to_Part), [Part Shape From Mesh](https://wiki.freecad.org/Part_ShapeFromMesh), and [Part MakeSolid](https://wiki.freecad.org/Part_MakeSolid). Mesh repair tools can help with holes and normals, but they do not guarantee a valid BRep.
 
-## 7. Final acceptance checklist
+## 8. Final acceptance checklist
 
 Before reporting the CAD export as validated:
 

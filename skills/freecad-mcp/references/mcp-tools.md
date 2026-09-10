@@ -31,7 +31,7 @@ The server exposes 24 tools in a fixed order. Document tools return the actual s
 | `edit_objects` | Edit 1–32 objects atomically | `document`, `edits`; optional `expectations` per object |
 | `delete_object` | Delete one object; refuses objects with dependents | `document`, `object` |
 | `validate_geometry` | State, validity, solid count, volume, bounds, tolerance | `document`, `objects` (max 100); optional `expected_solids`, `expected_bounds`, `bounds_tolerance` |
-| `measure` | Distance, interference, section, or face measurement | `document`, `a`, `mode`; optional `b`, `plane`; selectors accept names, bbox objects, or signed `{object, subelement}` references |
+| `measure` | Distance, interference, section, or face measurement. Positive distance does not prove separation; zero common volume does not prove clearance. Combine modes for fit decisions (see [validation](validation.md)) | `document`, `a`, `mode`; optional `b`, `plane`; selectors accept names, bbox objects, or signed `{object, subelement}` references |
 | `inspect_topology` | Page through faces or edges with signed references | `document`, `object`, `role`; optional `cursor`, `limit` (default 50, max 100) |
 | `edit_parameters` | Add/rename dynamic properties, bind expressions, clear expressions; reports `document`, `generation`, and `applied` | `document`, `object`; optional `add`, `rename`, `expressions`, `clear_expressions` |
 | `inspect_sketch` | Sketch geometry/constraint rows, solver summary, `state`, `statusText`, and `solver.solverStatus` | `document`, `sketch` |

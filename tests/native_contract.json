@@ -424,7 +424,7 @@
       "doc_isTouched_present": true,
       "outcome": "ok",
       "reopened": {
-        "file_name": "/Users/jonathan/Documents/3D Printing/FreeCAD/freecad-mcp/.native-contract/tmp/lifecycle.FCStd",
+        "file_name": "/Users/jonathan/Documents/3D Printing/FreeCAD/freecad-embedded-mcp/.native-contract/tmp/lifecycle.FCStd",
         "label": "lifecycle",
         "name": "lifecycle",
         "object_count": 1
