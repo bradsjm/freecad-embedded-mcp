@@ -58,7 +58,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # The example client is a stdlib-only demo whose whole output is print().
-"examples/*.py" = ["T20"]
+# The probe journal keeps one intentionally long-lived append handle so
+# every record can be flushed and fsynced before the step runs.
+"examples/*.py" = ["T20", "SIM115"]
 # Tests insert the add-on path before importing mcp_server.*, so imports
 # legitimately follow code. They also use FreeCAD-shaped camelCase doubles
 # and mutable class-level stub state.

@@ -1,0 +1,896 @@
+{
+  "captured": "2026-09-10T14:09:20.487+00:00",
+  "freecad": "1.1.3",
+  "probes": {
+    "attachment.properties": {
+      "outcome": "ok",
+      "types": {
+        "Part::Box": {
+          "outcome": "ok",
+          "properties": {
+            "AttachmentSupport": true,
+            "MapMode": true,
+            "Support": false
+          },
+          "route": "doc.addObject"
+        },
+        "PartDesign::Pad": {
+          "outcome": "ok",
+          "properties": {
+            "AttachmentSupport": false,
+            "MapMode": false,
+            "Support": false
+          },
+          "route": "body.newObject"
+        },
+        "PartDesign::Plane": {
+          "outcome": "ok",
+          "properties": {
+            "AttachmentSupport": true,
+            "MapMode": true,
+            "Support": false
+          },
+          "route": "body.newObject"
+        },
+        "Sketcher::SketchObject": {
+          "outcome": "ok",
+          "properties": {
+            "AttachmentSupport": true,
+            "MapMode": true,
+            "Support": false
+          },
+          "route": "body.newObject"
+        },
+        "outcome": "ok"
+      }
+    },
+    "constraint.attributes": {
+      "constraint": {
+        "Driving": {
+          "present": true,
+          "result": "True"
+        },
+        "IsActive": {
+          "present": true,
+          "result": "True"
+        },
+        "IsDriving": {
+          "present": false
+        },
+        "Name": {
+          "present": true,
+          "result": "''"
+        },
+        "Type": {
+          "present": true,
+          "result": "'Coincident'"
+        },
+        "Value": {
+          "present": true,
+          "result": "0.0"
+        }
+      },
+      "outcome": "ok"
+    },
+    "constraint.forms": {
+      "forms": {
+        "Angle:[0, 1, 0, 2]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Angle:[0, 1]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Angle:[0]": {
+          "arguments": [
+            0
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Angle', 0)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Angle"
+        },
+        "Block:[0, 1]": {
+          "arguments": [
+            0,
+            1
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Block', 0, 1)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Block"
+        },
+        "Block:[2]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Coincident:[0, 1, -1, 0]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Coincident:[0, 1, -1, 1]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Coincident:[0, 2, 1, 1]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Coincident:[0, 2, 1]": {
+          "arguments": [
+            0,
+            2,
+            1
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Coincident', 0, 2, 1)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Coincident"
+        },
+        "Diameter:[2, 0]": {
+          "addConstraint": "ok",
+          "arguments": [
+            2,
+            0
+          ],
+          "constructor": "ok",
+          "datum": "none",
+          "index": 0,
+          "outcome": "accepted",
+          "type": "Diameter"
+        },
+        "Diameter:[2]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Distance:[0, 1, 1, 2]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Distance:[0, 1, 2]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Distance:[2, 0]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Distance:[2]": {
+          "arguments": [
+            2
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Distance', 2)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Distance"
+        },
+        "DistanceX:[0, 1, 1, 2]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "DistanceX:[0, 1, 1, 7.0]": {
+          "arguments": [
+            0,
+            1,
+            1,
+            7.0
+          ],
+          "constructor": "TypeError: Invalid parameters: ('DistanceX', 0, 1, 1, 7.0)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "DistanceX"
+        },
+        "DistanceX:[0, 1, 1, 7]": {
+          "arguments": [
+            0,
+            1,
+            1,
+            7
+          ],
+          "constructor": "TypeError: Invalid parameters: ('DistanceX', 0, 1, 1, 7)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "DistanceX"
+        },
+        "DistanceX:[0, 1, 2]": {
+          "constructor": "TypeError: Invalid parameters: ('DistanceX', 0, 1, 2, 10.0 mm)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "outcome": "rejected"
+        },
+        "DistanceX:[0, 1]": {
+          "addConstraint": "ok",
+          "arguments": [
+            0,
+            1
+          ],
+          "constructor": "ok",
+          "datum": "none",
+          "index": 0,
+          "outcome": "accepted",
+          "type": "DistanceX"
+        },
+        "DistanceY:[0, 1]": {
+          "addConstraint": "ok",
+          "arguments": [
+            0,
+            1
+          ],
+          "constructor": "ok",
+          "datum": "none",
+          "index": 0,
+          "outcome": "accepted",
+          "type": "DistanceY"
+        },
+        "DistanceY:[1, 1, 0, 2]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "DistanceY:[1, 1, 2]": {
+          "constructor": "TypeError: Invalid parameters: ('DistanceY', 1, 1, 2, 10.0 mm)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "outcome": "rejected"
+        },
+        "Equal:[0]": {
+          "arguments": [
+            0
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Equal', 0)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Equal"
+        },
+        "Equal:[2, 3]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Horizontal:[0, 1]": {
+          "arguments": [
+            0,
+            1
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Horizontal', 0, 1)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Horizontal"
+        },
+        "Horizontal:[0]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Parallel:[0, 1]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Parallel:[0]": {
+          "arguments": [
+            0
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Parallel', 0)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Parallel"
+        },
+        "Perpendicular:[0, 1]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Perpendicular:[0]": {
+          "arguments": [
+            0
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Perpendicular', 0)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Perpendicular"
+        },
+        "PointOnObject:[4, 1, 0]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "PointOnObject:[4, 1]": {
+          "arguments": [
+            4,
+            1
+          ],
+          "constructor": "TypeError: Invalid parameters: ('PointOnObject', 4, 1)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "PointOnObject"
+        },
+        "Radius:[2, 0]": {
+          "addConstraint": "ok",
+          "arguments": [
+            2,
+            0
+          ],
+          "constructor": "ok",
+          "datum": "none",
+          "index": 0,
+          "outcome": "accepted",
+          "type": "Radius"
+        },
+        "Radius:[2]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Symmetric:[0, 1, 1, 2, -1]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Symmetric:[0, 1, 1, 2, 0, 2]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Symmetric:[0, 1, 1]": {
+          "arguments": [
+            0,
+            1,
+            1
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Symmetric', 0, 1, 1)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Symmetric"
+        },
+        "Tangent:[0, 2]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Tangent:[0]": {
+          "arguments": [
+            0
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Tangent', 0)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Tangent"
+        },
+        "Vertical:[0, 1]": {
+          "arguments": [
+            0,
+            1
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Vertical', 0, 1)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Vertical"
+        },
+        "Vertical:[1]": {
+          "addConstraint": "ok",
+          "constructor": "ok",
+          "index": 0,
+          "outcome": "accepted"
+        },
+        "Weight:[5, 1]": {
+          "constructor": "TypeError: Invalid parameters: ('Weight', 5, 1, 1.0)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "outcome": "rejected"
+        },
+        "Weight:[5]": {
+          "arguments": [
+            5
+          ],
+          "constructor": "TypeError: Invalid parameters: ('Weight', 5)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
+          "datum": "none",
+          "outcome": "rejected",
+          "type": "Weight"
+        }
+      },
+      "outcome": "ok"
+    },
+    "doc.lifecycle": {
+      "doc_isTouched_after_commit": true,
+      "doc_isTouched_after_recompute": false,
+      "doc_isTouched_present": true,
+      "outcome": "ok",
+      "reopened": {
+        "file_name": "/Users/jonathan/Documents/3D Printing/FreeCAD/freecad-mcp/.native-contract/tmp/lifecycle.FCStd",
+        "label": "lifecycle",
+        "name": "lifecycle",
+        "object_count": 1
+      },
+      "reopened_isTouched": false,
+      "saved_path_exists": true,
+      "undo_mode": "1",
+      "undo_mode_present": true
+    },
+    "fem.objects": {
+      "factories": [
+        "makeAnalysis",
+        "makeConstantVacuumPermittivity",
+        "makeConstraintBearing",
+        "makeConstraintBodyHeatSource",
+        "makeConstraintCentrif",
+        "makeConstraintContact",
+        "makeConstraintCurrentDensity",
+        "makeConstraintDisplacement",
+        "makeConstraintElectricChargeDensity",
+        "makeConstraintElectrostaticPotential",
+        "makeConstraintFixed",
+        "makeConstraintFlowVelocity",
+        "makeConstraintFluidBoundary",
+        "makeConstraintForce",
+        "makeConstraintGear",
+        "makeConstraintHeatflux",
+        "makeConstraintInitialFlowVelocity",
+        "makeConstraintInitialPressure",
+        "makeConstraintInitialTemperature",
+        "makeConstraintMagnetization",
+        "makeConstraintPlaneRotation",
+        "makeConstraintPressure",
+        "makeConstraintPulley",
+        "makeConstraintRigidBody",
+        "makeConstraintSectionPrint",
+        "makeConstraintSelfWeight",
+        "makeConstraintSpring",
+        "makeConstraintTemperature",
+        "makeConstraintTie",
+        "makeConstraintTransform",
+        "makeElementFluid1D",
+        "makeElementGeometry1D",
+        "makeElementGeometry2D",
+        "makeElementRotation1D",
+        "makeEquationDeformation",
+        "makeEquationElasticity",
+        "makeEquationElectricforce",
+        "makeEquationElectrostatic",
+        "makeEquationFlow",
+        "makeEquationFlux",
+        "makeEquationHeat",
+        "makeEquationMagnetodynamic",
+        "makeEquationMagnetodynamic2D",
+        "makeEquationStaticCurrent",
+        "makeMaterialFluid",
+        "makeMaterialMechanicalNonlinear",
+        "makeMaterialReinforced",
+        "makeMaterialSolid",
+        "makeMeshBoundaryLayer",
+        "makeMeshGmsh",
+        "makeMeshGroup",
+        "makeMeshNetgen",
+        "makeMeshNetgenLegacy",
+        "makeMeshRegion",
+        "makeMeshResult",
+        "makePostFilterGlyph",
+        "makePostHistogram",
+        "makePostHistogramFieldData",
+        "makePostHistogramIndexOverFrames",
+        "makePostLineplot",
+        "makePostLineplotFieldData",
+        "makePostLineplotIndexOverFrames",
+        "makePostTable",
+        "makePostTableFieldData",
+        "makePostTableIndexOverFrames",
+        "makePostVtkFilterClipRegion",
+        "makePostVtkFilterClipScalar",
+        "makePostVtkFilterContours",
+        "makePostVtkFilterCutFunction",
+        "makePostVtkFilterWarp",
+        "makePostVtkResult",
+        "makeResultMechanical",
+        "makeSolverCalculiX",
+        "makeSolverCalculiXCcxTools",
+        "makeSolverElmer",
+        "makeSolverMystran",
+        "makeSolverZ88"
+      ],
+      "outcome": "ok"
+    },
+    "geometry.attributes": {
+      "elements": {
+        "0": {
+          "attributes": {
+            "Center": {
+              "present": false
+            },
+            "Circle": {
+              "present": false
+            },
+            "Construction": {
+              "present": false
+            },
+            "EndPoint": {
+              "present": true,
+              "result": "Vector (10.0, 0.0, 0.0)"
+            },
+            "FirstParameter": {
+              "present": true,
+              "result": "0.0"
+            },
+            "LastParameter": {
+              "present": true,
+              "result": "10.0"
+            },
+            "Radius": {
+              "present": false
+            },
+            "StartPoint": {
+              "present": true,
+              "result": "Vector (0.0, 0.0, 0.0)"
+            },
+            "x": {
+              "present": false
+            },
+            "y": {
+              "present": false
+            }
+          },
+          "native": "LineSegment"
+        },
+        "1": {
+          "attributes": {
+            "Center": {
+              "present": true,
+              "result": "Vector (0.0, 0.0, 0.0)"
+            },
+            "Circle": {
+              "present": false
+            },
+            "Construction": {
+              "present": false
+            },
+            "EndPoint": {
+              "present": false
+            },
+            "FirstParameter": {
+              "present": true,
+              "result": "0.0"
+            },
+            "LastParameter": {
+              "present": true,
+              "result": "6.283185307179586"
+            },
+            "Radius": {
+              "present": true,
+              "result": "5.0"
+            },
+            "StartPoint": {
+              "present": false
+            },
+            "x": {
+              "present": false
+            },
+            "y": {
+              "present": false
+            }
+          },
+          "native": "Circle"
+        },
+        "2": {
+          "attributes": {
+            "Center": {
+              "present": true,
+              "result": "Vector (0.0, 0.0, 0.0)"
+            },
+            "Circle": {
+              "present": true,
+              "result": "Circle (Radius : 5, Position : (0, 0, 0), Direction : (0, 0, 1))"
+            },
+            "Construction": {
+              "present": false
+            },
+            "EndPoint": {
+              "present": true,
+              "result": "Vector (2.701511529340699, 4.207354924039483, 0.0)"
+            },
+            "FirstParameter": {
+              "present": true,
+              "result": "0.0"
+            },
+            "LastParameter": {
+              "present": true,
+              "result": "1.0"
+            },
+            "Radius": {
+              "present": true,
+              "result": "5.0"
+            },
+            "StartPoint": {
+              "present": true,
+              "result": "Vector (5.0, 0.0, 0.0)"
+            },
+            "x": {
+              "present": false
+            },
+            "y": {
+              "present": false
+            }
+          },
+          "native": "ArcOfCircle"
+        },
+        "3": {
+          "attributes": {
+            "Center": {
+              "present": false
+            },
+            "Circle": {
+              "present": false
+            },
+            "Construction": {
+              "present": false
+            },
+            "EndPoint": {
+              "present": false
+            },
+            "FirstParameter": {
+              "present": false
+            },
+            "LastParameter": {
+              "present": false
+            },
+            "Radius": {
+              "present": false
+            },
+            "StartPoint": {
+              "present": false
+            },
+            "x": {
+              "present": false
+            },
+            "y": {
+              "present": false
+            }
+          },
+          "native": "Point"
+        }
+      },
+      "outcome": "ok"
+    },
+    "geometry.getConstruction": {
+      "elements_have_Construction": [
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "getConstruction": {
+        "callable": true,
+        "index0": "False",
+        "index1": "False",
+        "present": true
+      },
+      "outcome": "ok"
+    },
+    "gui.selection": {
+      "addSelection_doc_sub_xyz": "ok",
+      "addSelection_obj": "ok",
+      "getSelectionEx": {
+        "count": 1,
+        "first_has_shape": null,
+        "first_object": "'SelProbe'",
+        "first_subelements": [
+          "Face3"
+        ]
+      },
+      "outcome": "ok",
+      "saveImage": {
+        "arity": "path, width, height, style",
+        "file_exists": true
+      },
+      "sendMsgToActiveView": "None"
+    },
+    "mesh.pipeline": {
+      "addon_kwargs": {
+        "accepted": true,
+        "countFacets": 12
+      },
+      "defaults": {
+        "boundBox": "BoundBox (0, 0, 0, 10, 10, 10)",
+        "countFacets": 42,
+        "isSolid": "True"
+      },
+      "outcome": "ok",
+      "signature_error": "Wrong arguments",
+      "stl_readback": {
+        "boundBox": "BoundBox (0, 0, 0, 10, 10, 10)",
+        "countFacets": 12,
+        "isSolid": "True"
+      },
+      "threemf_readback": {
+        "countFacets": 12,
+        "isSolid": "True"
+      },
+      "write_3mf_format_kwarg": "ok",
+      "write_3mf_plain": "ok"
+    },
+    "object.property_status": {
+      "import_insert_signature": "function missing required argument 'name' (pos 1)",
+      "outcome": "ok",
+      "properties": {
+        "Height": {
+          "status": [],
+          "typeId": "'App::PropertyLength'"
+        },
+        "Length": {
+          "status": [],
+          "typeId": "'App::PropertyLength'"
+        },
+        "Missing": {
+          "status_error": "AttributeError: Property container has no property 'Missing'",
+          "typeId_error": "AttributeError: Property container has no property 'Missing'"
+        },
+        "PropertiesList": {
+          "present": true,
+          "result": [
+            "AttacherEngine",
+            "AttacherType",
+            "AttachmentOffset",
+            "AttachmentSupport",
+            "ExpressionEngine",
+            "Height",
+            "Label",
+            "Label2",
+            "Length",
+            "MapMode",
+            "MapPathParameter",
+            "MapReversed",
+            "Placement",
+            "Shape",
+            "ShapeMaterial",
+            "Visibility",
+            "Width",
+            "_ElementMapVersion"
+          ]
+        },
+        "Width": {
+          "status": [],
+          "typeId": "'App::PropertyLength'"
+        },
+        "supportedTypes": {
+          "present": true,
+          "result": "['App::DocumentObject', 'App::GeoFeature', 'App::FeatureTest', 'App::FeatureTestException', 'App::FeatureTestColumn', 'App::FeatureTestRow', 'App::FeatureTestAbsAddress', 'App::FeatureTestPlacement', 'App::FeatureTestAttribute', 'App::FeaturePython', 'App::GeometryPython', 'App::DocumentObjectGroup', 'App::DocumentObjectGroupPython', 'App::DocumentObjectFileIncluded', 'Image::ImagePlane', 'App::InventorObject', 'App::VRMLObject', 'App::Annotation', 'App::AnnotationLabel', 'App::MaterialObject', 'App::MaterialObjectPython', 'App::TextDocument', 'App::Placement', 'App::PlacementPython', 'App::DatumElement', 'App::Plane', 'App::Line', 'App::Point', 'App::LocalCoordinateSystem', 'App::Part', 'App::Origin', 'App::Link', 'App::LinkPython', 'App::LinkElement', 'App::LinkElementPython', 'App::LinkGroup', 'App::LinkGroupPython', 'App::VarSet', 'Part::Feature', 'Part::FeatureExt', 'Part::BodyBase', 'Part::FeaturePython', 'Part::FeatureGeometrySet', 'Part::CustomFeature', 'Part::CustomFeaturePython', 'Part::Primitive', 'Part::Box', 'Part::Spline', 'Part::Boolean', 'Part::Common', 'Part::MultiCommon', 'Part::Cut', 'Part::Fuse', 'Part::MultiFuse', 'Part::Section', 'Part::FilletBase', 'Part::Fillet', 'Part::Chamfer', 'Part::Compound', 'Part::Compound2', 'Part::Extrusion', 'Part::Scale', 'Part::Revolution', 'Part::ProjectOnSurface', 'Part::Mirroring', 'Part::ImportStep', 'Part::ImportIges', 'Part::ImportBrep', 'Part::CurveNet', 'Part::Polygon', 'Part::Circle', 'Part::Ellipse', 'Part::Vertex', 'Part::Line', 'Part::Ellipsoid', 'Part::Plane', 'Part::Sphere', 'Part::Cylinder', 'Part::Prism', 'Part::RegularPolygon', 'Part::Cone', 'Part::Torus', 'Part::Helix', 'Part::Spiral', 'Part::Wedge', 'Part::Part2DObject', 'Part::Part2DObjectPython', 'Part::Face', 'Part::RuledSurface', 'Part::Loft', 'Part::Sweep', 'Part::Offset', 'Part::Offset2D', 'Part::Thickness', 'Part::Refine', 'Part::Reverse', 'Part::Datum', 'Part::DatumPlane', 'Part::DatumLine', 'Part::DatumPoint', 'Part::LocalCoordinateSystem', 'App::MeasureDistance', 'Measure::MeasureBase', 'Measure::MeasurePython', 'Measure::MeasureAngle', 'Measure::MeasureDistance', 'Measure::MeasureDistanceDetached', 'Measure::MeasurePosition', 'Measure::MeasureLength', 'Measure::MeasureArea', 'Measure::MeasureRadius', 'Mesh::Feature', 'Mesh::FeatureCustom', 'Mesh::FeaturePython', 'Mesh::Import', 'Mesh::Export', 'Mesh::Transform', 'Mesh::TransformDemolding', 'Mesh::Curvature', 'Mesh::SegmentByMesh', 'Mesh::SetOperations', 'Mesh::FixDefects', 'Mesh::HarmonizeNormals', 'Mesh::FlipNormals', 'Mesh::FixNonManifolds', 'Mesh::FixDuplicatedFaces', 'Mesh::FixDuplicatedPoints', 'Mesh::FixDegenerations', 'Mesh::FixDeformations', 'Mesh::FixIndices', 'Mesh::FillHoles', 'Mesh::RemoveComponents', 'Mesh::Sphere', 'Mesh::Ellipsoid', 'Mesh::Cylinder', 'Mesh::Cone', 'Mesh::Torus', 'Mesh::Cube', 'Sketcher::SketchObjectSF', 'Sketcher::SketchObject', 'Sketcher::SketchObjectPython', 'PartDesign::Feature', 'PartDesign::FeaturePython', 'PartDesign::FeatureRefine', 'PartDesign::FeatureRefinePython', 'PartDesign::Solid', 'PartDesign::FeatureAddSub', 'PartDesign::FeatureAddSubPython', 'PartDesign::FeatureAdditivePython', 'PartDesign::FeatureSubtractivePython', 'PartDesign::DressUp', 'PartDesign::ProfileBased', 'PartDesign::Transformed', 'PartDesign::Mirrored', 'PartDesign::LinearPattern', 'PartDesign::PolarPattern', 'PartDesign::Scaled', 'PartDesign::MultiTransform', 'PartDesign::Hole', 'PartDesign::Body', 'PartDesign::FeatureExtrude', 'PartDesign::Pad', 'PartDesign::Pocket', 'PartDesign::Fillet', 'PartDesign::Revolution', 'PartDesign::Groove', 'PartDesign::Chamfer', 'PartDesign::Draft', 'PartDesign::Thickness', 'PartDesign::Pipe', 'PartDesign::AdditivePipe', 'PartDesign::SubtractivePipe', 'PartDesign::Loft', 'PartDesign::AdditiveLoft', 'PartDesign::SubtractiveLoft', 'PartDesign::Helix', 'PartDesign::AdditiveHelix', 'PartDesign::SubtractiveHelix', 'PartDesign::ShapeBinder', 'PartDesign::SubShapeBinder', 'PartDesign::SubShapeBinderPython', 'PartDesign::Plane', 'PartDesign::Line', 'PartDesign::Point', 'PartDesign::CoordinateSystem', 'PartDesign::Boolean', 'PartDesign::FeaturePrimitive', 'PartDesign::Box', 'PartDesign::AdditiveBox', 'PartDesign::SubtractiveBox', 'PartDesign::Cylinder', 'PartDesign::AdditiveCylinder', 'PartDesign::SubtractiveCylinder', 'PartDesign::Sphere', 'PartDesign::AdditiveSphere', 'PartDesign::SubtractiveSphere', 'PartDesign::Cone', 'PartDesign::AdditiveCone', 'PartDesign::SubtractiveCone', 'PartDesign::Ellipsoid', 'PartDesign::AdditiveEllipsoid', 'PartDesign::SubtractiveEllipsoid', 'PartDesign::Torus', 'PartDesign::AdditiveTorus', 'PartDesign::SubtractiveTorus', 'PartDesign::Prism', 'PartDesign::AdditivePrism', 'PartDesign::SubtractivePrism', 'PartDesign::Wedge', 'PartDesign::AdditiveWedge', 'PartDesign::SubtractiveWedge', 'PartDesign::FeatureBase', 'Fem::DocumentObject', 'Fem::FeaturePython', 'Fem::FemAnalysis', 'Fem::FemAnalysisPython', 'Fem::Constraint', 'Fem::ConstraintPython', 'Fem::ConstraintBearing', 'Fem::ConstraintContact', 'Fem::ConstraintDisplacement', 'Fem::ConstraintFixed', 'Fem::ConstraintRigidBody', 'Fem::ConstraintFluidBoundary', 'Fem::ConstraintForce', 'Fem::ConstraintGear', 'Fem::ConstraintHeatflux', 'Fem::ConstraintInitialTemperature', 'Fem::ConstraintPlaneRotation', 'Fem::ConstraintPressure', 'Fem::ConstraintPulley', 'Fem::ConstraintTemperature', 'Fem::ConstraintTransform', 'Fem::ConstraintSpring', 'Fem::FemMeshObject', 'Fem::FemMeshObjectPython', 'Fem::FemMeshShapeBaseObject', 'Fem::FemMeshShapeBaseObjectPython', 'Fem::FemMeshShapeObject', 'Fem::FemMeshShapeNetgenObject', 'Fem::FemResultObject', 'Fem::FemResultObjectPython', 'Fem::FemSetObject', 'Fem::FemSetElementNodesObject', 'Fem::FemSetElementsObject', 'Fem::FemSetFacesObject', 'Fem::FemSetGeometryObject', 'Fem::FemSetNodesObject', 'Fem::FemSolverObject', 'Fem::FemSolverObjectPython', 'Fem::FemPostObject', 'Fem::FemPostPipeline', 'Fem::FemPostFilter', 'Fem::FemPostBranchFilter', 'Fem::FemPostCalculatorFilter', 'Fem::FemPostClipFilter', 'Fem::FemPostContoursFilter', 'Fem::FemPostCutFilter', 'Fem::FemPostDataAlongLineFilter', 'Fem::FemPostDataAtPointFilter', 'Fem::FemPostScalarClipFilter', 'Fem::FemPostWarpVectorFilter', 'Fem::FemPostFunction', 'Fem::FemPostFunctionProvider', 'Fem::FemPostBoxFunction', 'Fem::FemPostCylinderFunction', 'Fem::FemPostPlaneFunction', 'Fem::FemPostSphereFunction', 'Fem::PostFilterPython']"
+        }
+      }
+    },
+    "part.read": {
+      "outcome": "ok",
+      "part_write": "AttributeError: module 'Part' has no attribute 'write'",
+      "readback": {
+        "boundBox": "BoundBox (0, 0, 0, 10, 10, 10)",
+        "isValid": "True",
+        "solidCount": 1,
+        "type": "Shape",
+        "volume": "999.9999999999998"
+      },
+      "shape_exportStep": "ok"
+    },
+    "qt.signals": {
+      "outcome": "ok",
+      "qt_thread_is_app_thread": true,
+      "stage": "collected",
+      "timer_fired": true,
+      "timer_thread_is_app_thread": true
+    },
+    "server.version": {
+      "full": [
+        "1",
+        "1",
+        "3",
+        "20260725 (Git shallow)",
+        "Unknown",
+        "2026/07/25 04:52:02",
+        "grafted,grafted",
+        "145529fe741292ff0b3977a01195bf0247425794"
+      ],
+      "outcome": "ok",
+      "version": "1.1.3"
+    },
+    "setDatum.quantity": {
+      "constraint_index": 0,
+      "edit": "ok",
+      "outcome": "ok",
+      "value_after": "12.0"
+    },
+    "setDatum.string": {
+      "constraint_index": 0,
+      "edit": "TypeError: Wrong arguments",
+      "outcome": "rejected",
+      "value_after": "10.0"
+    },
+    "shape.null_attributes": {
+      "Area": {
+        "present": true,
+        "raised": "RuntimeError: shape is invalid"
+      },
+      "BoundBox": {
+        "present": true,
+        "result": "BoundBox (1.79769e+308, 1.79769e+308, 1.79769e+308, -1.79769e+308, -1.79769e+308, -1.79769e+308)"
+      },
+      "ShapeType": {
+        "present": true,
+        "raised": "FreeCADError: cannot determine type of null shape"
+      },
+      "Solids": {
+        "present": true,
+        "result": "0"
+      },
+      "Volume": {
+        "present": true,
+        "raised": "RuntimeError: shape is invalid"
+      },
+      "check": {
+        "present": true,
+        "result": "None"
+      },
+      "getTolerance": {
+        "present": true,
+        "raised": "TypeError: function takes at least 1 argument (0 given)"
+      },
+      "isNull": {
+        "present": true,
+        "result": "True"
+      },
+      "isValid": {
+        "present": true,
+        "raised": "OCCError: 19Standard_NullObject BRepCheck_Analyzer::Init() - NULL shape"
+      },
+      "outcome": "ok",
+      "shape_access": "ok"
+    },
+    "solver.attributes": {
+      "attributes": {
+        "DoF": {
+          "present": true,
+          "value": "4"
+        },
+        "FullyConstrained": {
+          "present": true,
+          "value": "False"
+        },
+        "getSolverDoF": {
+          "callable": false,
+          "present": false
+        },
+        "getSolverMessages": {
+          "callable": false,
+          "present": false
+        }
+      },
+      "outcome": "ok",
+      "solve": "0",
+      "solve_error": null
+    }
+  },
+  "schema": 1
+}
