@@ -236,11 +236,12 @@ For Network access, add the bearer header to the arguments. Keep the token out o
 
 ## Tools
 
-The server exposes 23 tools.
+The server exposes 24 tools.
 
 | Tool | Purpose |
 | --- | --- |
 | `discover_capabilities` | Report FreeCAD/OCC versions, workbenches, supported types, exporter and FEM availability, and GUI dispatch health. |
+| `inspect_documents` | List open documents with `name`, `label`, `fileName`, `objectCount`, `generation`, `dirty`, `active`, `transactionOpen`, and `editObject`, plus the `activeDocument`. |
 | `new_document` | Create an empty document and return its actual sanitized `Name`, `Label`, and object count. |
 | `open_document` | Open an FCStd file. |
 | `import_model` | Import a STEP or STL file behind file consent, reporting created objects, bounds, validity, and units. |
@@ -298,7 +299,7 @@ At most 32 sessions are kept. New sessions are refused rather than evicting live
 
 ## Agent skill
 
-The repository ships an [agent skill](skills/freecad-mcp/SKILL.md). It teaches coding agents how to drive this server: the 23-tool contract, FreeCAD modeling patterns, geometry validation, FEM, and export. It complements the MCP connection: the agent still talks to `http://127.0.0.1:9876/mcp`, while the skill explains how to use the tools effectively.
+The repository ships an [agent skill](skills/freecad-mcp/SKILL.md). It teaches coding agents how to drive this server: the 24-tool contract, FreeCAD modeling patterns, geometry validation, FEM, and export. It complements the MCP connection: the agent still talks to `http://127.0.0.1:9876/mcp`, while the skill explains how to use the tools effectively.
 
 [`npx skills`](https://github.com/vercel-labs/skills) is the official installer for the open agent skills ecosystem. It requires Node.js and supports Claude Code, Codex, Cursor, and more than 75 other agents.
 
@@ -359,7 +360,7 @@ The project targets Python 3.11+ and has no runtime dependencies.
 | --- | --- |
 | **Architecture** | The PyPI proxy package (`src/freecad_mcp`, FastMCP over stdio) and the in-FreeCAD XML-RPC server are gone. One embedded server speaks MCP over Streamable HTTP (JSON-RPC + SSE) at `http://127.0.0.1:9876/mcp`. No pip or uvx install and no client config file are needed. |
 | **Protocol** | XML-RPC with ad-hoc dictionaries became the MCP JSON-RPC wire protocol, version `2026-07-28`, with request-metadata headers, capability negotiation, and session-based support for the 2025 Streamable HTTP revisions. |
-| **Tools** | Fifteen loosely typed tools became 23 tools validated against JSON input and output schemas, with structured error codes and paginated results. `execute_code` became `run_script`; `get_view` became `capture_view`; `get_rpc_status` became `discover_capabilities`; `insert_part_from_library` and `get_parts_list` were dropped because the parts library is reachable through `run_script`. |
+| **Tools** | Fifteen loosely typed tools became 24 tools validated against JSON input and output schemas, with structured error codes and paginated results. `execute_code` became `run_script`; `get_view` became `capture_view`; `get_rpc_status` became `discover_capabilities`; `inspect_documents` was added for live document inventory; `insert_part_from_library` and `get_parts_list` were dropped because the parts library is reachable through `run_script`. |
 | **Security** | The IP allow-list alone became two explicit modes: local (loopback bind, Host/Origin checks, no token) and remote (bind to all interfaces, mandatory bearer token, optional CIDR allow-list), plus `allowed_roots` path containment for file-touching tools. |
 | **Document safety** | Unvalidated success/error dictionaries became MCP-owned transactions with prevalidation, rollback, dependent-object checks, and solid-count baselines. |
 | **Long-running work** | Blocking calls with client-side timeouts became detached tasks under the `io.modelcontextprotocol/tasks` extension, with polling and cooperative cancellation. |

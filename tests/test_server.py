@@ -1,7 +1,7 @@
 """Isolated tests for the v2 server orchestration (mcp_server/server).
 
 Runs the real server module against stubbed FreeCAD/PySide and stubbed tool
-modules (contract-shaped), defending: the exact 23-tool registry and plan
+modules (contract-shaped), defending: the exact 24-tool registry and plan
 order, GUI-independent discovery/list, wire result envelopes, task creation
 and lifecycle, the Tasks capability gate, consent preflight ordering and
 single-use nonces, the shared 32-operation cap, blocking deadline
@@ -33,8 +33,13 @@ if str(ADDON_DIR) not in sys.path:
 FC_STATE = {
     "version": ["1", "1", "3", "dev"],
     "documents": {},  # name -> FakeDoc
+    "active_document": None,  # FreeCAD.ActiveDocument (PEP 562 probe)
     "observers": [],
 }
+
+#: GUI document doubles (``FreeCADGui.getDocument``); only the active-edit
+#: probe of inspect_documents is consumed from them.
+FC_GUI_STATE: dict = {"documents": {}}
 
 
 class FakeConsole:
@@ -60,6 +65,13 @@ class FakeDoc:
         self.Objects: list = []
 
 
+class FakeGuiDocument:
+    """GUI document double: ``ActiveObject`` is the only consumed member."""
+
+    def __init__(self, active_object=None) -> None:
+        self.ActiveObject = active_object
+
+
 def _install_freeCAD_stubs() -> None:
     freecad = types.ModuleType("FreeCAD")
     freecad.Console = FakeConsole
@@ -74,6 +86,15 @@ def _install_freeCAD_stubs() -> None:
         FC_STATE["observers"].remove(obs) if obs in FC_STATE["observers"] else None
     )
     freecad.ConfigGet = lambda _key: ""
+
+    def _module_getattr(name: str):
+        # Real FreeCAD always exposes ActiveDocument; the harness answers it
+        # from FC_STATE so one fixture can express "no active document".
+        if name == "ActiveDocument":
+            return FC_STATE["active_document"]
+        raise AttributeError(name)
+
+    freecad.__getattr__ = _module_getattr
     for getter in (
         "getHomePath",
         "getUserAppDataDir",
@@ -90,6 +111,7 @@ def _install_freeCAD_stubs() -> None:
     freecad_gui = types.ModuleType("FreeCADGui")
     freecad_gui.listWorkbenches = lambda: {"Part": object(), "Mesh": object()}
     freecad_gui.updateGui = lambda: None
+    freecad_gui.getDocument = lambda name: FC_GUI_STATE["documents"].get(name)
 
     timer_calls: list = []
     qt_core = types.SimpleNamespace(
@@ -198,6 +220,28 @@ def _documents_preflight(ctx, name, arguments):
     return PREFLIGHT_RESULTS.get(name)
 
 
+def _stub_is_dirty(ctx, doc) -> bool:
+    """Contract double of the documents tool's conservative dirty rule.
+
+    Mirrors the real helper: the GUI document's ``Modified`` wins when it
+    answers, anything that is not a bool reads dirty, and an unsaved
+    nonempty document is dirty even when ``Modified`` reports clean.
+    """
+
+    modified = None
+    try:
+        gui_doc = ctx.Gui.getDocument(doc.Name)
+    except Exception:
+        gui_doc = None
+    if gui_doc is not None:
+        modified = getattr(gui_doc, "Modified", None)
+    if modified is None:
+        modified = getattr(doc, "Modified", None)
+    if not isinstance(modified, bool) or modified:
+        return True
+    return not getattr(doc, "FileName", "") and bool(getattr(doc, "Objects", None))
+
+
 def _export_preflight(ctx, name, arguments):
     return PREFLIGHT_RESULTS.get(name)
 
@@ -221,6 +265,8 @@ def _install_tool_modules() -> None:
         setattr(package, modname, mod)
 
     _module("documents", _DOCUMENT_TOOLS, _documents_preflight)
+    # server.py lazily consumes the documents tool's dirty rule.
+    sys.modules["mcp_server.tools.documents"]._is_dirty = _stub_is_dirty
     _module("objects", _OBJECT_TOOLS, None)
     _module("geometry", _GEOMETRY_TOOLS, None)
     _module("parameters", _OTHER_TOOLS["parameters"], None)
@@ -385,6 +431,8 @@ def _clean_state():
     PREFLIGHT_RESULTS.clear()
     STUB_HANDLERS.clear()
     FC_STATE["documents"] = {}
+    FC_STATE["active_document"] = None
+    FC_GUI_STATE["documents"] = {}
     FC_STATE["observers"] = []
     FakeConsole.messages.clear()
     server_module._server = None
@@ -414,13 +462,15 @@ def _reset_dispatcher_for_tests() -> ThreadedWaker:
 # ---------------------------------------------------------------------------
 
 
-def test_tools_list_returns_exactly_23_in_plan_order():
+def test_tools_list_returns_exactly_24_in_plan_order():
     server = make_server()
     response = dispatch(server, "tools/list")
     result = response["result"]
     names = [tool["name"] for tool in result["tools"]]
     assert names == list(server_module.PLAN_TOOL_ORDER)
-    assert len(names) == 23
+    assert len(names) == 24
+    assert names[0] == "discover_capabilities"
+    assert names[1] == "inspect_documents"
     assert result["resultType"] == "complete"
     assert result["_meta"][META_SERVER_INFO] == protocol.SERVER_INFO
     assert result["ttlMs"] == 3_600_000
@@ -459,7 +509,11 @@ def test_discover_capabilities_tool_never_touches_the_gui():
     gui_dispatch.dispatch_to_gui = _forbid
     try:
         server = make_server()
-        server._static_capabilities = {"paths": {"home": "/fc"}}
+        server._static_capabilities = {
+            "freecad": {"version": [1, 1, 3]},
+            "workbenches": {"Part": {}},
+            "paths": {"home": "/fc"},
+        }
         response = dispatch(
             server,
             "tools/call",
@@ -470,7 +524,13 @@ def test_discover_capabilities_tool_never_touches_the_gui():
     result = response["result"]
     assert result["resultType"] == "complete"
     assert set(result["structuredContent"]) == {"capabilities", "gui"}
-    assert result["structuredContent"]["capabilities"] == {"paths": {"home": "/fc"}}
+    # Compact by default: the summary blocks plus the supported-types
+    # summary; workbenches/paths/supportedTypes need detail "full".
+    assert result["structuredContent"]["capabilities"] == {
+        "freecad": {"version": [1, 1, 3]},
+        "supportedTypesCount": None,
+        "supportedTypesDocument": None,
+    }
     assert set(result["structuredContent"]["gui"]) == {
         "state",
         "operation",
@@ -1920,3 +1980,218 @@ def test_discover_refresh_error_does_not_publish_late_results():
         assert server._capability_snapshot() == before
     finally:
         FC_STATE["documents"] = {}
+
+
+def _capability_snapshot_fixture() -> dict:
+    return {
+        "freecad": {"version": [1, 1, 3]},
+        "occ": {"version": "7.8.0"},
+        "workbenches": {"Part": {}, "Mesh": {}},
+        "supportedTypes": ["Mesh::Mesh", "Part::Feature"],
+        "exporters": {"part": True},
+        "fem": {"module": True},
+        "supportedTypesDocument": "Alpha",
+        "paths": {"home": "/fc"},
+    }
+
+
+def test_discover_capabilities_compact_default_omits_heavy_arrays():
+    server = make_server()
+    server._static_capabilities = _capability_snapshot_fixture()
+    default = dispatch(
+        server,
+        "tools/call",
+        {"name": "discover_capabilities", "arguments": {}},
+        rpc_id=20,
+    )["result"]["structuredContent"]
+    explicit = dispatch(
+        server,
+        "tools/call",
+        {"name": "discover_capabilities", "arguments": {"detail": "compact"}},
+        rpc_id=21,
+    )["result"]["structuredContent"]
+    assert default == explicit  # the default detail IS compact
+    capabilities = default["capabilities"]
+    assert set(capabilities) == {
+        "freecad",
+        "occ",
+        "exporters",
+        "fem",
+        "supportedTypesCount",
+        "supportedTypesDocument",
+    }
+    assert capabilities["freecad"] == {"version": [1, 1, 3]}
+    assert capabilities["exporters"] == {"part": True}
+    assert capabilities["supportedTypesCount"] == 2
+    assert capabilities["supportedTypesDocument"] == "Alpha"
+    # The heavy arrays are only available through detail "full".
+    assert "workbenches" not in capabilities
+    assert "paths" not in capabilities
+    assert "supportedTypes" not in capabilities
+    assert set(default) == {"capabilities", "gui"}
+
+
+def test_discover_capabilities_full_detail_returns_complete_snapshot():
+    server = make_server()
+    snapshot = _capability_snapshot_fixture()
+    server._static_capabilities = dict(snapshot)
+    capabilities = dispatch(
+        server,
+        "tools/call",
+        {"name": "discover_capabilities", "arguments": {"detail": "full"}},
+        rpc_id=22,
+    )["result"]["structuredContent"]["capabilities"]
+    assert capabilities == snapshot
+    assert capabilities["workbenches"] == {"Part": {}, "Mesh": {}}
+    assert capabilities["supportedTypes"] == ["Mesh::Mesh", "Part::Feature"]
+    assert capabilities["paths"] == {"home": "/fc"}
+    # Nothing was refreshed: the cached snapshot is returned unchanged.
+    assert server._static_capabilities == snapshot
+
+
+def test_discover_capabilities_refresh_publishes_through_blocking_path():
+    server = make_server()
+    waker = _reset_dispatcher_for_tests()
+    assert server._capability_snapshot() == {}  # nothing cached yet
+    types_list = ["Part::Feature", "Mesh::Mesh", "Part::Feature"]
+    FC_STATE["documents"] = {"Alpha": _TypesDoc("Alpha", types_list)}
+    try:
+        response = dispatch(
+            server,
+            "tools/call",
+            {"name": "discover_capabilities", "arguments": {"refresh": True}},
+            rpc_id=23,
+        )
+        # refresh=true is NOT GUI independent: it takes the blocking call
+        # (handler on the GUI thread), unlike the cached default.
+        assert isinstance(response, server_module.StreamResponse)
+        events = drain_stream(response, 2, timeout=5.0)
+        assert events[1] is None
+        result = events[0]["result"]
+        assert result["resultType"] == "complete"
+        capabilities = result["structuredContent"]["capabilities"]
+        assert capabilities["supportedTypesCount"] == 2  # de-duplicated
+        assert capabilities["supportedTypesDocument"] == "Alpha"
+        assert "supportedTypes" not in capabilities
+        assert result["structuredContent"]["gui"]["state"] is not None
+        waker.join()
+    finally:
+        FC_STATE["documents"] = {}
+    # The handler captured directly on the GUI thread and republished the
+    # fresh snapshot under the capabilities lock (no nested GUI dispatch).
+    assert wait_until(
+        lambda: (server._static_capabilities or {}).get("supportedTypesDocument") == "Alpha"
+    )
+    assert server._capability_snapshot()["supportedTypes"] == ["Mesh::Mesh", "Part::Feature"]
+
+
+# ---------------------------------------------------------------------------
+# Inspect documents (built-in inventory tool).
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_documents_rows_report_document_state():
+    server = make_server()
+    _reset_dispatcher_for_tests()
+    loaded = FakeDoc("Loaded", "Loaded label")
+    loaded.FileName = "/tmp/fc-test/Loaded.FCStd"
+    loaded.Objects = [object(), object()]
+    loaded.Modified = False
+    loaded.HasPendingTransaction = True
+    FC_STATE["documents"] = {"Loaded": loaded, "Fresh": FakeDoc("Fresh")}
+    FC_STATE["active_document"] = loaded
+    FC_GUI_STATE["documents"]["Loaded"] = FakeGuiDocument(
+        types.SimpleNamespace(Object=types.SimpleNamespace(Name="Box"))
+    )
+    try:
+        response = dispatch(
+            server,
+            "tools/call",
+            {"name": "inspect_documents", "arguments": {}},
+            rpc_id=24,
+        )
+        assert isinstance(response, server_module.StreamResponse)
+        events = drain_stream(response, 2, timeout=5.0)
+    finally:
+        FC_STATE["documents"] = {}
+        FC_STATE["active_document"] = None
+        FC_GUI_STATE["documents"] = {}
+    assert events[1] is None
+    result = events[0]["result"]
+    assert result["resultType"] == "complete"
+    assert STUB_CALLS == []  # built-in: no tool module, no run_script
+    payload = result["structuredContent"]
+    assert payload["activeDocument"] == "Loaded"
+    assert [row["name"] for row in payload["documents"]] == ["Loaded", "Fresh"]
+    rows = {row["name"]: row for row in payload["documents"]}
+    assert rows["Loaded"] == {
+        "name": "Loaded",
+        "label": "Loaded label",
+        "fileName": "/tmp/fc-test/Loaded.FCStd",
+        "objectCount": 2,
+        "generation": 0,
+        "dirty": False,
+        "active": True,
+        "transactionOpen": True,
+        "editObject": "Box",
+    }
+    assert rows["Fresh"] == {
+        "name": "Fresh",
+        "label": "Fresh",
+        "fileName": "",
+        "objectCount": 0,
+        "generation": 0,
+        "dirty": True,  # unknown Modified: conservative, never clean
+        "active": False,
+        "transactionOpen": False,
+        "editObject": None,
+    }
+
+
+def test_inspect_documents_reports_generation_and_null_active_document():
+    server = make_server()
+    _reset_dispatcher_for_tests()
+    doc = FakeDoc("Only")
+    FC_STATE["documents"] = {"Only": doc}
+    try:
+        # Real observer generations are what the rows must report.
+        server._on_document_event(doc, bump=True, publish=False)
+        server._on_document_event(doc, bump=True, publish=False)
+        events = drain_stream(
+            dispatch(
+                server,
+                "tools/call",
+                {"name": "inspect_documents", "arguments": {}},
+                rpc_id=25,
+            ),
+            2,
+            timeout=5.0,
+        )
+    finally:
+        FC_STATE["documents"] = {}
+    payload = events[0]["result"]["structuredContent"]
+    assert payload["activeDocument"] is None  # no active document
+    (row,) = payload["documents"]
+    assert row["generation"] == 2
+    assert row["active"] is False
+    assert row["editObject"] is None
+
+
+def test_inspect_documents_with_no_open_documents():
+    server = make_server()
+    _reset_dispatcher_for_tests()
+    events = drain_stream(
+        dispatch(
+            server,
+            "tools/call",
+            {"name": "inspect_documents", "arguments": {}},
+            rpc_id=26,
+        ),
+        2,
+        timeout=5.0,
+    )
+    assert events[0]["result"]["structuredContent"] == {
+        "documents": [],
+        "activeDocument": None,
+    }
+    assert STUB_CALLS == []

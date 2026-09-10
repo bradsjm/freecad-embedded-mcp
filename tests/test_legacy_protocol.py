@@ -3,7 +3,7 @@
 Drives the real ``mcp_server.legacy_protocol`` and the real server module
 over test_server's shared harness (stubbed FreeCAD/PySide and contract-
 shaped stub tool modules). Covers: initialize negotiation for every
-legacy revision, session lifecycle and isolation, the 23-tool registry
+legacy revision, session lifecycle and isolation, the 24-tool registry
 through legacy shapes, consent bridging (accept, decline, invalid reply,
 client error, timeout, changed target, duplicate and cross-session
 responses, deletion, shutdown, explicit cancellation), final-result
@@ -383,7 +383,7 @@ def test_tools_list_returns_17_with_revision_shape(version):
     assert reply.status == 200
     result = reply.payload["result"]
     assert [t["name"] for t in result["tools"]] == list(server_module.PLAN_TOOL_ORDER)
-    assert len(result["tools"]) == 23
+    assert len(result["tools"]) == 24
     assert "resultType" not in result
     assert "ttlMs" not in result and "cacheScope" not in result
     if version == legacy.BATCH_REVISION:

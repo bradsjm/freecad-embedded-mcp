@@ -24,7 +24,7 @@ SKETCH_PATH = ADDON_DIR / "mcp_server" / "tools" / "sketch.py"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server.protocol import ToolError
+from mcp_server.protocol import ToolError, tool_error_result
 
 VALIDATION_FAILED = "VALIDATION_FAILED"
 
@@ -181,12 +181,15 @@ class FakeSketch:
         geometry: list[Any] | None = None,
         constraints: list[Any] | None = None,
         degrees_of_freedom: int | None = 0,
+        solver_status: Any = 0,
+        state: list[Any] | None = None,
+        status_text: str = "",
         with_methods: bool = True,
     ) -> None:
         self.Name = name
         self.Label = name
         self.TypeId = "Sketcher::SketchObject"
-        self.State: list[str] = []
+        self.State: Any = list(state or [])
         self.InList: list[Any] = []
         self.Shape = None
         self.Geometry: list[Any] = list(geometry or [])
@@ -201,12 +204,15 @@ class FakeSketch:
         self.construction_flags: dict[int, bool] = {}
         self.expression_engine: list[tuple[str, str]] = []
         self.fail_set_datum: int | None = None
+        self.solver_status = solver_status
+        self.status_text = status_text
         if with_methods:
             self.addGeometry = self._add_geometry
             self.addConstraint = self._add_constraint
             self.delGeometry = self._del_geometry
             self.delConstraint = self._del_constraint
             self.setDatum = self._set_datum
+            self.getStatusString = self._status_string
         self.solve_calls = 0
 
     # Native-style methods (bound only when with_methods is true).
@@ -246,11 +252,14 @@ class FakeSketch:
     def isDerivedFrom(self, type_id: str) -> bool:
         return type_id == "Sketcher::SketchObject"
 
-    def solve(self) -> int:
+    def solve(self) -> Any:
         # Solver status code, never a degree count
         # (probes["solver.attributes"]).
         self.solve_calls += 1
-        return 0
+        return self.solver_status
+
+    def _status_string(self) -> str:
+        return self.status_text
 
     def getConstruction(self, index: int) -> bool:
         return self.construction_flags.get(index, False)
@@ -292,12 +301,13 @@ class FakeDoc:
 
 
 class FakeCtx:
-    def __init__(self, doc: FakeDoc) -> None:
+    def __init__(self, doc: FakeDoc, *, generation: int = 1) -> None:
         self.App = FakeApp()
         self._doc = doc
+        self.generation = generation
 
     def document_generation(self, doc: FakeDoc) -> int:
-        return 1
+        return self.generation
 
     def document_identity(self, doc: FakeDoc) -> str:
         return "identity"
@@ -332,14 +342,15 @@ def line(x1: float, y1: float, x2: float, y2: float) -> StubLineSegment:
     return StubLineSegment(StubVector(x1, y1), StubVector(x2, y2))
 
 
-def rectangle_sketch() -> FakeSketch:
+def rectangle_sketch(**overrides: Any) -> FakeSketch:
     return FakeSketch(
         geometry=[
             line(0, 0, 10, 0),
             line(10, 0, 10, 10),
             line(10, 10, 0, 10),
             line(0, 10, 0, 0),
-        ]
+        ],
+        **overrides,
     )
 
 
@@ -446,6 +457,7 @@ def test_inspect_solver_summary_reads_dof_attributes(sketch_module) -> None:
         "fullyConstrained": True,
         "degreesOfFreedom": 0,
         "solverMessages": [],
+        "solverStatus": 0,
     }
     assert sketch.solve_calls == 1
 
@@ -466,6 +478,7 @@ def test_inspect_solver_summary_is_null_when_dof_attribute_is_missing(
         "fullyConstrained": None,
         "degreesOfFreedom": None,
         "solverMessages": [],
+        "solverStatus": 0,
     }
 
 
@@ -488,7 +501,84 @@ def test_inspect_solver_summary_uses_getter_fallback_not_the_solve_value(
         "fullyConstrained": False,
         "degreesOfFreedom": 4,
         "solverMessages": [],
+        "solverStatus": 0,
     }
+
+
+def test_inspect_solver_summary_reports_the_solve_status_code(sketch_module) -> None:
+    # The recorded conflict case returned solve() == -3; the code is a
+    # diagnostic, so it is reported as-is.
+    sketch = rectangle_sketch()
+    sketch.solver_status = -3
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    result = call_inspect(sketch_module, ctx)
+
+    assert result["solver"]["solverStatus"] == -3
+    assert sketch.solve_calls == 1
+
+
+def test_inspect_solver_status_is_null_when_solve_is_unusable(sketch_module) -> None:
+    def boom() -> int:
+        raise RuntimeError("solver unavailable")
+
+    for unusable in (None, boom, lambda: "0", lambda: True):
+        sketch = rectangle_sketch()
+        sketch.solve = unusable
+        ctx = FakeCtx(FakeDoc(sketch))
+
+        result = call_inspect(sketch_module, ctx)
+
+        assert result["solver"]["solverStatus"] is None
+        # The rest of the summary survives a missing or failing solver.
+        assert result["solver"]["degreesOfFreedom"] == 0
+
+
+def test_inspect_reports_object_state_and_status_text(sketch_module) -> None:
+    sketch = rectangle_sketch(
+        state=["Touched", "Invalid"],
+        status_text="Under-constrained: 3 DoF",
+    )
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    result = call_inspect(sketch_module, ctx)
+
+    assert result["state"] == ["Touched", "Invalid"]
+    assert result["statusText"] == "Under-constrained: 3 DoF"
+
+
+def test_inspect_status_text_distinguishes_empty_from_absent(sketch_module) -> None:
+    # A working accessor that reports nothing is distinct from an absent
+    # one: the empty string is a successful read, null is the fallback.
+    quiet = rectangle_sketch()
+
+    assert call_inspect(sketch_module, FakeCtx(FakeDoc(quiet)))["statusText"] == ""
+
+
+def test_inspect_state_entries_are_coerced_and_capped(sketch_module) -> None:
+    capped = rectangle_sketch(state=[f"State{index}" for index in range(40)])
+    assert call_inspect(sketch_module, FakeCtx(FakeDoc(capped)))["state"] == [
+        f"State{index}" for index in range(32)
+    ]
+
+    coerced = rectangle_sketch(state=[7])
+    assert call_inspect(sketch_module, FakeCtx(FakeDoc(coerced)))["state"] == ["7"]
+
+
+def test_inspect_state_and_status_text_fall_back_when_unusable(sketch_module) -> None:
+    for unusable in (None, "Invalid", 7):
+        sketch = rectangle_sketch()
+        sketch.State = unusable
+        ctx = FakeCtx(FakeDoc(sketch))
+
+        assert call_inspect(sketch_module, ctx)["state"] == []
+
+    for unusable_status in (None, lambda: 7):
+        sketch = rectangle_sketch()
+        sketch.getStatusString = unusable_status
+        ctx = FakeCtx(FakeDoc(sketch))
+
+        assert call_inspect(sketch_module, ctx)["statusText"] is None
 
 
 def test_inspect_rejects_non_sketch_objects(sketch_module) -> None:
@@ -518,8 +608,11 @@ CONSTRAINT_OPS = [
     {"type": "Horizontal", "arguments": [2]},
     {"type": "Vertical", "arguments": [1]},
     {"type": "Vertical", "arguments": [3]},
-    {"type": "DistanceX", "arguments": [0, 1], "datum": "10 mm"},
-    {"type": "DistanceY", "arguments": [1, 2], "datum": "10 mm"},
+    # The recorded datum-ful horizontal/vertical forms are the four-token
+    # ones; probes["constraint.forms"] rejected a datum appended to the
+    # two-token form.
+    {"type": "DistanceX", "arguments": [0, 1, 3, 2], "datum": "10 mm"},
+    {"type": "DistanceY", "arguments": [1, 2, 2, 1], "datum": "10 mm"},
 ]
 
 
@@ -542,6 +635,25 @@ def test_rectangle_batch_reports_indexes_and_zero_dof(sketch_module) -> None:
     assert doc.open_count == 1
     assert doc.recompute_count == 1
     assert doc.transactions[-1] == ("commit",)
+
+
+def test_edit_response_carries_solver_status_state_and_status_text(
+    sketch_module,
+) -> None:
+    sketch = rectangle_sketch(
+        solver_status=-3,
+        # "Up-to-date" is a healthy state (test_object_validation.py); a
+        # failed state would roll the batch back before the response.
+        state=["Up-to-date"],
+        status_text="Not solved",
+    )
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    result = call_edit(sketch_module, ctx, addConstraints=CONSTRAINT_OPS)
+
+    assert result["solver"]["solverStatus"] == -3
+    assert result["state"] == ["Up-to-date"]
+    assert result["statusText"] == "Not solved"
 
 
 def test_add_geometry_supports_all_four_kinds(sketch_module) -> None:
@@ -609,7 +721,7 @@ def test_set_datums_run_after_additions_with_final_indexes(sketch_module) -> Non
     result = call_edit(
         sketch_module,
         ctx,
-        addConstraints=[{"type": "DistanceX", "arguments": [0, 1], "datum": "10 mm"}],
+        addConstraints=[{"type": "DistanceX", "arguments": [0, 1, 3, 2], "datum": "10 mm"}],
         setDatums=[{"index": 0, "datum": "12 mm"}],
     )
 
@@ -649,6 +761,52 @@ def test_bad_index_never_opens_the_transaction(sketch_module) -> None:
     assert doc.transactions == []
     assert doc.open_count == 0
     assert doc.recompute_count == 0
+
+
+def test_stale_expected_generation_is_rejected_before_any_mutation(
+    sketch_module,
+) -> None:
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc, generation=5)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            expected_generation=4,
+            deleteGeometry=[3],
+            addConstraints=[{"type": "Horizontal", "arguments": [0]}],
+        )
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert excinfo.value.message == "sketch changed since inspection; re-run inspect_sketch"
+    assert excinfo.value.details == {
+        "expectedGeneration": 4,
+        "actualGeneration": 5,
+        "nextAction": "inspect_sketch",
+    }
+    # The valid batch never reaches the native methods or the transaction.
+    assert sketch.ops == []
+    assert doc.transactions == []
+    assert doc.open_count == 0
+    assert doc.recompute_count == 0
+    rendered = tool_error_result(excinfo.value)
+    assert rendered["isError"] is True
+    assert rendered["structuredContent"]["error"]["code"] == VALIDATION_FAILED
+
+
+def test_matching_expected_generation_proceeds(sketch_module) -> None:
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc, generation=5)
+
+    result = call_edit(sketch_module, ctx, expected_generation=5, deleteGeometry=[3])
+
+    assert result["deletedGeometry"] == [3]
+    assert sketch.ops == [("delGeometry", 3)]
+    assert doc.open_count == 1
+    assert doc.transactions[-1] == ("commit",)
 
 
 def test_datum_edits_validate_against_the_final_constraint_state(
@@ -770,6 +928,386 @@ def test_unknown_constraint_type_is_rejected(sketch_module) -> None:
 
     assert excinfo.value.code == VALIDATION_FAILED
     assert "accepted Sketcher constraint types" in excinfo.value.message
+    # An unrecorded type and an unrecorded arity are the same refusal:
+    # one shape gate, not two unrelated messages.
+    assert excinfo.value.details == {
+        "reason": "unrecorded_constraint_shape",
+        "type": "Magic",
+        "argumentCount": 1,
+        "acceptedArgumentCounts": None,
+        "nextAction": "inspect_sketch",
+    }
+    assert sketch.ops == []
+
+
+def test_unrecorded_constraint_arities_are_rejected_before_any_native_call(
+    sketch_module,
+) -> None:
+    # probes["constraint.forms"]: DistanceX recorded 2 and 4 arguments,
+    # Coincident 4 and nothing else. An arity outside the recorded map is
+    # refused before planning reaches the native constructor, which the
+    # recorded crash shows can abort the process on unclassified input.
+    for unrecorded, accepted in (
+        ({"type": "DistanceX", "arguments": [0]}, [2, 4]),
+        ({"type": "Coincident", "arguments": [0, 2]}, [4]),
+    ):
+        sketch = rectangle_sketch()
+        doc = FakeDoc(sketch)
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            call_edit(sketch_module, ctx, addConstraints=[unrecorded])
+
+        assert excinfo.value.code == VALIDATION_FAILED
+        assert unrecorded["type"] in excinfo.value.message
+        assert str(len(unrecorded["arguments"])) in excinfo.value.message
+        assert excinfo.value.details == {
+            "reason": "unrecorded_constraint_shape",
+            "type": unrecorded["type"],
+            "argumentCount": len(unrecorded["arguments"]),
+            "acceptedArgumentCounts": accepted,
+            "nextAction": "inspect_sketch",
+        }
+        assert sketch.ops == []
+        assert doc.transactions == []
+        assert doc.open_count == 0
+        assert doc.recompute_count == 0
+
+
+def test_unrecorded_constraint_type_reports_no_accepted_argument_counts(
+    sketch_module,
+) -> None:
+    # Weight has no recorded form at any arity, so there is no accepted
+    # argument count to report: the detail is null, not an empty list.
+    sketch = FakeSketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addConstraints=[{"type": "Weight", "arguments": [5, 1]}],
+        )
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert excinfo.value.details == {
+        "reason": "unrecorded_constraint_shape",
+        "type": "Weight",
+        "argumentCount": 2,
+        "acceptedArgumentCounts": None,
+        "nextAction": "inspect_sketch",
+    }
+    assert sketch.ops == []
+    assert doc.transactions == []
+    assert doc.open_count == 0
+    error = tool_error_result(excinfo.value)["structuredContent"]["error"]
+    assert error["code"] == VALIDATION_FAILED
+    assert error["details"]["reason"] == "unrecorded_constraint_shape"
+
+
+def test_recorded_constraint_shapes_plan_and_execute(sketch_module) -> None:
+    # Recorded shapes reach addConstraint unchanged, with a datum
+    # (probes["constraint.forms"] DistanceX:[0, 1] carrying a quantity)
+    # and without one (DistanceX:[0, 1] and Horizontal:[0]).
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addConstraints=[
+            {"type": "DistanceX", "arguments": [0, 1, 3, 2], "datum": "40 mm"},
+            {"type": "DistanceX", "arguments": [2, 1]},
+            {"type": "Horizontal", "arguments": [0]},
+        ],
+    )
+
+    assert result["addedConstraints"] == [0, 1, 2]
+    assert [op[0] for op in sketch.ops] == ["addConstraint"] * 3
+    dimensional = sketch.Constraints[0]
+    assert dimensional.Type == "DistanceX"
+    assert dimensional.Arguments[:4] == (0, 1, 3, 2)
+    assert isinstance(dimensional.Arguments[-1], StubQuantity)
+    # The two-token arity was recorded datum-free, so it carries none.
+    assert sketch.Constraints[1].Arguments == (2, 1)
+    assert sketch.Constraints[2].Type == "Horizontal"
+    assert sketch.Constraints[2].Arguments == (0,)
+    assert doc.transactions[-1] == ("commit",)
+
+
+def test_datum_on_a_type_recorded_without_one_is_rejected(sketch_module) -> None:
+    # probes["constraint.forms"]: Horizontal:[0, 1] was rejected, so a
+    # datum (one more native argument) on Horizontal repeats a rejected
+    # arity and is refused before the constructor runs. Arity 1 was
+    # accepted only datum-free, hence datumForbidden rather than a
+    # missing-datum report.
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addConstraints=[{"type": "Horizontal", "arguments": [0], "datum": "10 mm"}],
+        )
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert "no recorded native form with a datum" in excinfo.value.message
+    assert excinfo.value.details == {
+        "reason": "unrecorded_constraint_shape",
+        "type": "Horizontal",
+        "argumentCount": 1,
+        "acceptedArgumentCounts": [1],
+        "datumForbidden": True,
+        "nextAction": "inspect_sketch",
+    }
+    assert sketch.ops == []
+    assert doc.transactions == []
+
+
+def test_angle_without_a_datum_is_refused(sketch_module) -> None:
+    # probes["constraint.forms"] probed Angle:[0, 1] and Angle:[0, 1, 0, 2]
+    # with a "deg" quantity only, so no datum-free Angle form is recorded.
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addConstraints=[{"type": "Angle", "arguments": [0, 1]}],
+        )
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert "Angle" in excinfo.value.message
+    assert excinfo.value.details == {
+        "reason": "unrecorded_constraint_shape",
+        "type": "Angle",
+        "argumentCount": 2,
+        "acceptedArgumentCounts": [2, 4],
+        "datumRequired": True,
+        "nextAction": "inspect_sketch",
+    }
+    assert sketch.ops == []
+    assert doc.transactions == []
+    assert doc.open_count == 0
+    assert doc.recompute_count == 0
+
+
+def test_angle_with_a_datum_plans_and_executes(sketch_module) -> None:
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addConstraints=[{"type": "Angle", "arguments": [0, 1], "datum": "45 deg"}],
+    )
+
+    assert result["addedConstraints"] == [0]
+    angle = sketch.Constraints[0]
+    assert angle.Type == "Angle"
+    assert angle.Arguments[:2] == (0, 1)
+    assert isinstance(angle.Arguments[-1], StubQuantity)
+    assert angle.Arguments[-1].text == "45 deg"
+    assert doc.transactions[-1] == ("commit",)
+
+
+def test_distance_without_a_datum_is_refused_and_with_one_executes(
+    sketch_module,
+) -> None:
+    # Distance recorded every accepted arity with a datum; its datum-free
+    # arities were not probed, so a datum-less entry is refused.
+    sketch = FakeSketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addConstraints=[{"type": "Distance", "arguments": [2, 0]}],
+        )
+
+    assert excinfo.value.details["datumRequired"] is True
+    assert excinfo.value.details["acceptedArgumentCounts"] == [2, 3, 4]
+    assert sketch.ops == []
+    assert doc.transactions == []
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addConstraints=[{"type": "Distance", "arguments": [2, 0], "datum": "10 mm"}],
+    )
+
+    assert result["addedConstraints"] == [0]
+    assert sketch.Constraints[0].Type == "Distance"
+
+
+def test_dateless_four_token_distance_forms_are_refused(sketch_module) -> None:
+    # examples/native_contract_probe.py:415-419 marks the datum-less
+    # four-token DistanceX/DistanceY forms as the D1 crash
+    # reproductions, and probes["constraint.forms"] accepted those
+    # arities only with a quantity. Both are refused with no native call.
+    for crash in (
+        {"type": "DistanceX", "arguments": [0, 1, 1, 2]},
+        {"type": "DistanceY", "arguments": [1, 1, 0, 2]},
+    ):
+        sketch = rectangle_sketch()
+        doc = FakeDoc(sketch)
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            call_edit(sketch_module, ctx, addConstraints=[crash])
+
+        assert excinfo.value.code == VALIDATION_FAILED
+        assert excinfo.value.details == {
+            "reason": "unrecorded_constraint_shape",
+            "type": crash["type"],
+            "argumentCount": 4,
+            "acceptedArgumentCounts": [2, 4],
+            "datumRequired": True,
+            "nextAction": "inspect_sketch",
+        }
+        assert sketch.ops == []
+        assert doc.transactions == []
+        assert doc.open_count == 0
+        assert doc.recompute_count == 0
+
+
+def test_distance_datum_policy_is_arity_aware(sketch_module) -> None:
+    # The two-token forms were accepted datum-free and rejected a datum
+    # (the sweep's DistanceX:[0, 1, 2] with a quantity); the four-token
+    # forms were accepted with a datum only. The policy therefore follows
+    # the arity, not the type.
+    sketch = FakeSketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    without = call_edit(
+        sketch_module,
+        ctx,
+        addConstraints=[{"type": "DistanceX", "arguments": [0, 1]}],
+    )
+    assert without["addedConstraints"] == [0]
+    assert sketch.Constraints[0].Arguments == (0, 1)
+
+    with_datum = call_edit(
+        sketch_module,
+        ctx,
+        addConstraints=[{"type": "DistanceX", "arguments": [0, 1, 1, 2], "datum": "10 mm"}],
+    )
+    assert with_datum["addedConstraints"] == [1]
+    assert sketch.Constraints[1].Arguments[:4] == (0, 1, 1, 2)
+    assert isinstance(sketch.Constraints[1].Arguments[-1], StubQuantity)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addConstraints=[{"type": "DistanceX", "arguments": [0, 1], "datum": "10 mm"}],
+        )
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert excinfo.value.details == {
+        "reason": "unrecorded_constraint_shape",
+        "type": "DistanceX",
+        "argumentCount": 2,
+        "acceptedArgumentCounts": [2, 4],
+        "datumForbidden": True,
+        "nextAction": "inspect_sketch",
+    }
+
+
+def test_radius_and_diameter_require_a_datum_at_arity_one(sketch_module) -> None:
+    # probes["constraint.forms"] recorded Radius:[2] and Diameter:[2]
+    # accepted with a quantity and Radius:[2, 0]/Diameter:[2, 0] accepted
+    # datum-free, so the single-token form has no recorded datum-free
+    # acceptance either.
+    sketch = FakeSketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    for kind in ("Radius", "Diameter"):
+        with pytest.raises(ToolError) as excinfo:
+            call_edit(
+                sketch_module,
+                ctx,
+                addConstraints=[{"type": kind, "arguments": [0]}],
+            )
+        assert excinfo.value.details["datumRequired"] is True
+        assert excinfo.value.details["acceptedArgumentCounts"] == [1, 2]
+    assert sketch.ops == []
+    assert doc.transactions == []
+
+
+def test_recorded_two_token_radius_value_form_plans(sketch_module) -> None:
+    # probes["constraint.forms"]: Radius:[2, 0] and Diameter:[2, 0] were
+    # accepted by the native constructor. The map keeps that arity, and
+    # the recorded sweep probed no slot roles for it.
+    sketch = FakeSketch()
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addConstraints=[
+            {"type": "Radius", "arguments": [2, 0]},
+            {"type": "Diameter", "arguments": [3, 0]},
+        ],
+    )
+
+    assert result["addedConstraints"] == [0, 1]
+    assert sketch.Constraints[0].Type == "Radius"
+    assert sketch.Constraints[0].Arguments == (2, 0)
+    assert sketch.Constraints[1].Type == "Diameter"
+
+
+def test_recorded_symmetric_axis_form_plans(sketch_module) -> None:
+    # probes["constraint.forms"]: Symmetric:[0, 1, 1, 2, -1] was accepted
+    # by the native constructor, so the fifth slot of the five-token form
+    # is an axis-or-geometry reference, not a geometry index alone.
+    sketch = FakeSketch()
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addConstraints=[{"type": "Symmetric", "arguments": [0, 1, 1, 2, -1]}],
+    )
+
+    assert result["addedConstraints"] == [0]
+    assert sketch.Constraints[0].Arguments == (0, 1, 1, 2, -1)
+
+
+def test_a_later_unrecorded_shape_refuses_the_whole_batch(sketch_module) -> None:
+    # One bad entry refuses the batch: the recorded first entry and the
+    # delete never reach a native method and the transaction never opens.
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            deleteGeometry=[3],
+            addConstraints=[
+                {"type": "Horizontal", "arguments": [0]},
+                {"type": "Coincident", "arguments": [1, 0]},
+            ],
+        )
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert excinfo.value.details["type"] == "Coincident"
+    assert sketch.ops == []
+    assert doc.transactions == []
+    assert doc.open_count == 0
+    assert doc.recompute_count == 0
 
 
 def test_point_position_outside_the_domain_is_rejected_before_the_native_call(
@@ -777,7 +1315,7 @@ def test_point_position_outside_the_domain_is_rejected_before_the_native_call(
 ) -> None:
     # probes["constraint.forms"]: the four-token DistanceX form with a
     # position value outside 0..2 is the recorded D1 crash input; the
-    # pattern table rejects it before Sketcher.Constraint runs.
+    # recorded slot roles reject it before Sketcher.Constraint runs.
     sketch = rectangle_sketch()
     ctx = FakeCtx(FakeDoc(sketch))
 
@@ -801,7 +1339,7 @@ def test_datum_edits_reach_the_native_call_as_quantities(sketch_module) -> None:
     result = call_edit(
         sketch_module,
         ctx,
-        addConstraints=[{"type": "DistanceX", "arguments": [0, 1], "datum": "10 mm"}],
+        addConstraints=[{"type": "DistanceX", "arguments": [0, 1, 3, 2], "datum": "10 mm"}],
         setDatums=[{"index": 0, "datum": "12 mm"}],
     )
 

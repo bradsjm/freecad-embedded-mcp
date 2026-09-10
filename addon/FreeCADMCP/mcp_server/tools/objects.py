@@ -11,6 +11,7 @@ before anything is assigned.
 
 from __future__ import annotations
 
+import difflib
 import math
 from typing import Any
 
@@ -318,15 +319,11 @@ _OBJECT_ROW = {
         "label",
         "typeId",
         "state",
-        "placement",
-        "globalPlacement",
-        "boundsCoordinateSystem",
         "bounds",
         "shape_valid",
         "solid_count",
         "tip",
         "links",
-        "properties",
     ],
     "properties": {
         "name": {"type": "string"},
@@ -374,14 +371,7 @@ _PROPERTY_METADATA = {
         "expression": {"type": ["string", "null"]},
     },
 }
-_OBJECT_ROW["required"].extend(
-    [
-        "propertyMetadata",
-        "propertyCount",
-        "nextPropertyOffset",
-        "truncatedProperties",
-    ]
-)
+
 _OBJECT_ROW["properties"].update(
     {
         "propertyMetadata": {
@@ -449,10 +439,11 @@ _CHANGE_GEOMETRY = {
 _CHANGE = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["properties", "geometry", "dependentCount"],
+    "required": ["properties", "geometry", "dependentCountBefore", "dependentCount"],
     "properties": {
         "properties": {"type": "array", "items": _CHANGE_PROPERTY},
         "geometry": _CHANGE_GEOMETRY,
+        "dependentCountBefore": {"type": "integer", "minimum": 0},
         "dependentCount": {"type": "integer", "minimum": 0},
     },
 }
@@ -506,7 +497,7 @@ _INSPECT_INPUT = {
             "type": "integer",
             "minimum": 1,
             "maximum": _MAX_LIMIT,
-            "default": 100,
+            "default": 32,
         },
         "property_offset": {"type": "integer", "minimum": 0, "default": 0},
         "property_limit": {
@@ -691,12 +682,13 @@ TOOL_DEFINITIONS = [
         "description": (
             "List a document's objects sorted by Name, or an explicit "
             "selection of 1-64 objects resolved by name. Compact rows carry "
-            "label, TypeId, state, placement, bounds, shape validity, solid "
-            "count, Body tip and link identities; full detail adds requested "
-            "properties with typed unavailable markers and expression "
-            "metadata. Pagination uses an opaque signed cursor bound to the "
-            "document generation, the selection and the filters; a stale "
-            "cursor is a restart-pagination error."
+            "identity (name, label, TypeId), state, bounds, shape validity, "
+            "solid count, Body tip and link identities; full detail adds "
+            "local and global placements, property pages and property "
+            "metadata with typed unavailable markers and expressions. "
+            "Pagination uses an opaque signed cursor bound to the document "
+            "generation, the selection and the filters; a stale cursor is a "
+            "restart-pagination error."
         ),
         "inputSchema": _INSPECT_INPUT,
         "outputSchema": _INSPECT_OUTPUT,
@@ -727,7 +719,7 @@ TOOL_DEFINITIONS = [
             "exposes it. Optional expected_bounds (six document-space mm "
             "coordinates plus bounds_tolerance) gate the commit. Returns "
             "before/after property values, geometry deltas, the dependent "
-            "count and post-recompute validation."
+            "counts before and after, and post-recompute validation."
         ),
         "inputSchema": _EDIT_INPUT,
         "outputSchema": _MUTATED_OUTPUT,
@@ -1048,6 +1040,16 @@ def _enumerations(obj: Any, prop: str) -> list[str] | None:
     return [str(entry) for entry in found] if found else None
 
 
+def _suggestions(value: str, candidates: list[str]) -> list[str]:
+    """Bounded did-you-mean list for a rejected name.
+
+    The caller supplies the meaningful candidate vocabulary; ``n`` and the
+    cutoff keep every error payload small and free of unrelated names.
+    """
+
+    return difflib.get_close_matches(value, candidates, n=5, cutoff=0.6)
+
+
 def _plan_create(ctx: Any, doc: Any, obj_type: str, properties: dict) -> tuple[Any, dict[str, Any]]:
     """Validate the requested type before the transaction opens.
 
@@ -1099,7 +1101,11 @@ def _plan_create(ctx: Any, doc: Any, obj_type: str, properties: dict) -> tuple[A
                 VALIDATION_FAILED,
                 f"type '{obj_type}' is not supported by document "
                 f"'{getattr(doc, 'Name', '<unknown>')}'",
-                {"supportedTypes": types[:_MAX_FILTER]},
+                {
+                    "supportedTypes": types[:_MAX_FILTER],
+                    "suggestions": _suggestions(obj_type, types),
+                    "nextAction": "inspect_objects",
+                },
             )
     return None, {}
 
@@ -1172,7 +1178,16 @@ def _check_view_property(obj: Any, view: Any, prop: str) -> None:
 def _check_document_property(obj: Any, prop: str) -> None:
     name = str(getattr(obj, "Name", "<unknown>"))
     if not _property_exists(obj, prop):
-        raise ToolError(VALIDATION_FAILED, f"object '{name}' has no property '{prop}'")
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"object '{name}' has no property '{prop}'",
+            {
+                "object": name,
+                "property": prop,
+                "suggestions": _suggestions(prop, _all_property_names(obj)),
+                "nextAction": "inspect_objects",
+            },
+        )
     if _is_read_only(obj, prop):
         raise ToolError(VALIDATION_FAILED, f"property '{prop}' of object '{name}' is read-only")
 
@@ -1538,22 +1553,24 @@ def _row(
         "label": _label(obj),
         "typeId": str(getattr(obj, "TypeId", "")),
         "state": _states(obj),
+    }
+    if detail == "full":
         # Local placement stays the editable property value; bounds and
         # globalPlacement describe document space.
-        "placement": _placement_row(obj),
-        "globalPlacement": global_placement,
-        "boundsCoordinateSystem": "document",
-        "bounds": global_bounds,
-        "shape_valid": _shape_valid(shape),
-        "solid_count": _solid_count(shape),
-        "tip": _tip_name(obj),
-        "links": _link_names(obj),
-        "properties": properties,
-        "propertyMetadata": property_metadata,
-        "propertyCount": property_count,
-        "nextPropertyOffset": next_property_offset,
-        "truncatedProperties": truncated,
-    }
+        row["placement"] = _placement_row(obj)
+        row["globalPlacement"] = global_placement
+        row["boundsCoordinateSystem"] = "document"
+    row["bounds"] = global_bounds
+    row["shape_valid"] = _shape_valid(shape)
+    row["solid_count"] = _solid_count(shape)
+    row["tip"] = _tip_name(obj)
+    row["links"] = _link_names(obj)
+    if detail == "full":
+        row["properties"] = properties
+        row["propertyMetadata"] = property_metadata
+        row["propertyCount"] = property_count
+        row["nextPropertyOffset"] = next_property_offset
+        row["truncatedProperties"] = truncated
     if _geometry_unavailable is not None:
         row["geometryUnavailable"] = _geometry_unavailable
     return row
@@ -1683,7 +1700,7 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
     if detail not in ("compact", "full"):
         raise ToolError(VALIDATION_FAILED, "detail must be 'compact' or 'full'")
     limit = args.get("limit")
-    limit = 100 if limit is None else int(limit)
+    limit = 32 if limit is None else int(limit)
     limit = max(1, min(_MAX_LIMIT, limit))
     props = [str(prop) for prop in (args.get("property_filter") or [])]
     property_offset = args.get("property_offset")
@@ -1816,6 +1833,7 @@ def _change_summary(
     volume_after: float | None,
     bounds_before: list[float] | None,
     bounds_after: list[float] | None,
+    dependents_before: int,
     dependents: int,
 ) -> dict:
     """Build the compact factual ``change`` summary for one target."""
@@ -1830,6 +1848,7 @@ def _change_summary(
             "boundsBefore": bounds_before,
             "boundsAfter": bounds_after,
         },
+        "dependentCountBefore": dependents_before,
         "dependentCount": dependents,
     }
 
@@ -1848,6 +1867,7 @@ def create_object(ctx: Any, args: dict) -> dict:
     factory, factory_kwargs = _plan_create(ctx, doc, obj_type, properties)
 
     created: list[Any] = []
+    outcome: dict = {}
     with mutation(
         ctx,
         doc,
@@ -1856,6 +1876,7 @@ def create_object(ctx: Any, args: dict) -> dict:
         expected_solids=expected_solids,
         expected_bounds=expected_bounds,
         bounds_tolerance=float(bounds_tolerance),
+        outcome=outcome,
     ) as applied:
         if factory is not None:
             created.append(_call_factory(factory, doc, requested_name, factory_kwargs))
@@ -1865,7 +1886,9 @@ def create_object(ctx: Any, args: dict) -> dict:
             _apply_properties(ctx, doc, created[0], properties)
 
     obj = created[0]
-    report = geometry_report(obj, expected_solids)
+    # The gate already reported this new object after its recompute; reusing
+    # that report keeps the summary factual without a second shape probe.
+    report = outcome["reports"][str(obj.Name)]
     after_rows = _snapshot_requested(obj, properties)
     return {
         "document": str(getattr(doc, "Name", "")),
@@ -1884,8 +1907,10 @@ def create_object(ctx: Any, args: dict) -> dict:
             volume_before=None,
             volume_after=report["volume"],
             bounds_before=None,
-            bounds_after=document_bounds(obj),
-            dependents=dependent_count([obj]),
+            bounds_after=report["bounds"],
+            # A created object had no pre-mutation dependent closure.
+            dependents_before=0,
+            dependents=outcome["dependentCountAfter"],
         ),
     }
 
@@ -1908,6 +1933,7 @@ def edit_object(ctx: Any, args: dict) -> dict:
     bounds_before = document_bounds(obj)
     dependents = dependent_count([obj])
 
+    outcome: dict = {}
     with mutation(
         ctx,
         doc,
@@ -1916,11 +1942,14 @@ def edit_object(ctx: Any, args: dict) -> dict:
         expected_solids=expected_solids,
         expected_bounds=expected_bounds,
         bounds_tolerance=float(bounds_tolerance),
+        outcome=outcome,
     ) as applied:
         _apply_prepared(obj, prepared)
 
     after_rows = _snapshot_requested(obj, properties)
-    report = geometry_report(obj, expected_solids)
+    # The gate's post-recompute report for this target replaces a second
+    # probe of the same shape.
+    report = outcome["reports"][str(obj.Name)]
     return {
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
@@ -1941,8 +1970,9 @@ def edit_object(ctx: Any, args: dict) -> dict:
             volume_before=before_report["volume"],
             volume_after=report["volume"],
             bounds_before=bounds_before,
-            bounds_after=document_bounds(obj),
-            dependents=dependents,
+            bounds_after=report["bounds"],
+            dependents_before=dependents,
+            dependents=outcome["dependentCountAfter"],
         ),
     }
 
@@ -2035,12 +2065,14 @@ def edit_objects(ctx: Any, args: dict) -> dict:
         before_bounds[obj.Name] = document_bounds(obj)
     dependent_counts = {obj.Name: dependent_count([obj]) for obj in targets}
 
+    outcome: dict = {}
     with mutation(
         ctx,
         doc,
         "edit_objects",
         targets,
         expectations=expectations,
+        outcome=outcome,
     ) as applied:
         for obj in targets:
             _apply_prepared(obj, prepared[obj.Name])
@@ -2048,7 +2080,8 @@ def edit_objects(ctx: Any, args: dict) -> dict:
     changes = []
     for obj, edit in zip(targets, edits, strict=True):
         after_rows = _snapshot_requested(obj, edit["properties"])
-        report = geometry_report(obj)
+        # Per-target post-recompute report from the gate's single pass.
+        report = outcome["reports"][str(obj.Name)]
         changes.append(
             _change_summary(
                 [
@@ -2062,8 +2095,9 @@ def edit_objects(ctx: Any, args: dict) -> dict:
                 volume_before=before_reports[obj.Name]["volume"],
                 volume_after=report["volume"],
                 bounds_before=before_bounds[obj.Name],
-                bounds_after=document_bounds(obj),
-                dependents=dependent_counts[obj.Name],
+                bounds_after=report["bounds"],
+                dependents_before=dependent_counts[obj.Name],
+                dependents=outcome["dependentCountAfter"],
             )
         )
     return {

@@ -627,6 +627,50 @@ def test_fuzzy_tolerance_rejected_when_not_a_property() -> None:
     assert doc.calls == []
 
 
+def test_unknown_property_suggests_close_names_and_next_action() -> None:
+    doc = FakeDoc(objects=[box()])
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Box",
+                "properties": {"Lenght": 1.0},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.message == "object 'Box' has no property 'Lenght'"
+    assert error.details["object"] == "Box"
+    assert error.details["property"] == "Lenght"
+    assert "Length" in error.details["suggestions"]
+    assert len(error.details["suggestions"]) <= 5
+    assert error.details["nextAction"] == "inspect_objects"
+    assert doc.calls == []
+
+
+def test_unknown_property_without_close_match_keeps_next_action() -> None:
+    doc = FakeDoc(objects=[box()])
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Box",
+                "properties": {"Zzzzzzzz": 1.0},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["suggestions"] == []
+    assert error.details["nextAction"] == "inspect_objects"
+    assert doc.calls == []
+
+
 # ---------------------------------------------------------------------------
 # Recompute validation and rollback.
 # ---------------------------------------------------------------------------
@@ -1022,6 +1066,25 @@ def test_create_rejects_unsupported_type_without_transaction() -> None:
     assert doc.recompute_count == 0
 
 
+def test_create_unsupported_type_suggests_close_supported_types() -> None:
+    doc = FakeDoc()
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_object(ctx, {"document": doc.Name, "type": "Part::Boxx", "name": "X"})
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["supportedTypes"] == [
+        "Part::Box",
+        "Part::Feature",
+        "App::DocumentObjectGroup",
+    ]
+    assert error.details["suggestions"] == ["Part::Box"]
+    assert error.details["nextAction"] == "inspect_objects"
+    assert doc.calls == []
+    assert doc.recompute_count == 0
+
+
 def test_create_shapeless_group_is_valid() -> None:
     doc = FakeDoc()
     ctx = FakeCtx(doc)
@@ -1199,22 +1262,52 @@ def test_inspect_returns_sorted_compact_rows() -> None:
         "label",
         "typeId",
         "state",
-        "placement",
-        "globalPlacement",
-        "boundsCoordinateSystem",
         "bounds",
         "shape_valid",
         "solid_count",
         "tip",
         "links",
+    }
+    validate_schema(result, objects_mod.TOOL_DEFINITIONS[0]["outputSchema"])
+
+
+def test_full_detail_rows_add_placement_and_property_pages() -> None:
+    doc, ctx = _three_box_doc()
+
+    result = objects_mod.inspect_objects(ctx, {"document": doc.Name, "detail": "full", "limit": 1})
+
+    row = result["objects"][0]
+    compact = {"name", "label", "typeId", "state", "bounds", "shape_valid", "solid_count"}
+    assert set(row) - compact == {
+        "tip",
+        "links",
+        "placement",
+        "globalPlacement",
+        "boundsCoordinateSystem",
         "properties",
         "propertyMetadata",
         "propertyCount",
         "nextPropertyOffset",
         "truncatedProperties",
     }
-    assert row["properties"] == {}
+    assert row["boundsCoordinateSystem"] == "document"
+    assert row["properties"]["Length"] == 0
     validate_schema(result, objects_mod.TOOL_DEFINITIONS[0]["outputSchema"])
+
+
+def test_inspect_default_page_limit_is_32() -> None:
+    doc = FakeDoc(objects=[box(f"Obj{index:03d}") for index in range(33)])
+    ctx = FakeCtx(doc)
+
+    first = objects_mod.inspect_objects(ctx, {"document": doc.Name})
+
+    assert first["total"] == 33
+    assert first["count"] == 32
+    assert first["nextCursor"] is not None
+
+    second = objects_mod.inspect_objects(ctx, {"document": doc.Name, "cursor": first["nextCursor"]})
+    assert [row["name"] for row in second["objects"]] == ["Obj032"]
+    assert second["nextCursor"] is None
 
 
 def test_inspect_pagination_walks_all_objects() -> None:
@@ -1608,7 +1701,7 @@ def test_placement_rows_report_angle_in_degrees() -> None:
     )
     doc = FakeDoc(objects=[obj])
     result = objects_mod.HANDLERS["inspect_objects"](
-        FakeCtx(doc), {"document": doc.Name, "detail": "compact"}
+        FakeCtx(doc), {"document": doc.Name, "detail": "full"}
     )
     row = result["objects"][0]
     assert abs(row["placement"]["angle_deg"] - 30.0) < 1e-9
@@ -1769,7 +1862,7 @@ def test_link_subelement_pairs_serialize_as_descriptive_references() -> None:
 def test_edit_object_reports_property_geometry_and_dependent_deltas() -> None:
     dependent = FakeObj("Dep", shape=None)
     obj = box("Box", values={"Length": 4.0}, in_list=(dependent,))
-    doc = FakeDoc(objects=[obj])
+    doc = FakeDoc(objects=[obj, dependent])
     ctx = FakeCtx(doc)
 
     result = objects_mod.edit_object(
@@ -1786,6 +1879,7 @@ def test_edit_object_reports_property_geometry_and_dependent_deltas() -> None:
     assert geometry["volumeAfter"] == 1000.0
     assert geometry["boundsBefore"] == [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]
     assert geometry["boundsAfter"] == [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]
+    assert change["dependentCountBefore"] == 1
     assert change["dependentCount"] == 1
 
 
@@ -1816,7 +1910,133 @@ def test_create_object_change_uses_null_before_fields() -> None:
     assert change["geometry"]["solidCountBefore"] is None
     assert change["geometry"]["volumeBefore"] is None
     assert change["geometry"]["boundsBefore"] is None
+    assert change["dependentCountBefore"] == 0
     assert change["dependentCount"] == 0
+
+
+class _CountingShape(FakeShape):
+    """FakeShape whose ``check()`` counts every probe."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.check_calls = 0
+
+    def check(self) -> list[str]:
+        self.check_calls += 1
+        return super().check()
+
+
+def test_create_reuses_the_gate_report_without_reprobing_geometry(monkeypatch) -> None:
+    """The handler must reuse the gate's post-recompute report.
+
+    Re-probing would run a second ``check()`` on the new shape and a second
+    document-space bounds read; both must come from the gate's single pass.
+    """
+
+    shape = _CountingShape()
+    doc = FakeDoc()
+
+    def add_box(type_id: str, name: str) -> FakeObj:
+        created = box(name, shape=shape)
+        doc.Objects.append(created)
+        doc._by_name[created.Name] = created
+        return created
+
+    doc.addObject = add_box  # type: ignore[method-assign]
+    ctx = FakeCtx(doc)
+
+    bounds_probes: list[str] = []
+    real_document_bounds = objects_mod.document_bounds
+
+    def counting_bounds(obj: Any) -> list[float] | None:
+        bounds_probes.append(str(obj.Name))
+        return real_document_bounds(obj)
+
+    monkeypatch.setattr(objects_mod, "document_bounds", counting_bounds)
+
+    result = objects_mod.create_object(
+        ctx, {"document": doc.Name, "type": "Part::Box", "name": "Created"}
+    )
+
+    assert shape.check_calls == 1  # gate only, no handler re-probe
+    assert bounds_probes == []
+    assert result["change"]["geometry"]["boundsAfter"] == [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]
+
+
+def test_edit_object_probes_geometry_only_before_the_transaction(monkeypatch) -> None:
+    """The handler's own probes are the pre-mutation snapshots, nothing more.
+
+    ``object_validation`` resolves ``geometry_report``/``document_bounds``
+    from its own module globals, so patching them here records exactly the
+    handler-level calls. Both must happen before the transaction opens.
+    """
+
+    obj = box("Box", shape=_CountingShape(), values={"Length": 4.0})
+    doc = FakeDoc(objects=[obj])
+    ctx = FakeCtx(doc)
+
+    # (name, number of document calls already made when the probe ran).
+    probes: list[tuple[str, str, int]] = []
+    real_geometry_report = objects_mod.geometry_report
+    real_document_bounds = objects_mod.document_bounds
+
+    def recording_report(target: Any, *args: Any, **kwargs: Any) -> dict:
+        probes.append(("report", str(target.Name), len(doc.calls)))
+        return real_geometry_report(target, *args, **kwargs)
+
+    def recording_bounds(target: Any) -> list[float] | None:
+        probes.append(("bounds", str(target.Name), len(doc.calls)))
+        return real_document_bounds(target)
+
+    monkeypatch.setattr(objects_mod, "geometry_report", recording_report)
+    monkeypatch.setattr(objects_mod, "document_bounds", recording_bounds)
+
+    result = objects_mod.edit_object(
+        ctx, {"document": doc.Name, "object": "Box", "properties": {"Length": 40}}
+    )
+
+    # Exactly the two pre-mutation snapshots, both before openTransaction.
+    assert probes == [("report", "Box", 0), ("bounds", "Box", 0)]
+    assert obj.Shape.check_calls == 2  # pre-mutation snapshot + gate report
+    assert [call[0] for call in doc.calls] == ["open", "commit"]
+    assert result["change"]["geometry"]["boundsAfter"] == [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]
+
+
+class _RewireBox(FakeObj):
+    """A link-list property whose assignment rewires ``InList``."""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        super().__setattr__(name, value)
+        if name == "Deps":
+            object.__setattr__(self, "InList", list(value or ()))
+
+
+def test_link_rewiring_edit_reports_changed_dependent_closure() -> None:
+    added = FakeObj("Added", shape=None)
+    source = _RewireBox(
+        "Source",
+        properties=("Length", "Deps"),
+        prop_types={"Length": "App::PropertyLength", "Deps": "App::PropertyLinkList"},
+        shape=None,
+        values={"Length": 1.0, "Deps": []},
+    )
+    doc = FakeDoc(objects=[source, added])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.edit_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "Source",
+            "properties": {"Deps": [{"object": "Added"}]},
+        },
+    )
+
+    change = result["change"]
+    # The edit points the link at a new target, so the closure grows.
+    assert change["dependentCountBefore"] == 0
+    assert change["dependentCount"] == 1
+    assert source.InList == [added]
 
 
 def test_matching_expected_bounds_commit_the_edit() -> None:

@@ -166,6 +166,8 @@ def _definition() -> dict[str, Any]:
                 }
             },
             "properties": {
+                "document": {"type": "string", "minLength": 1},
+                "generation": {"type": "integer", "minimum": 0},
                 "object": {"type": "string", "minLength": 1},
                 "added": {"type": "array", "items": {"type": "string"}},
                 "renamed": {
@@ -177,13 +179,17 @@ def _definition() -> dict[str, Any]:
                     "type": "array",
                     "items": {"type": "string"},
                 },
+                "applied": {"type": "array", "items": {"type": "string"}},
             },
             "required": [
+                "document",
+                "generation",
                 "object",
                 "added",
                 "renamed",
                 "expressions",
                 "clearedExpressions",
+                "applied",
             ],
             "additionalProperties": False,
         },
@@ -455,25 +461,32 @@ def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
 
     plan = _validate_all(obj, arguments)
 
-    with mutation(ctx, doc, "edit_parameters", [obj]):
+    with mutation(ctx, doc, "edit_parameters", [obj]) as applied:
         for entry in plan["added_entries"]:
             obj.addProperty(entry["type"], entry["name"], _GROUP, _DOC)
+            applied.append(f"add:{entry['name']}")
             value = plan["added_values"].get(entry["name"])
             if value is not None:
                 setattr(obj, entry["name"], value)
         for old, new in plan["renames"]:
             obj.renameProperty(old, new)
+            applied.append(f"rename:{old}->{new}")
         for prop in plan["clears"]:
             obj.setExpression(prop, None)
+            applied.append(f"clear:{prop}")
         for prop, expression in plan["expressions"]:
             obj.setExpression(prop, expression)
+            applied.append(f"expression:{prop}")
 
     return {
+        "document": str(doc.Name),
+        "generation": int(ctx.document_generation(doc)),
         "object": str(obj.Name),
         "added": plan["added_names"],
         "renamed": [{"from": old, "to": new} for old, new in plan["renames"]],
         "expressions": [prop for prop, _expression in plan["expressions"]],
         "clearedExpressions": list(plan["clears"]),
+        "applied": list(applied),
     }
 
 

@@ -104,6 +104,7 @@ class FakeDoc:
         self.Name = "Doc"
         self.HasPendingTransaction = False
         self.UndoMode = 0
+        self.generation = 1
         self.transactions: list[tuple] = []
         self.recompute_count = 0
         self._snapshot = None
@@ -148,6 +149,9 @@ class FakeCtx:
         if name != self.obj.Name:
             raise ToolError("OBJECT_NOT_FOUND", f"object '{name}' not found", None)
         return self.obj
+
+    def document_generation(self, doc):
+        return int(doc.generation)
 
     def check_document_idle(self, doc):
         self.idle.append(doc.Name)
@@ -470,11 +474,14 @@ def test_successful_flow_applies_add_rename_expression_in_order():
     assert ctx.doc.transactions[-1] == ("commit",)
     assert ctx.idle == ["Doc"]
     assert result == {
+        "document": "Doc",
+        "generation": 1,
         "object": "Box",
         "added": ["Depth"],
         "renamed": [{"from": "Old", "to": "New"}],
         "expressions": ["New"],
         "clearedExpressions": [],
+        "applied": ["add:Depth", "rename:Old->New", "expression:New", "Box"],
     }
 
 
@@ -634,6 +641,61 @@ def test_cleared_expressions_reported_in_request_order():
     )
 
     assert result["clearedExpressions"] == ["C", "A"]
+
+
+# ---------------------------------------------------------------------------
+# Response parity: document, generation and applied operation labels.
+# ---------------------------------------------------------------------------
+
+
+def test_response_reports_document_generation_and_applied_labels_in_order():
+    obj = FakeObj(properties=["Old", "Other"])
+    obj.expressions["Old"] = "1"
+    ctx = FakeCtx(obj)
+
+    result = call(
+        ctx,
+        {
+            **base(),
+            "add": [{"name": "Depth", "type": "App::PropertyLength", "value": 10}],
+            "rename": {"Old": "New"},
+            "clear_expressions": ["New"],
+            "expressions": {"Other": "2"},
+        },
+    )
+
+    assert result["document"] == "Doc"
+    assert result["generation"] == 1
+    # Labels follow the execution order the object records (adds, renames,
+    # clears, sets); the gate then appends the names it mutated.
+    assert result["applied"] == [
+        "add:Depth",
+        "rename:Old->New",
+        "clear:New",
+        "expression:Other",
+        "Box",
+    ]
+    assert obj.ops == [
+        ("add", "Depth", "App::PropertyLength", parameters._GROUP),
+        ("rename", "Old", "New"),
+        ("expression", "New", None),
+        ("expression", "Other", "2"),
+    ]
+
+
+def test_response_validates_against_the_output_schema():
+    from mcp_server.protocol import validate_schema
+
+    obj = FakeObj(properties=["Old"])
+    ctx = FakeCtx(obj)
+
+    result = call(
+        ctx,
+        {**base(), "rename": {"Old": "New"}, "expressions": {"New": "2"}},
+    )
+
+    validate_schema(result, parameters.TOOL_DEFINITIONS[0]["outputSchema"])
+    assert result["applied"] == ["rename:Old->New", "expression:New", "Box"]
 
 
 # ---------------------------------------------------------------------------

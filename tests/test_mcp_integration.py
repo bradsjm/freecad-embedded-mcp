@@ -5,7 +5,7 @@ shared ``test_server`` harness); the wire is REAL: a bound
 ``McpHTTPServer`` on an OS-assigned port driven through ``http.client``.
 Covers the plan's acceptance chain — legacy initialize on every revision
 with a session header, the initialized notification, tools/list with
-exactly 23 tools, discover_capabilities and a harmless run_script as
+exactly 24 tools, discover_capabilities and a harmless run_script as
 legacy-shaped final results — plus the guarantee that modern requests
 still validate unchanged and never acquire a legacy session implicitly.
 """
@@ -161,7 +161,7 @@ def test_legacy_session_flow_delivers_final_results_over_sse(wired_server):
     assert initialized.status == 202
     assert initialized.read() == b""
 
-    # tools/list: exactly 23 tools, no modern envelope metadata.
+    # tools/list: exactly 24 tools, no modern envelope metadata.
     response = _post(
         http,
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
@@ -170,7 +170,7 @@ def test_legacy_session_flow_delivers_final_results_over_sse(wired_server):
     status, body, _headers = _read_json(response)
     assert status == 200
     result = body["result"]
-    assert len(result["tools"]) == 23
+    assert len(result["tools"]) == 24
     assert [tool["name"] for tool in result["tools"]] == list(ts.server_module.PLAN_TOOL_ORDER)
     assert "resultType" not in result
     assert "ttlMs" not in result
@@ -255,7 +255,7 @@ def test_modern_requests_validate_unchanged_and_skip_legacy_sessions(
     response = _post(http, message, headers)
     status, body, response_headers = _read_json(response)
     assert status == 200
-    assert len(body["result"]["tools"]) == 23
+    assert len(body["result"]["tools"]) == 24
     assert body["result"]["resultType"] == "complete"
     # A modern request never acquires a legacy session implicitly.
     assert response_headers.get("mcp-session-id") is None

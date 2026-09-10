@@ -9,6 +9,11 @@ descending index order, then additions, then datum edits. Every referenced
 index is prevalidated against a simulated index state before the
 transaction opens, so a bad index never opens one.
 
+Both responses also carry the native object state names, the status
+string, and the solve() status code. An edit batch may carry
+``expected_generation``; a mismatch is refused before planning, so a
+stale batch never opens a transaction either.
+
 Inspection and edit behavior mirror the native 1.1.3 contract recorded
 in tests/native_contract.json: the solver summary reads the DoF and
 FullyConstrained attributes, construction state comes from
@@ -29,39 +34,94 @@ from ..object_validation import mutation
 from ..protocol import VALIDATION_FAILED, ToolError, check_schema
 
 _MAX_SKETCH_ROWS = 4096
+_MAX_STATE_NAMES = 32
 _MAX_OPERATIONS = 64
 _MAX_CONSTRAINT_ARGUMENTS = 6
 
 _SKETCH_TYPE_ID = "Sketcher::SketchObject"
 
-#: Verified Sketcher constraint forms: type -> (argument slot patterns,
-#: datum required). Slot roles: G = geometry index (>= 0), A = geometry
-#: index or axis reference (>= -2), P = point position (0, 1, or 2).
-#: Every retained pattern was accepted by the native 1.1.3 constructor
-#: in the recorded sweep (tests/native_contract.json,
-#: probes["constraint.forms"]). Collinear, InternalAlignment, SnellsLaw,
-#: AngleViaPoint and Weight have no sweep-accepted form and are rejected
-#: before the native constructor runs, which the recorded D1 crash
-#: report shows can abort the process on unclassified input.
-_CONSTRAINT_FORMS: dict[str, tuple[tuple[tuple[str, ...], ...], bool]] = {
-    "Coincident": ((("G", "P", "A", "P"),), False),
-    "Horizontal": ((("G",),), False),
-    "Vertical": ((("G",),), False),
-    "Block": ((("G",),), False),
-    "PointOnObject": ((("G", "P", "G"),), False),
-    "Parallel": ((("G", "G"),), False),
-    "Perpendicular": ((("G", "G"),), False),
-    "Equal": ((("G", "G"),), False),
-    "Tangent": ((("G", "G"),), False),
-    "Symmetric": ((("G", "P", "G", "P", "G"), ("G", "P", "G", "P", "G", "P")), False),
-    # The sweep rejected the documented one-edge [geo, posA, posB] datum
-    # form; the accepted one-edge form is [geo, pos] with a datum.
-    "DistanceX": ((("G", "P", "G", "P"), ("G", "P")), True),
-    "DistanceY": ((("G", "P", "G", "P"), ("G", "P")), True),
-    "Distance": ((("G", "P"), ("G", "P", "P"), ("G", "P", "G", "P")), True),
-    "Radius": ((("G",),), True),
-    "Diameter": ((("G",),), True),
-    "Angle": ((("G", "G"), ("G", "G", "G", "P")), True),
+#: Constraint shapes with a recorded native acceptance: type -> the
+#: len(arguments) values the native 1.1.3 constructor accepted in the
+#: sweep recorded at tests/native_contract.json,
+#: probes["constraint.forms"]. Collinear, InternalAlignment, SnellsLaw,
+#: AngleViaPoint and Weight have no recorded form at any arity. A type
+#: or arity outside this map is refused before the native constructor
+#: runs, because an unrecorded Sketcher.Constraint(...) call raises
+#: inside FreeCAD and terminates the process (crash report
+#: freecad-2026-09-10-090417.ips: ConstraintPy::PyInit ->
+#: Py::TypeError::throwFunc -> std::terminate -> abort).
+_CONSTRAINT_FORM_ARITIES: dict[str, frozenset[int]] = {
+    "Coincident": frozenset({4}),
+    "Horizontal": frozenset({1}),
+    "Vertical": frozenset({1}),
+    "Block": frozenset({1}),
+    "PointOnObject": frozenset({3}),
+    "Parallel": frozenset({2}),
+    "Perpendicular": frozenset({2}),
+    "Equal": frozenset({2}),
+    "Tangent": frozenset({2}),
+    "Symmetric": frozenset({5, 6}),
+    # The sweep rejected the documented one-edge [geo, posA, posB] form;
+    # the accepted one-edge forms are [geo, pos] and [geo, pos] with a
+    # datum.
+    "DistanceX": frozenset({2, 4}),
+    "DistanceY": frozenset({2, 4}),
+    "Distance": frozenset({2, 3, 4}),
+    "Radius": frozenset({1, 2}),
+    "Diameter": frozenset({1, 2}),
+    "Angle": frozenset({2, 4}),
+}
+
+#: Recorded argument slot roles for the arities whose slots were probed
+#: in the same sweep: type -> {len(arguments): pattern}. Roles: G =
+#: geometry index (>= 0), A = geometry index or axis reference (>= -2),
+#: P = point position (0, 1, or 2). An arity accepted by
+#: _CONSTRAINT_FORM_ARITIES with no pattern here was recorded without
+#: slot roles (the two-token Radius/Diameter value form) and carries no
+#: slot check.
+_CONSTRAINT_ARGUMENT_ROLES: dict[str, dict[int, tuple[str, ...]]] = {
+    "Coincident": {4: ("G", "P", "A", "P")},
+    "Horizontal": {1: ("G",)},
+    "Vertical": {1: ("G",)},
+    "Block": {1: ("G",)},
+    "PointOnObject": {3: ("G", "P", "G")},
+    "Parallel": {2: ("G", "G")},
+    "Perpendicular": {2: ("G", "G")},
+    "Equal": {2: ("G", "G")},
+    "Tangent": {2: ("G", "G")},
+    # The sweep accepted Symmetric:[0, 1, 1, 2, -1], so the fifth slot of
+    # the five-token form is an axis-or-geometry reference like the
+    # second slot of Coincident.
+    "Symmetric": {5: ("G", "P", "G", "P", "A"), 6: ("G", "P", "G", "P", "G", "P")},
+    "DistanceX": {4: ("G", "P", "G", "P"), 2: ("G", "P")},
+    "DistanceY": {4: ("G", "P", "G", "P"), 2: ("G", "P")},
+    "Distance": {2: ("G", "P"), 3: ("G", "P", "P"), 4: ("G", "P", "G", "P")},
+    "Radius": {1: ("G",)},
+    "Diameter": {1: ("G",)},
+    "Angle": {2: ("G", "G"), 4: ("G", "G", "G", "P")},
+}
+
+#: Recorded datum policy: type -> the len(arguments) values whose native
+#: acceptances all carried a trailing datum quantity. Each pair is read
+#: off the datum the sweep actually sent, which the recorded keys do not
+#: encode: Angle:[0, 1] and Angle:[0, 1, 0, 2] were probed with "deg",
+#: Distance:[2, 0], [0, 1, 2] and [0, 1, 1, 2], DistanceX:[0, 1, 1, 2],
+#: DistanceY:[1, 1, 0, 2], Radius:[2] and Diameter:[2] with "mm". Every
+#: arity of every type is proven in exactly one mode, so the remaining
+#: recorded arities are datum-forbidden: a datum there would repeat a
+#: probed-with-a-datum arity that the sweep rejected (Radius:[2, 0] with
+#: a quantity, Horizontal:[0, 1]). The split matters most for DistanceX
+#: and DistanceY, whose datum-free four-token forms are the recorded D1
+#: abort reproductions (examples/native_contract_probe.py
+#: KNOWN_BAD_FORMS), while their two-token forms were accepted only
+#: datum-free.
+_CONSTRAINT_DATUM_REQUIRED: dict[str, frozenset[int]] = {
+    "Angle": frozenset({2, 4}),
+    "Distance": frozenset({2, 3, 4}),
+    "DistanceX": frozenset({4}),
+    "DistanceY": frozenset({4}),
+    "Radius": frozenset({1}),
+    "Diameter": frozenset({1}),
 }
 
 _DATUM_PATTERN = re.compile(r"^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?(\s*\S+)?$")
@@ -137,7 +197,7 @@ _CONSTRAINT_ADD_SCHEMA = {
     "additionalProperties": False,
     "required": ["type", "arguments"],
     "properties": {
-        "type": {"type": "string", "enum": list(_CONSTRAINT_FORMS)},
+        "type": {"type": "string", "enum": list(_CONSTRAINT_FORM_ARITIES)},
         "arguments": _INTEGER_ARGUMENTS,
         "datum": {
             "type": "string",
@@ -157,10 +217,21 @@ _DATUM_SET_SCHEMA = {
     },
 }
 
+_STATE_NAMES = {
+    "type": "array",
+    "items": {"type": "string"},
+    "maxItems": _MAX_STATE_NAMES,
+}
+
 _SOLVER_SUMMARY = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["fullyConstrained", "degreesOfFreedom", "solverMessages"],
+    "required": [
+        "fullyConstrained",
+        "degreesOfFreedom",
+        "solverMessages",
+        "solverStatus",
+    ],
     "properties": {
         "fullyConstrained": {"type": ["boolean", "null"]},
         "degreesOfFreedom": {"type": ["integer", "null"], "minimum": 0},
@@ -169,6 +240,7 @@ _SOLVER_SUMMARY = {
             "items": {"type": "string"},
             "maxItems": 16,
         },
+        "solverStatus": {"type": ["integer", "null"]},
     },
 }
 
@@ -316,6 +388,8 @@ _INSPECT_SKETCH_OUTPUT = {
         "generation",
         "object",
         "solver",
+        "state",
+        "statusText",
         "geometry",
         "constraints",
         "expressionBindings",
@@ -325,6 +399,8 @@ _INSPECT_SKETCH_OUTPUT = {
         "generation": {"type": "integer", "minimum": 0},
         "object": {"type": "string"},
         "solver": _SOLVER_SUMMARY,
+        "state": _STATE_NAMES,
+        "statusText": {"type": ["string", "null"]},
         "geometry": {
             "type": "array",
             "items": _SKETCH_GEOMETRY_ROW,
@@ -358,6 +434,13 @@ _EDIT_SKETCH_INPUT = {
     "properties": {
         "document": {"type": "string", "minLength": 1},
         "sketch": _SKETCH_FIELD,
+        "expected_generation": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Optional guard: refuse the batch when the document generation no longer matches."
+            ),
+        },
         "addGeometry": {
             "type": "array",
             "items": _GEOMETRY_ADD_SCHEMA,
@@ -394,6 +477,8 @@ _EDIT_SKETCH_OUTPUT = {
         "generation",
         "object",
         "solver",
+        "state",
+        "statusText",
         "addedGeometry",
         "addedConstraints",
         "deletedGeometry",
@@ -405,6 +490,8 @@ _EDIT_SKETCH_OUTPUT = {
         "generation": {"type": "integer", "minimum": 0},
         "object": {"type": "string"},
         "solver": _SOLVER_SUMMARY,
+        "state": _STATE_NAMES,
+        "statusText": {"type": ["string", "null"]},
         "addedGeometry": {
             "type": "array",
             "items": {"type": "integer", "minimum": 0},
@@ -469,7 +556,10 @@ TOOL_DEFINITIONS = [
             "datum edits, all inside one mutation that rolls back the whole "
             "batch on failure. Datums are unit strings ('10 mm', '45 deg'); "
             "angle units apply to Angle constraints. The result reports the "
-            "actual native indexes and the post-edit solver summary."
+            "actual native indexes and the post-edit solver summary. "
+            "Constraint shapes without a recorded native acceptance are "
+            "refused before execution because malformed native constructor "
+            "calls can terminate FreeCAD."
         ),
         "inputSchema": _EDIT_SKETCH_INPUT,
         "outputSchema": _EDIT_SKETCH_OUTPUT,
@@ -642,13 +732,36 @@ def _expression_bindings(sketch: Any) -> list[dict]:
     return bindings[:_MAX_SKETCH_ROWS]
 
 
+def _state_names(sketch: Any) -> list[str]:
+    """Native object state names; empty when absent or not a sequence."""
+
+    state = getattr(sketch, "State", None)
+    if not isinstance(state, (list, tuple)):
+        return []
+    return [str(entry) for entry in state[:_MAX_STATE_NAMES]]
+
+
+def _status_text(sketch: Any) -> str | None:
+    """Native status string; null when the accessor is absent or fails."""
+
+    getter = getattr(sketch, "getStatusString", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter()
+    except Exception:
+        return None
+    return value if isinstance(value, str) else None
+
+
 def _solver_summary(sketch: Any) -> dict:
     solve = getattr(sketch, "solve", None)
+    solver_status: int | None = None
     if callable(solve):
         try:
-            solve()
+            solver_status = _int_or_none(solve())
         except Exception:
-            pass
+            solver_status = None
     # solve() returns a solver status code, never a degree count:
     # a sketch with 7 remaining DoF returned 0.
     dof = _int_or_none(getattr(sketch, "DoF", None))
@@ -677,6 +790,7 @@ def _solver_summary(sketch: Any) -> dict:
         "fullyConstrained": fully,
         "degreesOfFreedom": dof,
         "solverMessages": messages,
+        "solverStatus": solver_status,
     }
 
 
@@ -765,55 +879,100 @@ def _validate_constraint_add(entry: Any, what: str) -> dict:
     if not isinstance(entry, dict):
         raise _fail(f"{what} must be an object")
     constraint_type = entry.get("type")
-    if constraint_type not in _CONSTRAINT_FORMS:
-        raise _fail(
-            f"{what}.type must be one of the accepted Sketcher constraint "
-            f"types, got {constraint_type!r}"
-        )
     arguments = entry.get("arguments")
+    accepted = _CONSTRAINT_FORM_ARITIES.get(constraint_type)
+    if accepted is None:
+        shape = f"type {constraint_type!r}"
+        if isinstance(arguments, list):
+            shape = f"type {constraint_type!r} with {len(arguments)} argument(s)"
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"{what}: {shape} has no recorded native constraint form and is "
+            f"not one of the accepted Sketcher constraint types",
+            {
+                "reason": "unrecorded_constraint_shape",
+                "type": constraint_type,
+                "argumentCount": len(arguments) if isinstance(arguments, list) else None,
+                "acceptedArgumentCounts": None,
+                "nextAction": "inspect_sketch",
+            },
+        )
     if not isinstance(arguments, list) or len(arguments) > _MAX_CONSTRAINT_ARGUMENTS:
         raise _fail(
             f"{what}.arguments must be an array of at most {_MAX_CONSTRAINT_ARGUMENTS} integers"
         )
+    if len(arguments) not in accepted:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"{what}.arguments has {len(arguments)} entries, but the recorded "
+            f"native form of {constraint_type} accepts {sorted(accepted)}",
+            {
+                "reason": "unrecorded_constraint_shape",
+                "type": constraint_type,
+                "argumentCount": len(arguments),
+                "acceptedArgumentCounts": sorted(accepted),
+                "nextAction": "inspect_sketch",
+            },
+        )
     for value in arguments:
         if isinstance(value, bool) or not isinstance(value, int):
             raise _fail(f"{what}.arguments must contain integers only")
-    patterns, datum_required = _CONSTRAINT_FORMS[constraint_type]
-    if len(arguments) not in {len(pattern) for pattern in patterns}:
-        raise _fail(
-            f"{what}.arguments has {len(arguments)} entries; "
-            f"{constraint_type} accepts "
-            f"{sorted({len(pattern) for pattern in patterns})}"
-        )
-    pattern = next(candidate for candidate in patterns if len(candidate) == len(arguments))
-    for position, (role, value) in enumerate(zip(pattern, arguments, strict=True)):
-        if role == "G" and value < 0:
-            raise _fail(
-                f"{what}.arguments[{position}] is {value}; "
-                f"{constraint_type} expects a geometry index (>= 0) at "
-                f"slot {position}"
-            )
-        if role == "A" and value < -2:
-            raise _fail(
-                f"{what}.arguments[{position}] is {value}; "
-                f"{constraint_type} expects a geometry index (>= 0) or an "
-                f"axis reference (-2, -1) at slot {position}"
-            )
-        if role == "P" and value not in (0, 1, 2):
-            raise _fail(
-                f"{what}.arguments[{position}] is {value}; "
-                f"{constraint_type} expects a point position (0, 1, or 2) "
-                f"at slot {position}"
-            )
+    pattern = _CONSTRAINT_ARGUMENT_ROLES.get(constraint_type, {}).get(len(arguments))
+    if pattern is not None:
+        for position, (role, value) in enumerate(zip(pattern, arguments, strict=True)):
+            if role == "G" and value < 0:
+                raise _fail(
+                    f"{what}.arguments[{position}] is {value}; "
+                    f"{constraint_type} expects a geometry index (>= 0) at "
+                    f"slot {position}"
+                )
+            if role == "A" and value < -2:
+                raise _fail(
+                    f"{what}.arguments[{position}] is {value}; "
+                    f"{constraint_type} expects a geometry index (>= 0) or an "
+                    f"axis reference (-2, -1) at slot {position}"
+                )
+            if role == "P" and value not in (0, 1, 2):
+                raise _fail(
+                    f"{what}.arguments[{position}] is {value}; "
+                    f"{constraint_type} expects a point position (0, 1, or 2) "
+                    f"at slot {position}"
+                )
     checked: dict = {
         "type": constraint_type,
         "arguments": list(arguments),
     }
-    if datum_required and entry.get("datum") is None:
-        raise _fail(f"{what}.datum is required by {constraint_type}")
-    if not datum_required and entry.get("datum") is not None:
-        raise _fail(f"{what}.datum is not accepted by {constraint_type}")
-    if entry.get("datum") is not None:
+    has_datum = entry.get("datum") is not None
+    datum_required = len(arguments) in _CONSTRAINT_DATUM_REQUIRED.get(constraint_type, frozenset())
+    if datum_required and not has_datum:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"{what}: {constraint_type} with {len(arguments)} argument(s) has no "
+            f"recorded native form without a datum",
+            {
+                "reason": "unrecorded_constraint_shape",
+                "type": constraint_type,
+                "argumentCount": len(arguments),
+                "acceptedArgumentCounts": sorted(accepted),
+                "datumRequired": True,
+                "nextAction": "inspect_sketch",
+            },
+        )
+    if has_datum and not datum_required:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"{what}: {constraint_type} with {len(arguments)} argument(s) has no "
+            f"recorded native form with a datum",
+            {
+                "reason": "unrecorded_constraint_shape",
+                "type": constraint_type,
+                "argumentCount": len(arguments),
+                "acceptedArgumentCounts": sorted(accepted),
+                "datumForbidden": True,
+                "nextAction": "inspect_sketch",
+            },
+        )
+    if has_datum:
         checked["datum"] = _check_datum(entry["datum"], f"{what}.datum")
     return checked
 
@@ -976,16 +1135,39 @@ def _inspect_sketch(ctx: Any, arguments: dict) -> dict:
         "generation": int(ctx.document_generation(doc)),
         "object": str(getattr(sketch, "Name", "")),
         "solver": _solver_summary(sketch),
+        "state": _state_names(sketch),
+        "statusText": _status_text(sketch),
         "geometry": _geometry_rows(sketch),
         "constraints": _constraint_rows(sketch),
         "expressionBindings": _expression_bindings(sketch),
     }
 
 
+def _require_expected_generation(ctx: Any, doc: Any, arguments: dict) -> None:
+    """Refuse a batch planned against a stale document generation."""
+
+    expected = arguments.get("expected_generation")
+    if expected is None:
+        return
+    actual = int(ctx.document_generation(doc))
+    if expected == actual:
+        return
+    raise ToolError(
+        VALIDATION_FAILED,
+        "sketch changed since inspection; re-run inspect_sketch",
+        {
+            "expectedGeneration": expected,
+            "actualGeneration": actual,
+            "nextAction": "inspect_sketch",
+        },
+    )
+
+
 def _edit_sketch(ctx: Any, arguments: dict) -> dict:
     doc = ctx.require_document(arguments["document"])
     sketch = ctx.require_object(doc, arguments["sketch"])
     _require_sketch(sketch)
+    _require_expected_generation(ctx, doc, arguments)
     plan = _plan_sketch_edit(sketch, arguments)
 
     with mutation(ctx, doc, f"edit_sketch:{sketch.Name}", [sketch], expected_solids=0):
@@ -1025,6 +1207,8 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
         "generation": int(ctx.document_generation(doc)),
         "object": str(getattr(sketch, "Name", "")),
         "solver": _solver_summary(sketch),
+        "state": _state_names(sketch),
+        "statusText": _status_text(sketch),
         "addedGeometry": added_geometry,
         "addedConstraints": added_constraints,
         "deletedGeometry": list(plan["deleteGeometry"]),

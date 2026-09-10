@@ -343,6 +343,124 @@ def test_prevalidation_failure_has_no_operation_state() -> None:
 
 
 # ---------------------------------------------------------------------------
+# mutation outcome: the gate hands back the validation it already did.
+# ---------------------------------------------------------------------------
+
+from mcp_server import object_validation
+
+
+def test_outcome_reports_are_the_validated_geometry_report_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = FakeShapeObj("Box")
+    pad = FakeShapeObj("Pad")
+    box.InList = [pad]
+    doc = FakeGateDoc([box, pad])
+    built: dict[str, dict] = {}
+    real_geometry_report = object_validation.geometry_report
+
+    def recording_geometry_report(obj: Any, expected_solids: int | None = None) -> dict:
+        report = real_geometry_report(obj, expected_solids)
+        built[str(getattr(obj, "Name", ""))] = report
+        return report
+
+    # Identity matters: a handler reusing these reports must receive the very
+    # dicts the gate validated, never a copy and never a second OCC pass.
+    monkeypatch.setattr(object_validation, "geometry_report", recording_geometry_report)
+
+    outcome: dict = {}
+    with mutation(FakeGateCtx(doc), doc, "gate", [box], outcome=outcome):
+        pass
+
+    assert sorted(outcome["reports"]) == ["Box", "Pad"]
+    assert outcome["reports"]["Box"] is built["Box"]
+    assert outcome["reports"]["Pad"] is built["Pad"]
+    assert outcome["reports"]["Box"]["ok"] is True
+    assert outcome["reports"]["Pad"]["ok"] is True
+
+
+def test_outcome_counts_track_a_dependent_removed_by_the_body() -> None:
+    box = FakeShapeObj("Box")
+    pad = FakeShapeObj("Pad")
+    box.InList = [pad]
+    doc = FakeGateDoc([box, pad])
+    outcome: dict = {}
+
+    with mutation(FakeGateCtx(doc), doc, "gate", [box], outcome=outcome):
+        # The body drops the link that made Pad a dependent of Box.
+        del box.InList[0]
+
+    assert outcome["dependentCountBefore"] == 1
+    assert outcome["dependentCountAfter"] == 0
+    assert sorted(outcome["reports"]) == ["Box"]
+
+
+def test_callable_targets_report_no_pre_mutation_closure() -> None:
+    box = FakeShapeObj("Box")
+    doc = FakeGateDoc([box])
+    outcome: dict = {}
+
+    with mutation(FakeGateCtx(doc), doc, "gate", lambda: [box], outcome=outcome) as applied:
+        pad = FakeShapeObj("Pad")
+        doc.Objects.append(pad)
+        box.InList = [pad]
+
+    # A create flow has no pre-mutation targets, so its before-count is 0;
+    # the post-recompute closure still reports what the commit produced.
+    assert applied == ["Box"]
+    assert outcome["dependentCountBefore"] == 0
+    assert outcome["dependentCountAfter"] == 1
+    assert sorted(outcome["reports"]) == ["Box", "Pad"]
+
+
+def test_omitted_outcome_leaves_the_gate_result_unchanged() -> None:
+    def drive(outcome: Any = None) -> tuple[list[str], str]:
+        box = FakeShapeObj("Box")
+        pad = FakeShapeObj("Pad")
+        box.InList = [pad]
+        doc = FakeGateDoc([box, pad])
+        with (
+            pytest.raises(ToolError) as excinfo,
+            mutation(FakeGateCtx(doc), doc, "gate", [box], outcome=outcome) as applied,
+        ):
+            # Touch the dependent so the gate's own validation, not the
+            # outcome plumbing, decides the rollback.
+            pad.State = ["Touched"]
+        assert doc.UndoMode == 0
+        return list(applied), str(excinfo.value.details)
+
+    assert drive() == drive({})
+
+    box = FakeShapeObj("Box")
+    doc = FakeGateDoc([box])
+    with mutation(FakeGateCtx(doc), doc, "gate", [box]) as applied:
+        pass
+
+    assert applied == ["Box"]
+
+
+def test_outcome_is_filled_before_the_commit() -> None:
+    box = FakeShapeObj("Box")
+    pad = FakeShapeObj("Pad")
+    box.InList = [pad]
+    outcome: dict = {}
+    at_commit: list[dict] = []
+
+    class RecordingDoc(FakeGateDoc):
+        def commitTransaction(self) -> None:
+            at_commit.append(dict(outcome))
+            super().commitTransaction()
+
+    doc = RecordingDoc([box, pad])
+    with mutation(FakeGateCtx(doc), doc, "gate", [box], outcome=outcome):
+        pass
+
+    assert at_commit == [
+        {"reports": outcome["reports"], "dependentCountBefore": 1, "dependentCountAfter": 1}
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Null-shape doubles (probes["shape.null_attributes"]).
 # ---------------------------------------------------------------------------
 

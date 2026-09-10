@@ -67,6 +67,8 @@ Geometry indices must be `>= 0`, axis references must be `-1` or `-2`, and point
 
 `Collinear`, `InternalAlignment`, `SnellsLaw`, `AngleViaPoint`, and `Weight` are rejected before any native call. The native 1.1.3 constructor accepted no verified form of them. Use `Tangent` between two lines instead of `Collinear`, or use `run_script` with a form recorded in `tests/native_contract.json`.
 
+`edit_sketch` refuses a `(type, argument-count)` shape outside the recorded native contract before execution, with a `VALIDATION_FAILED` error rather than a native call, because an unverified native constructor call can abort the FreeCAD process. The error's `acceptedArgumentCounts` lists the safe arities for the requested type (`null` when the type has no recorded form), alongside `reason: unrecorded_constraint_shape` and `nextAction: inspect_sketch`.
+
 Datum strings carry a unit: `"40 mm"`, `"30 mm"`, `"90 deg"`. The value lands in the property's internal unit.
 
 ## setDatums
@@ -176,7 +178,7 @@ The verified result is one solid with volume `12000.0 mm3` and `degreesOfFreedom
 1. Read `inspect_sketch` again. Confirm the returned `addedGeometry` and `addedConstraints` indices, the geometry kinds, and the `datum` values.
 2. Confirm the profile closes. The wires must come from coincident endpoints, not from near-identical coordinates.
 3. Read the reported `degreesOfFreedom` and `fullyConstrained` fields. `degreesOfFreedom == 0` means fully constrained. Conflicting constraints can produce a negative `DoF` or an invalid state: the native `addConstraint` accepts a conflicting entry, and the sketch then reports `Invalid`. In the verified case, two `DistanceX` datums of `10 mm` and `20 mm` produced solve status `-3` and state `['Touched', 'Invalid']`.
-4. `inspect_sketch` does not report the object state. Read it with `str(sketch.State)` through `run_script`, or rely on the mutation gate: `edit_sketch` rejects a sketch left in an invalid state.
+4. `inspect_sketch` and `edit_sketch` report the object `state`, the `statusText` string, and `solver.solverStatus`. Read them from either response, or rely on the mutation gate: `edit_sketch` rejects a sketch left in an invalid state.
 5. Validate the resulting solid after the profile becomes a feature. See [Geometry validation](validation.md).
 
 ## Shapeless and null-shape objects

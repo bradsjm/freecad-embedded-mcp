@@ -1,6 +1,6 @@
 """Server orchestration for the embedded MCP v2 add-on.
 
-Owns startup/shutdown, the exact 23-tool registry, request dispatch
+Owns startup/shutdown, the exact 24-tool registry, request dispatch
 (discovery, tools, tasks, subscriptions and document resources), the
 document observer with per-document generations, the shared consent
 preflight choreography and the one execution lifecycle for blocking calls
@@ -159,9 +159,10 @@ from mcp_server.tools.view import (
 #: Tool errors are complete ``isError`` results, never JSON-RPC errors.
 SERVER_BUSY = "SERVER_BUSY"
 
-#: The 23 registered tools, in the exact plan section 5 order.
+#: The 24 registered tools, in the exact plan section 5 order.
 PLAN_TOOL_ORDER = (
     "discover_capabilities",
+    "inspect_documents",
     "new_document",
     "open_document",
     "import_model",
@@ -509,6 +510,11 @@ class Server:
         self._add_definition(
             _discover_definition(),
             {"discover_capabilities": self._tool_discover_capabilities},
+            None,
+        )
+        self._add_definition(
+            _inspect_documents_definition(),
+            {"inspect_documents": self._handle_inspect_documents},
             None,
         )
         missing = [n for n in PLAN_TOOL_ORDER if n not in self._definitions]
@@ -878,12 +884,75 @@ class Server:
         return _with_caching(_rpc_result(validated["id"], complete_result(payload)), CACHE_PUBLIC)
 
     def _tool_discover_capabilities(self, ctx: Any, arguments: dict) -> dict:
-        """The private snapshot tool: no GUI dispatch, cached snapshot."""
+        """The private snapshot tool: no nested GUI dispatch, ever.
 
+        Without ``refresh`` this answers from the published cache and stays
+        GUI-independent. With ``refresh: true`` it runs on the GUI thread
+        already (the server routes it through the ordinary blocking call),
+        so it captures the static snapshot DIRECTLY — a
+        ``_refresh_capabilities`` call here would nest a GUI dispatch —
+        and publishes it under the capabilities lock exactly like the
+        startup/discover refresh path does.
+        """
+
+        capabilities = self._capability_snapshot()
+        if arguments.get("refresh") is True:
+            fresh = _capture_static_capabilities(None)
+            with self._capabilities_lock:
+                self._static_capabilities = fresh
+            capabilities = self._capability_snapshot()
+        if arguments.get("detail", "compact") == "full":
+            projection = capabilities
+        else:
+            projection = _compact_capabilities(capabilities)
         return {
-            "capabilities": self._capability_snapshot(),
+            "capabilities": projection,
             "gui": _gui_health_snapshot(),
         }
+
+    def _handle_inspect_documents(self, ctx: Any, arguments: dict) -> dict:
+        """Read-only inventory of the open documents (GUI thread).
+
+        One row per live document: the same lifetime generation the consent
+        targets are bound to, the conservative dirty verdict owned by the
+        documents tool (unknown state reads as dirty, never as clean), the
+        active document, a pending transaction, and the object currently
+        open in that document's GUI edit session.
+        """
+
+        # Sibling import of a private helper, mirroring the FEM probe: the
+        # documents tool owns the dirty rule and is imported where used.
+        from mcp_server.tools.documents import _is_dirty
+
+        active_document = getattr(FreeCAD, "ActiveDocument", None)
+        documents = []
+        active_name = None
+        for doc in FreeCAD.listDocuments().values():
+            try:
+                file_name = str(doc.FileName or "")
+            except Exception:
+                file_name = ""
+            try:
+                gui_document = ctx.Gui.getDocument(doc.Name)
+            except Exception:
+                gui_document = None
+            if doc is active_document:
+                # Only a listed document can be reported as the active one.
+                active_name = str(doc.Name)
+            documents.append(
+                {
+                    "name": str(doc.Name),
+                    "label": str(doc.Label),
+                    "fileName": file_name,
+                    "objectCount": len(getattr(doc, "Objects", None) or ()),
+                    "generation": int(ctx.document_generation(doc)),
+                    "dirty": bool(_is_dirty(ctx, doc)),
+                    "active": doc is active_document,
+                    "transactionOpen": bool(getattr(doc, "HasPendingTransaction", False)),
+                    "editObject": _active_edit_object(gui_document),
+                }
+            )
+        return {"documents": documents, "activeDocument": active_name}
 
     # -- tools/call -------------------------------------------------------
 
@@ -906,9 +975,10 @@ class Server:
         validate_schema(arguments, definition["inputSchema"])
 
         request_id = validated["id"]
-        if name == "discover_capabilities":
+        if name == "discover_capabilities" and arguments.get("refresh") is not True:
             # GUI-independent by design: answered from the startup snapshot
-            # even while the GUI thread is stuck on other work.
+            # even while the GUI thread is stuck on other work. A refresh
+            # needs the GUI thread and takes the normal blocking path.
             try:
                 payload = self._tool_discover_capabilities(self, arguments)
             except ToolError as exc:
@@ -2048,6 +2118,24 @@ def _gui_health_snapshot() -> dict:
     }
 
 
+def _active_edit_object(gui_document: Any) -> str | None:
+    """Name of the object a GUI document has in active edit, or None.
+
+    Null-safe probes only: no GUI document (headless, closed, or missing)
+    and no active object both answer None, and a value provider is resolved
+    through the document object it wraps when it exposes one.
+    """
+
+    active = getattr(gui_document, "ActiveObject", None)
+    if active is None:
+        return None
+    target = getattr(active, "Object", None)
+    if target is None:
+        target = active
+    name = getattr(target, "Name", None)
+    return str(name) if name else None
+
+
 def _unpack_definition(definition: Any) -> tuple[str, str, Any, Any]:
     if isinstance(definition, Mapping):
         return (
@@ -2060,6 +2148,52 @@ def _unpack_definition(definition: Any) -> tuple[str, str, Any, Any]:
     return name, description, input_schema, output_schema
 
 
+#: Compact ``discover_capabilities`` keeps only the summary blocks; the
+#: heavy arrays (workbenches, supportedTypes, paths) need ``detail: "full"``.
+_COMPACT_CAPABILITY_KEYS = ("freecad", "occ", "exporters", "fem")
+
+#: Complete document-row shape: every field is always present so a client
+#: can rely on one stable row layout.
+_DOCUMENT_ROW_PROPERTIES = {
+    "name": {"type": "string"},
+    "label": {"type": "string"},
+    "fileName": {"type": "string"},
+    "objectCount": {"type": "integer", "minimum": 0},
+    "generation": {"type": "integer", "minimum": 0},
+    "dirty": {"type": "boolean"},
+    "active": {"type": "boolean"},
+    "transactionOpen": {"type": "boolean"},
+    "editObject": {"type": ["string", "null"]},
+}
+
+_DOCUMENT_ROW_REQUIRED = [
+    "name",
+    "label",
+    "fileName",
+    "objectCount",
+    "generation",
+    "dirty",
+    "active",
+    "transactionOpen",
+    "editObject",
+]
+
+
+def _compact_capabilities(snapshot: Mapping[str, Any]) -> dict:
+    """Summary projection of one capability snapshot.
+
+    The four summary blocks plus the supported-types count (``None`` when
+    no list was probed) and the document the types came from. Never mutates
+    ``snapshot``: the cache is a shared object.
+    """
+
+    compact = {key: snapshot[key] for key in _COMPACT_CAPABILITY_KEYS if key in snapshot}
+    supported = snapshot.get("supportedTypes")
+    compact["supportedTypesCount"] = len(supported) if isinstance(supported, list) else None
+    compact["supportedTypesDocument"] = snapshot.get("supportedTypesDocument")
+    return compact
+
+
 def _discover_definition() -> dict:
     return {
         "name": "discover_capabilities",
@@ -2067,11 +2201,34 @@ def _discover_definition() -> dict:
             "Private snapshot of FreeCAD/OCC versions, workbenches, complete "
             "supportedTypes, exporter and FEM availability, and FreeCAD paths, "
             "plus GUI dispatch health reported separately without waiting for "
-            "a GUI dispatch."
+            "a GUI dispatch. The default compact detail returns the summary "
+            "blocks plus supportedTypesCount and supportedTypesDocument; "
+            "detail 'full' returns the complete snapshot, and refresh true "
+            "recaptures it on the GUI thread first."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "refresh": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Recapture the static snapshot on the GUI thread before "
+                        "answering (default false: the cached snapshot is used)."
+                    ),
+                },
+                "detail": {
+                    "type": "string",
+                    "enum": ["compact", "full"],
+                    "default": "compact",
+                    "description": (
+                        "compact (default) returns the summary blocks plus "
+                        "supportedTypesCount/supportedTypesDocument; full returns "
+                        "the complete snapshot including workbenches, "
+                        "supportedTypes and paths."
+                    ),
+                },
+            },
             "additionalProperties": False,
         },
         "outputSchema": {
@@ -2081,6 +2238,43 @@ def _discover_definition() -> dict:
                 "gui": {"type": "object"},
             },
             "required": ["capabilities", "gui"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _inspect_documents_definition() -> dict:
+    return {
+        "name": "inspect_documents",
+        "description": (
+            "Inventory of the open FreeCAD documents: one row per document "
+            "with its actual Name and Label, file path, object count, live "
+            "change generation, conservative dirty verdict, whether it is the "
+            "active document, whether a transaction is pending, and the object "
+            "currently open in that document's GUI edit session. Read-only: "
+            "nothing is recomputed or mutated, and activeDocument is null when "
+            "no listed document is active."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "documents": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": dict(_DOCUMENT_ROW_PROPERTIES),
+                        "required": list(_DOCUMENT_ROW_REQUIRED),
+                        "additionalProperties": False,
+                    },
+                },
+                "activeDocument": {"type": ["string", "null"]},
+            },
+            "required": ["documents", "activeDocument"],
             "additionalProperties": False,
         },
     }

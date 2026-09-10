@@ -1,6 +1,6 @@
 # Electronic component 3D models
 
-Use [Component Search Engine](https://componentsearchengine.com/) as an external research source when a FreeCAD enclosure, bracket, panel, PCB carrier, or assembly needs a realistic electronic-component envelope. The available FreeCAD MCP tools do not provide a Component Search Engine API or a dedicated CAD-import tool. Use `read` for public page research, browser automation only when an authenticated interactive action is authorized, and `run_script` for FreeCAD import and document mutation.
+Use [Component Search Engine](https://componentsearchengine.com/) as an external research source when a FreeCAD enclosure, bracket, panel, PCB carrier, or assembly needs a realistic electronic-component envelope. The available FreeCAD MCP tools do not provide a Component Search Engine API. Use `read` for public page research, browser automation only when an authenticated interactive action is authorized, `import_model` for STEP and STL imports, and `run_script` for document mutation the structured tools do not cover.
 
 ## Source and identify the component
 
@@ -15,15 +15,19 @@ Component Search Engine documents free account access to ECAD models, symbols, f
 
 Sources: [Component Search Engine](https://componentsearchengine.com/), [Learn more](https://componentsearchengine.com/learn-more), [PCB component library examples](https://componentsearchengine.com/examples), and [Library Loader](https://componentsearchengine.com/LibraryLoader).
 
-## Import through run_script
+## Import the model
 
-Use the known local path supplied by the task. Import and document mutation must run through `run_script`; it executes synchronously on the GUI thread, and there is no asynchronous execution path.
+Use the known local path supplied by the task. Call `import_model` with `document`, `path`, and `format`; pass `name` to label the STL mesh feature. The tool imports STEP and STL behind file consent, runs on the GUI thread, and reports the created objects, bounds, validity, and units.
+
+Create or open the target document first with `new_document` or `open_document`; `import_model` imports into an existing document. Do not assume the imported object name, units, or solid count.
+
+For a format `import_model` does not support, such as IGES or a mesh format other than STL, use `run_script` with the registered importer of the running installation. Import executes synchronously on the GUI thread; there is no asynchronous execution path.
 
 ```python
 import os
 import FreeCAD as App
 
-path = "/absolute/path/to/component.step"
+path = "/absolute/path/to/component.iges"
 assert os.path.isfile(path), path
 
 # Import into a dedicated document so importer-created objects are isolated.
@@ -35,7 +39,7 @@ import_doc.recompute()
 print([(obj.Name, obj.Label, obj.TypeId) for obj in import_doc.Objects])
 ```
 
-The exact importer can vary by format and FreeCAD 1.1 build. For STEP, `Part.insert(path, doc.Name)` is a common synchronous route; for other formats, use the registered importer documented by the running installation. If an import API fails, inspect the exception and available modules rather than retrying guessed calls. Do not assume the imported object name, document, units, or solid count.
+The exact importer can vary by format and FreeCAD 1.1 build. If an import API fails, inspect the exception and available modules rather than retrying guessed calls.
 
 After import, call `inspect_objects(document)` to identify the imported object. Use returned internal `Name` values in later edits and links. If the imported file opened a separate document, preserve that fact and copy/link only the intended object through explicit `run_script` code.
 

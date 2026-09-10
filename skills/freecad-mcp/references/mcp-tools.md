@@ -13,18 +13,19 @@ The add-on embeds the MCP server inside FreeCAD's GUI process. There is no separ
 
 ## Tool matrix
 
-The server exposes 23 tools in a fixed order. Document tools return the actual sanitized `name`, `label`, and `objectCount`; use the returned `name` as the `document` argument in later calls.
+The server exposes 24 tools in a fixed order. Document tools return the actual sanitized `name`, `label`, and `objectCount`; use the returned `name` as the `document` argument in later calls.
 
 | Tool | Use | Important arguments |
 |---|---|---|
-| `discover_capabilities` | Versions, workbenches, full `supportedTypes`, exporter and FEM availability, GUI dispatch health | none; GUI-independent |
+| `discover_capabilities` | Versions, workbenches, supported types, exporter and FEM availability, GUI dispatch health | optional `refresh` (default `false`; `true` re-captures through the GUI path) and `detail` (`compact` default or `full`); GUI-independent without `refresh` |
+| `inspect_documents` | Open-document inventory with generation, dirty/active flags, and transaction state | none |
 | `new_document` | Create an empty document | `name` |
 | `open_document` | Open an `.FCStd` from an allowed root | `path`; `untrusted` defaults true and requires consent |
 | `import_model` | Import STEP or STL behind file consent | `document`, `path`, `format`; optional `name` (STL mesh feature) |
 | `save_document` | Save to the existing path, or save-as | `document`; optional `path` (consent to overwrite a different existing file) |
 | `close_document` | Close one document | `document`; consent when dirty or unsaved nonempty |
 | `reload_document` | Close and reopen the saved file | `document`; consent to discard unsaved changes |
-| `inspect_objects` | List objects sorted by Name, or a 1–64 object selection; signed-cursor pagination | `document`; optional `objects`, `cursor`, `detail` (`compact`/`full`), `property_filter`, `limit` (default 100, max 500), `property_offset`, `property_limit` |
+| `inspect_objects` | List objects sorted by Name, or a 1–64 object selection; signed-cursor pagination | `document`; optional `objects`, `cursor`, `detail` (`compact`/`full`), `property_filter`, `limit` (default 32, max 500), `property_offset`, `property_limit` |
 | `create_object` | Create a supported Part/App type or a FEM object | `document`, `type`, `name`; optional `properties`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
 | `edit_object` | Assign properties with full prevalidation; returns before/after deltas | `document`, `object`, `properties`; optional `expected_solids`, `expected_bounds`, `bounds_tolerance` |
 | `edit_objects` | Edit 1–32 objects atomically | `document`, `edits`; optional `expectations` per object |
@@ -32,14 +33,18 @@ The server exposes 23 tools in a fixed order. Document tools return the actual s
 | `validate_geometry` | State, validity, solid count, volume, bounds, tolerance | `document`, `objects` (max 100); optional `expected_solids`, `expected_bounds`, `bounds_tolerance` |
 | `measure` | Distance, interference, section, or face measurement | `document`, `a`, `mode`; optional `b`, `plane`; selectors accept names, bbox objects, or signed `{object, subelement}` references |
 | `inspect_topology` | Page through faces or edges with signed references | `document`, `object`, `role`; optional `cursor`, `limit` (default 50, max 100) |
-| `edit_parameters` | Add/rename dynamic properties, bind expressions, clear expressions | `document`, `object`; optional `add`, `rename`, `expressions`, `clear_expressions` |
-| `inspect_sketch` | Sketch geometry/constraint rows and solver summary | `document`, `sketch` |
-| `edit_sketch` | Atomic sketch batch: geometry, constraints, datums, deletes | `document`, `sketch`; optional `addGeometry`, `addConstraints`, `setDatums`, `deleteGeometry`, `deleteConstraints` |
+| `edit_parameters` | Add/rename dynamic properties, bind expressions, clear expressions; reports `document`, `generation`, and `applied` | `document`, `object`; optional `add`, `rename`, `expressions`, `clear_expressions` |
+| `inspect_sketch` | Sketch geometry/constraint rows, solver summary, `state`, `statusText`, and `solver.solverStatus` | `document`, `sketch` |
+| `edit_sketch` | Atomic sketch batch: geometry, constraints, datums, deletes | `document`, `sketch`; optional `addGeometry`, `addConstraints`, `setDatums`, `deleteGeometry`, `deleteConstraints`, `expected_generation` |
 | `create_feature` | Datum plane, sketch, pad, pocket, or hole inside a Body | `document`, `body`, `kind`, `name`; optional `properties`, `profile`, `support`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
 | `export` | STL/STEP/3MF or native FCStd copy with readback verification | `document`, `objects`, `format`, `path`; optional `linear_deflection`, `angular_deflection`, `bed_align` |
 | `capture_view` | PNG of the 3D view with an explicit orientation | `document`, `focus_object`, `view_name`; optional `width`, `height` |
 | `run_fem` | Modern CalculiX solve; returns a VTK result summary | `document`, `analysis`; optional `timeout_s` (default 600) |
 | `run_script` | Arbitrary Python on the GUI thread in a persistent session namespace | `code`; optional `session_id` (default `"default"`), `timeout_s` (default 90) |
+
+`discover_capabilities` with `detail: "compact"` (the default) returns `freecad`, `occ`, `exporters`, `fem`, `supportedTypesCount`, and `supportedTypesDocument`; `detail: "full"` returns the complete snapshot. `refresh: true` re-captures the snapshot through the GUI path.
+
+`inspect_documents` takes no arguments. It returns `documents[]` rows with `name`, `label`, `fileName`, `objectCount`, `generation`, `dirty`, `active`, `transactionOpen`, and `editObject`, plus `activeDocument`. Use it when the document name is unknown; it replaces document discovery through `run_script`.
 
 The tools cover CAD-side modeling, inspection, validation, export, and FEM operations only. Report anything outside these operations as outside this skill's boundary.
 
@@ -47,8 +52,8 @@ Valid `view_name` values are `Isometric`, `Front`, `Top`, `Right`, `Back`, `Left
 
 ## Standard sequence
 
-1. Call `discover_capabilities`. Read `gui.state`, `capabilities.supportedTypes`, and exporter/FEM availability.
-2. Address the target document by the `name` returned by `new_document` or `open_document`. There is no list-documents tool; when the name is unknown, call `run_script` with `App.listDocuments()`.
+1. Call `discover_capabilities`. Read `gui.state`, exporter/FEM availability, and the supported-type inventory; add `detail: "full"` when the complete `supportedTypes` list is needed.
+2. Address the target document by the `name` returned by `new_document` or `open_document`. When the name is unknown, call `inspect_documents` and read its rows before choosing the target.
 3. Call `inspect_objects(document)` and read the compact rows before editing.
 4. Create or edit one dependency stage at a time; inspect after each recompute.
 5. Run `validate_geometry` and `measure` on the final solid.
@@ -66,13 +71,25 @@ Valid `view_name` values are `Isometric`, `Front`, `Top`, `Right`, `Back`, `Left
 - Enumeration properties take the exact string; validation reports the allowed values.
 - Prefix a key with `ViewObject.` to target a view property explicitly; an unprefixed key resolves against the document object first and the ViewObject as fallback.
 
-A failure during the transaction aborts the whole operation, recomputes the restored document, and reports rollback failure separately. Feature-specific assignments the mapper cannot express go through `run_script`.
+A failure during the transaction aborts the whole operation, recomputes the restored document, and reports rollback failure separately. Change summaries from `create_object`, `edit_object`, and `edit_objects` report `dependentCountBefore` alongside `dependentCount`, the post-mutation count. Feature-specific assignments the mapper cannot express go through `run_script`.
 
 ## Inspection response
 
-Compact `inspect_objects` rows carry `name`, `label`, `typeId`, `state`, `placement`, `globalPlacement`, `boundsCoordinateSystem`, `bounds`, `shape_valid`, `solid_count`, `tip`, `links`, and an empty/absent `properties` map. `detail: "full"` fills `properties` for the requested `property_filter` (or all names), plus `propertyMetadata` (type, read-only, enumeration), `propertyCount`, `nextPropertyOffset`, and `truncatedProperties`. Use `property_offset` and `property_limit` (default 64) to page large property sets. Bounds are document-space millimetres. Pagination uses an opaque signed cursor bound to the document generation and filters; a stale cursor returns a restart-pagination error.
+Compact `inspect_objects` rows carry `name`, `label`, `typeId`, `state`, `bounds`, `shape_valid`, `solid_count`, `tip`, and `links`. `detail: "full"` adds `placement`, `globalPlacement`, and the property pages: `properties` for the requested `property_filter` (or all names), plus `propertyMetadata` (type, read-only, enumeration), `propertyCount`, `nextPropertyOffset`, and `truncatedProperties`. The row `limit` defaults to 32 (max 500). Use `property_offset` and `property_limit` (default 64) to page large property sets. Bounds are document-space millimetres. Pagination uses an opaque signed cursor bound to the document generation and filters; a stale cursor returns a restart-pagination error.
 
 Use `typeId` and internal `name` for automation. Use `label` only for human presentation.
+
+## `inspect_sketch` and `edit_sketch`
+
+Both tools report `state` (a list of state strings), `statusText` (a string or `null`), and `solver.solverStatus` (an integer or `null`, the native `solve()` code) alongside the geometry and constraint rows.
+
+`edit_sketch` accepts optional `expected_generation`. A mismatch fails with `VALIDATION_FAILED` and no transaction opens, so nothing changes; the details carry `expectedGeneration`, `actualGeneration`, and `nextAction: inspect_sketch`.
+
+A constraint `(type, argument-count)` shape with no recorded native acceptance is refused before execution with `VALIDATION_FAILED` and no transaction; the details carry `reason: unrecorded_constraint_shape`, the `acceptedArgumentCounts` for the requested type (`null` when the type has no recorded form), and `nextAction: inspect_sketch`. The refusal is a process-safety measure: a malformed `Sketcher.Constraint` constructor call can raise an unhandled C++ exception that terminates the whole FreeCAD process.
+
+## `edit_parameters` results
+
+`edit_parameters` results carry `document`, `generation`, and `applied`. Each `applied` entry is an operation label: `add:NAME`, `rename:OLD->NEW`, `expression:PROP`, or `clear:PROP`. The list ends with the mutated object's internal `Name`.
 
 ## `create_feature` details
 
@@ -94,11 +111,13 @@ The result carries the actual internal name and a post-recompute geometry report
 
 New volumetric geometry defaults to one solid; pass `expected_solids` to require a different count. Existing valid dependent solid counts are preserved when their inputs change.
 
-Compact `inspect_objects` rows carry `name`, `label`, `typeId`, `state`, `placement`, `globalPlacement`, `boundsCoordinateSystem`, `bounds`, `shape_valid`, `solid_count`, `tip`, `links`, and an empty `properties` map. `detail: "full"` fills `properties` for the requested `property_filter` (or all names), plus `propertyMetadata` (type, read-only, enumeration), `propertyCount`, `nextPropertyOffset`, and `truncatedProperties`. Use `property_offset` and `property_limit` (default 64) to page large property sets. Bounds are document-space millimetres. Pagination uses an opaque signed cursor bound to the document generation and filters; a stale cursor returns a restart-pagination error.
+Compact `inspect_objects` rows carry `name`, `label`, `typeId`, `state`, `bounds`, `shape_valid`, `solid_count`, `tip`, and `links`. `detail: "full"` adds `placement`, `globalPlacement`, and the property pages: `properties` for the requested `property_filter` (or all names), plus `propertyMetadata` (type, read-only, enumeration), `propertyCount`, `nextPropertyOffset`, and `truncatedProperties`. The row `limit` defaults to 32 (max 500). Use `property_offset` and `property_limit` (default 64) to page large property sets. Bounds are document-space millimetres. Pagination uses an opaque signed cursor bound to the document generation and filters; a stale cursor returns a restart-pagination error.
 
 `run_script` executes on the GUI thread in a namespace seeded with `FreeCAD`/`App` and `Gui`. Variables persist per `session_id` for the server's lifetime. At most 32 sessions are kept; new sessions are refused instead of evicting live state. stdout, stderr, and the traceback are captured even when the code raises. `timeout_s` is a cooperative server deadline (1–3600 s, default 90); execution cannot be preempted, and the tool result says so truthfully. The tool is refused with `SERVER_BUSY` while a FEM solve is active.
 
-Use `run_script` for operations outside the structured tools: `FreeCADGui` calls, selection, imports of neutral formats, Parts Library access, mesh routes, and specialized property assignments.
+Use `run_script` for operations outside the structured tools: `FreeCADGui` calls, selection, imports of formats `import_model` does not support (it covers STEP and STL behind file consent), Parts Library access, mesh routes, and specialized property assignments.
+
+`run_script` reaches the native bindings directly and is not covered by the `edit_sketch` guard: malformed native constructor calls, such as an unsupported `Sketcher.Constraint` argument form, can raise an unhandled C++ exception that terminates the whole FreeCAD process.
 
 ## Consent
 

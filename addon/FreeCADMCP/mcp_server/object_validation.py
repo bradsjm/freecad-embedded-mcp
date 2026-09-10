@@ -517,6 +517,8 @@ def mutation(
     expected_bounds: Sequence[float] | None = None,
     bounds_tolerance: float = 0.000001,
     expectations: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    outcome: dict | None = None,
 ) -> Any:
     """Run one tool mutation inside its own FreeCAD transaction.
 
@@ -526,6 +528,20 @@ def mutation(
     zero-argument callable returning them; the callable is evaluated inside
     the transaction just before recompute, so create flows can hand back the
     object they only create inside the ``with`` body.
+
+    ``outcome`` is an optional caller-owned dict the gate fills on the commit
+    path, just before ``commitTransaction`` so a handler reading it after the
+    ``with`` block sees values matching the committed state (one GUI thread,
+    nothing runs in between): ``reports`` maps the live ``Name`` of every
+    target and dependent the gate validated to the exact
+    :func:`geometry_report` dict instance it built (never a copy and never a
+    recompute), ``dependentCountBefore`` is the size of the pre-mutation
+    dependent closure the gate walked for solid-count baselines (0 for create
+    flows, whose targets do not exist before the body), and
+    ``dependentCountAfter`` is the size of the post-recompute live dependent
+    closure excluding the target names. On any failure the gate raises as
+    today and the outcome content is unspecified; the gate's own validation
+    is unconditional and never depends on ``outcome``.
 
     Order of operations: reject busy/FEM-locked documents (via
     ``ctx.check_document_idle``) and preexisting user transactions
@@ -572,6 +588,10 @@ def mutation(
     pre_targets: list[Any] | None = None
     baseline: dict[str, int] = {}
     pre_target_names: set[str] = set()
+    # Only pre-known targets own a pre-mutation closure: a create flow's
+    # callable yields objects that do not exist before the body, so its
+    # before-count is empty by construction and reported as 0.
+    pre_dependent_count = 0
     if not callable(objects):
         pre_targets = list(objects)
         pre_target_names = {str(getattr(obj, "Name", "")) for obj in pre_targets}
@@ -583,6 +603,7 @@ def mutation(
                 "dependent objects; refusing before any effects",
                 {"reason": "too_many_dependents"},
             )
+        pre_dependent_count = len(pre_dependents)
         # Capture the pre-mutation solid counts of the known dependents
         # before the transaction or the body can change anything. Deps that
         # only appear afterwards (dynamic links, created objects) have no
@@ -653,6 +674,10 @@ def mutation(
             dependents = [
                 dep for dep in dependents if str(getattr(dep, "Name", "") or "") in live_names
             ]
+            # Reports of what this gate validated, kept only to hand a caller
+            # its own ``outcome``: the very dict instances built below, so a
+            # handler never pays for a second report or a copy.
+            reports: dict[str, dict] = {}
             errors: list[str] = []
             for obj in targets:
                 name = str(getattr(obj, "Name", "<unknown>"))
@@ -670,6 +695,8 @@ def mutation(
                     errors.append(problem)
                     continue
                 report = geometry_report(obj, target_solids)
+                if outcome is not None:
+                    reports[name] = report
                 if not report["ok"]:
                     errors.append(str(report["error"]))
                 if target_bounds is None:
@@ -712,6 +739,8 @@ def mutation(
                 # new dependents, previously invalid or shapeless ones —
                 # falls back to the default contract (expected_solids=None).
                 dep_report = geometry_report(dep, baseline.get(dep_name))
+                if outcome is not None:
+                    reports[dep_name] = dep_report
                 if not dep_report["ok"]:
                     errors.append(str(dep_report["error"]))
             if errors:
@@ -719,6 +748,15 @@ def mutation(
                     VALIDATION_FAILED,
                     "recompute left the document invalid; the mutation was rolled back",
                     {"errors": errors[:_MAX_DIAGNOSTICS]},
+                )
+            if outcome is not None:
+                # Filled before the commit, while the validated objects are
+                # still the committed ones: nothing runs between this block
+                # and the handler's read after the ``with`` block.
+                outcome["reports"] = reports
+                outcome["dependentCountBefore"] = pre_dependent_count
+                outcome["dependentCountAfter"] = sum(
+                    1 for dep in dependents if str(getattr(dep, "Name", "")) not in target_names
                 )
             try:
                 doc.commitTransaction()

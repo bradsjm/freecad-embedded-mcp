@@ -342,6 +342,8 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
             volume_after=report["volume"],
             bounds_before=None,
             bounds_after=document_bounds(feature),
+            # A feature created by this call has no pre-mutation closure.
+            dependents_before=0,
             dependents=0,
         ),
         "applied": applied,
