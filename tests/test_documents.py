@@ -29,6 +29,8 @@ from mcp_server.tools import documents
 
 
 class FakeDoc:
+    # probes["doc.lifecycle"]: save/close/reopen keep Name and Label,
+    # clear isTouched after recompute, and doc.UndoMode exists (= 1).
     def __init__(
         self,
         name,

@@ -56,6 +56,8 @@ _STUB_IMPORT = types.ModuleType("Import")
 
 
 def _insert(path: str, document: str) -> None:
+    # probes["object.property_status"]: Import.insert(name, document) is
+    # the recorded native signature (insert() demands `name` first).
     if IMPORT_STATE["insert_error"] is not None:
         raise RuntimeError(IMPORT_STATE["insert_error"])
     IMPORT_STATE["insert_calls"] = [

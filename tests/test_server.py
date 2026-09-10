@@ -50,6 +50,9 @@ class FakeConsole:
 
 
 class FakeDoc:
+    # probes["doc.lifecycle"] / probes["shape.null_attributes"]: the
+    # contract doubles keep Name/Label/FileName/Objects only; shape
+    # behavior lives in the tool-level suites.
     def __init__(self, name: str, label: str | None = None) -> None:
         self.Name = name
         self.Label = label or name

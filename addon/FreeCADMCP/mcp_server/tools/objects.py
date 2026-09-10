@@ -21,6 +21,7 @@ from ..object_validation import (
     document_bounds,
     geometry_report,
     mutation,
+    shape_is_null,
 )
 from ..protocol import DOMAIN_CURSOR, VALIDATION_FAILED, ToolError
 
@@ -784,9 +785,12 @@ def _states(obj: Any) -> list[str]:
 
 def _shape(obj: Any) -> Any:
     try:
-        return obj.Shape
+        shape = obj.Shape
     except Exception:
         return None
+    if shape_is_null(shape):
+        return None
+    return shape
 
 
 def _bounds(shape: Any) -> list[float] | None:

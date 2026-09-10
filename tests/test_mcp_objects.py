@@ -201,6 +201,11 @@ class FakeShape:
         self._check = check or []
         self._tolerance = tolerance
 
+    def isNull(self) -> bool:
+        # probes["shape.null_attributes"]: a real shape is not null; the
+        # null path goes through shape_is_null's True branch.
+        return False
+
     def isValid(self) -> bool:
         return self._valid
 
@@ -283,7 +288,12 @@ class FakeObj:
         return self._status
 
     def getTypeIdOfProperty(self, prop: str) -> str:
-        return self._types[prop]
+        # probes["object.property_status"]: a missing property raises
+        # AttributeError, not KeyError.
+        try:
+            return self._types[prop]
+        except KeyError:
+            raise AttributeError(f"Property container has no property '{prop}'") from None
 
     def getPropertyStatus(self, prop: str) -> list[str]:
         return list(self._prop_status.get(prop, ()))

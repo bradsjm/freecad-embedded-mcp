@@ -24,7 +24,7 @@ import MeshPart
 import Part
 
 from .. import protocol
-from ..object_validation import geometry_report
+from ..object_validation import geometry_report, shape_is_null
 from ..protocol import ToolError
 
 FORMATS = ("stl", "step", "3mf", "fcstd")
@@ -370,6 +370,12 @@ def _export_mesh(
 def _step_readback(path: str) -> dict[str, Any]:
     try:
         shape = Part.read(path)
+        if shape_is_null(shape):
+            raise ToolError(
+                "VALIDATION_FAILED",
+                f"STEP readback of '{path}' produced no geometry",
+                {"path": path},
+            )
         solids = list(shape.Solids)
         volume = float(sum(solid.Volume for solid in solids))
         is_valid = bool(shape.isValid())

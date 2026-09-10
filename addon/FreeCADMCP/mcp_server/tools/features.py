@@ -205,11 +205,14 @@ def _apply_profile(feature: Any, profile_obj: Any, kind: str) -> None:
 
 
 def _apply_support(feature: Any, support_obj: Any, native: str, map_mode: str) -> None:
-    if not _objects._property_exists(feature, "Support"):
-        raise _fail(f"feature '{feature.Name}' exposes no Support property")
+    for prop in ("Support", "AttachmentSupport"):
+        if _objects._property_exists(feature, prop):
+            setattr(feature, prop, [(support_obj, native)])
+            break
+    else:
+        raise _fail(f"feature '{feature.Name}' exposes neither Support nor AttachmentSupport")
     if not _objects._property_exists(feature, "MapMode"):
         raise _fail(f"feature '{feature.Name}' exposes no MapMode property")
-    feature.Support = [(support_obj, native)]
     feature.MapMode = map_mode
 
 

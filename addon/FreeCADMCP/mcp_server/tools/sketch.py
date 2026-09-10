@@ -9,10 +9,13 @@ descending index order, then additions, then datum edits. Every referenced
 index is prevalidated against a simulated index state before the
 transaction opens, so a bad index never opens one.
 
-FreeCAD 1.1.3 build variance: unavailable native getters yield ``null`` or
-empty inspection fields rather than failing the page; a missing mutation
-method rejects the operation before the transaction with
-``VALIDATION_FAILED`` naming the missing native method.
+Inspection and edit behavior mirror the native 1.1.3 contract recorded
+in tests/native_contract.json: the solver summary reads the DoF and
+FullyConstrained attributes, construction state comes from
+sketch.getConstruction(index), and constraint driving state comes from
+the Driving attribute. A missing mutation method rejects the operation
+before the transaction with VALIDATION_FAILED naming the missing
+native method.
 """
 
 from __future__ import annotations
@@ -31,28 +34,35 @@ _MAX_CONSTRAINT_ARGUMENTS = 6
 
 _SKETCH_TYPE_ID = "Sketcher::SketchObject"
 
-#: Documented Sketcher constraint type strings this tool accepts.
-_CONSTRAINT_TYPES = (
-    "Block",
-    "Coincident",
-    "Collinear",
-    "Distance",
-    "DistanceX",
-    "DistanceY",
-    "Equal",
-    "Horizontal",
-    "InternalAlignment",
-    "Perpendicular",
-    "PointOnObject",
-    "Vertical",
-    "Radius",
-    "Diameter",
-    "Angle",
-    "Symmetric",
-    "Tangent",
-    "SnellsLaw",
-    "Weight",
-)
+#: Verified Sketcher constraint forms: type -> (argument slot patterns,
+#: datum required). Slot roles: G = geometry index (>= 0), A = geometry
+#: index or axis reference (>= -2), P = point position (0, 1, or 2).
+#: Every retained pattern was accepted by the native 1.1.3 constructor
+#: in the recorded sweep (tests/native_contract.json,
+#: probes["constraint.forms"]). Collinear, InternalAlignment, SnellsLaw,
+#: AngleViaPoint and Weight have no sweep-accepted form and are rejected
+#: before the native constructor runs, which the recorded D1 crash
+#: report shows can abort the process on unclassified input.
+_CONSTRAINT_FORMS: dict[str, tuple[tuple[tuple[str, ...], ...], bool]] = {
+    "Coincident": ((("G", "P", "A", "P"),), False),
+    "Horizontal": ((("G",),), False),
+    "Vertical": ((("G",),), False),
+    "Block": ((("G",),), False),
+    "PointOnObject": ((("G", "P", "G"),), False),
+    "Parallel": ((("G", "G"),), False),
+    "Perpendicular": ((("G", "G"),), False),
+    "Equal": ((("G", "G"),), False),
+    "Tangent": ((("G", "G"),), False),
+    "Symmetric": ((("G", "P", "G", "P", "G"), ("G", "P", "G", "P", "G", "P")), False),
+    # The sweep rejected the documented one-edge [geo, posA, posB] datum
+    # form; the accepted one-edge form is [geo, pos] with a datum.
+    "DistanceX": ((("G", "P", "G", "P"), ("G", "P")), True),
+    "DistanceY": ((("G", "P", "G", "P"), ("G", "P")), True),
+    "Distance": ((("G", "P"), ("G", "P", "P"), ("G", "P", "G", "P")), True),
+    "Radius": ((("G",),), True),
+    "Diameter": ((("G",),), True),
+    "Angle": ((("G", "G"), ("G", "G", "G", "P")), True),
+}
 
 _DATUM_PATTERN = re.compile(r"^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?(\s*\S+)?$")
 
@@ -67,6 +77,7 @@ _XY_PAIR = {
 _INTEGER_ARGUMENTS = {
     "type": "array",
     "items": {"type": "integer"},
+    "minItems": 1,
     "maxItems": _MAX_CONSTRAINT_ARGUMENTS,
 }
 
@@ -126,7 +137,7 @@ _CONSTRAINT_ADD_SCHEMA = {
     "additionalProperties": False,
     "required": ["type", "arguments"],
     "properties": {
-        "type": {"type": "string", "enum": list(_CONSTRAINT_TYPES)},
+        "type": {"type": "string", "enum": list(_CONSTRAINT_FORMS)},
         "arguments": _INTEGER_ARGUMENTS,
         "datum": {
             "type": "string",
@@ -524,8 +535,37 @@ def _string_or_none(value: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _geometry_row(index: int, geo: Any) -> dict:
-    construction = bool(getattr(geo, "Construction", False))
+def _construction_flag(sketch: Any, index: int, geo: Any) -> bool:
+    """Native construction state; the element attribute does not exist."""
+
+    getter = getattr(sketch, "getConstruction", None)
+    if callable(getter):
+        try:
+            return bool(getter(index))
+        except Exception:
+            pass
+    return bool(getattr(geo, "Construction", False))
+
+
+def _geometry_row(index: int, geo: Any, sketch: Any) -> dict:
+    construction = _construction_flag(sketch, index, geo)
+    circle = getattr(geo, "Circle", None)
+    first = getattr(geo, "FirstParameter", None)
+    last = getattr(geo, "LastParameter", None)
+    if circle is not None and first is not None and last is not None:
+        # ArcOfCircle also exposes StartPoint/EndPoint, so it must be
+        # classified before the line-segment test.
+        center = getattr(circle, "Center", None)
+        return {
+            "index": index,
+            "kind": "arcOfCircle",
+            "centerX": _finite(getattr(center, "x", None)),
+            "centerY": _finite(getattr(center, "y", None)),
+            "radius": _finite(getattr(circle, "Radius", None)),
+            "startAngle": _finite(first),
+            "endAngle": _finite(last),
+            "construction": construction,
+        }
     start = getattr(geo, "StartPoint", None)
     end = getattr(geo, "EndPoint", None)
     if start is not None and end is not None:
@@ -536,21 +576,6 @@ def _geometry_row(index: int, geo: Any) -> dict:
             "startY": _finite(getattr(start, "y", None)),
             "endX": _finite(getattr(end, "x", None)),
             "endY": _finite(getattr(end, "y", None)),
-            "construction": construction,
-        }
-    first = getattr(geo, "FirstParameter", None)
-    last = getattr(geo, "LastParameter", None)
-    circle = getattr(geo, "Circle", None)
-    if first is not None and last is not None and circle is not None:
-        center = getattr(circle, "Center", None)
-        return {
-            "index": index,
-            "kind": "arcOfCircle",
-            "centerX": _finite(getattr(center, "x", None)),
-            "centerY": _finite(getattr(center, "y", None)),
-            "radius": _finite(getattr(circle, "Radius", None)),
-            "startAngle": _finite(first),
-            "endAngle": _finite(last),
             "construction": construction,
         }
     radius = getattr(geo, "Radius", None)
@@ -594,7 +619,7 @@ def _constraint_row(index: int, constraint: Any) -> dict:
         "third": _int_or_none(getattr(constraint, "Third", None)),
         "thirdPos": _int_or_none(getattr(constraint, "ThirdPos", None)),
         "datum": _datum_string(constraint),
-        "driving": _bool_or_none(getattr(constraint, "IsDriving", None)),
+        "driving": _bool_or_none(getattr(constraint, "Driving", None)),
         "active": _bool_or_none(getattr(constraint, "IsActive", None)),
         "name": _string_or_none(getattr(constraint, "Name", None)),
     }
@@ -618,23 +643,27 @@ def _expression_bindings(sketch: Any) -> list[dict]:
 
 
 def _solver_summary(sketch: Any) -> dict:
-    degrees_of_freedom: int | None = None
     solve = getattr(sketch, "solve", None)
     if callable(solve):
         try:
             solve()
         except Exception:
-            degrees_of_freedom = None
-        else:
-            getter = getattr(sketch, "getSolverDoF", None)
-            if callable(getter):
-                try:
-                    raw = getter()
-                except Exception:
-                    raw = None
-                value = _int_or_none(raw)
-                if value is not None and value >= 0:
-                    degrees_of_freedom = value
+            pass
+    # solve() returns a solver status code, never a degree count:
+    # a sketch with 7 remaining DoF returned 0.
+    dof = _int_or_none(getattr(sketch, "DoF", None))
+    if dof is None:
+        getter = getattr(sketch, "getSolverDoF", None)
+        if callable(getter):
+            try:
+                dof = _int_or_none(getter())
+            except Exception:
+                dof = None
+    if dof is not None and dof < 0:
+        dof = None
+    fully = _bool_or_none(getattr(sketch, "FullyConstrained", None))
+    if fully is None and dof is not None:
+        fully = dof == 0
     messages: list[str] = []
     get_messages = getattr(sketch, "getSolverMessages", None)
     if callable(get_messages):
@@ -645,8 +674,8 @@ def _solver_summary(sketch: Any) -> dict:
         if isinstance(raw, (list, tuple)):
             messages = [str(message) for message in raw][:16]
     return {
-        "fullyConstrained": (degrees_of_freedom == 0 if degrees_of_freedom is not None else None),
-        "degreesOfFreedom": degrees_of_freedom,
+        "fullyConstrained": fully,
+        "degreesOfFreedom": dof,
         "solverMessages": messages,
     }
 
@@ -656,7 +685,9 @@ def _geometry_rows(sketch: Any) -> list[dict]:
         geometry = list(getattr(sketch, "Geometry", ()) or ())
     except Exception:
         return []
-    return [_geometry_row(index, geo) for index, geo in enumerate(geometry[:_MAX_SKETCH_ROWS])]
+    return [
+        _geometry_row(index, geo, sketch) for index, geo in enumerate(geometry[:_MAX_SKETCH_ROWS])
+    ]
 
 
 def _constraint_rows(sketch: Any) -> list[dict]:
@@ -734,9 +765,9 @@ def _validate_constraint_add(entry: Any, what: str) -> dict:
     if not isinstance(entry, dict):
         raise _fail(f"{what} must be an object")
     constraint_type = entry.get("type")
-    if constraint_type not in _CONSTRAINT_TYPES:
+    if constraint_type not in _CONSTRAINT_FORMS:
         raise _fail(
-            f"{what}.type must be one of the documented Sketcher constraint "
+            f"{what}.type must be one of the accepted Sketcher constraint "
             f"types, got {constraint_type!r}"
         )
     arguments = entry.get("arguments")
@@ -747,10 +778,41 @@ def _validate_constraint_add(entry: Any, what: str) -> dict:
     for value in arguments:
         if isinstance(value, bool) or not isinstance(value, int):
             raise _fail(f"{what}.arguments must contain integers only")
+    patterns, datum_required = _CONSTRAINT_FORMS[constraint_type]
+    if len(arguments) not in {len(pattern) for pattern in patterns}:
+        raise _fail(
+            f"{what}.arguments has {len(arguments)} entries; "
+            f"{constraint_type} accepts "
+            f"{sorted({len(pattern) for pattern in patterns})}"
+        )
+    pattern = next(candidate for candidate in patterns if len(candidate) == len(arguments))
+    for position, (role, value) in enumerate(zip(pattern, arguments, strict=True)):
+        if role == "G" and value < 0:
+            raise _fail(
+                f"{what}.arguments[{position}] is {value}; "
+                f"{constraint_type} expects a geometry index (>= 0) at "
+                f"slot {position}"
+            )
+        if role == "A" and value < -2:
+            raise _fail(
+                f"{what}.arguments[{position}] is {value}; "
+                f"{constraint_type} expects a geometry index (>= 0) or an "
+                f"axis reference (-2, -1) at slot {position}"
+            )
+        if role == "P" and value not in (0, 1, 2):
+            raise _fail(
+                f"{what}.arguments[{position}] is {value}; "
+                f"{constraint_type} expects a point position (0, 1, or 2) "
+                f"at slot {position}"
+            )
     checked: dict = {
         "type": constraint_type,
         "arguments": list(arguments),
     }
+    if datum_required and entry.get("datum") is None:
+        raise _fail(f"{what}.datum is required by {constraint_type}")
+    if not datum_required and entry.get("datum") is not None:
+        raise _fail(f"{what}.datum is not accepted by {constraint_type}")
     if entry.get("datum") is not None:
         checked["datum"] = _check_datum(entry["datum"], f"{what}.datum")
     return checked
@@ -889,15 +951,15 @@ def _native_geometry(entry: dict):
     return Part.ArcOfCircle(circle, entry["startAngle"], entry["endAngle"])
 
 
-def _native_datum(datum: str):
-    """Best-effort native quantity for a constraint datum string."""
+def _native_datum(datum: str, what: str):
+    """Native quantity for a datum string; never returns a bare string."""
+
+    from FreeCAD import Units
 
     try:
-        from FreeCAD import Units
-
         return Units.Quantity(datum)
-    except Exception:
-        return datum
+    except Exception as exc:
+        raise _fail(f"{what} {datum!r} is not a valid FreeCAD quantity: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -936,14 +998,14 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
             result = sketch.addGeometry(_native_geometry(entry), entry["construction"])
             added_geometry.append(_added_index(result, len(added_geometry)))
         added_constraints: list[int] = []
-        for entry in plan["addConstraints"]:
+        for position, entry in enumerate(plan["addConstraints"]):
             import Sketcher
 
             if entry.get("datum") is not None:
                 constraint = Sketcher.Constraint(
                     entry["type"],
                     *entry["arguments"],
-                    _native_datum(entry["datum"]),
+                    _native_datum(entry["datum"], f"addConstraints[{position}].datum"),
                 )
             else:
                 constraint = Sketcher.Constraint(entry["type"], *entry["arguments"])
@@ -953,7 +1015,10 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
             {"index": entry["index"], "datum": entry["datum"]} for entry in plan["setDatums"]
         ]
         for entry in plan["setDatums"]:
-            sketch.setDatum(entry["index"], entry["datum"])
+            sketch.setDatum(
+                entry["index"],
+                _native_datum(entry["datum"], f"setDatums[{entry['index']}].datum"),
+            )
 
     return {
         "document": str(getattr(doc, "Name", "")),

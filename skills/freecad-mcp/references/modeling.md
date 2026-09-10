@@ -18,31 +18,26 @@ The [Part Workbench](https://wiki.freecad.org/Part_Workbench) uses constructive 
 
 Use PartDesign when the result should be one coherent component with a feature history. A `PartDesign::Body` owns the sequence; its `Tip` is the exposed result. Common features are `Pad`, `Pocket`, `Revolution`, `Hole`, `Fillet`, `Chamfer`, dress-up, and pattern features. Read [PartDesign Workbench](https://wiki.freecad.org/PartDesign_Workbench), [PartDesign Body](https://wiki.freecad.org/PartDesign_Body), and [Feature editing](https://wiki.freecad.org/Feature_editing).
 
-Bootstrap the Body and its first feature through `run_script`. An empty Body has a null shape, so `create_object` cannot create it and `create_feature` cannot add the first sketch to it. Once the Body holds one solid, the structured tools work on it normally. The verified sequence is:
+Build the whole chain with the structured tools. Shapeless objects are valid, so the empty Body and the empty sketch need no bootstrap:
 
-```python
-import FreeCAD as App, Part, Sketcher
-from FreeCAD import Vector
+1. Create the Body: `create_object` with type `PartDesign::Body`.
+2. Create the sketch and its attachment: `create_feature` with `kind: "sketch"`, `support: {"object": "XY_Plane"}`, and `properties: {"MapMode": "FlatFace"}`.
+3. Draw the profile: `edit_sketch` with `addGeometry`.
+4. Constrain the profile: `edit_sketch` with `addConstraints`. Read `addedGeometry` from step 3 so the indices are real.
+5. Pad it: `create_feature` with `kind: "pad"` and `profile` set to the sketch.
 
-doc = App.ActiveDocument
-body = doc.addObject("PartDesign::Body", "Body")
-sketch = body.newObject("Sketcher::SketchObject", "Profile")
-sketch.AttachmentSupport = [(doc.getObject("XY_Plane"), "")]
-sketch.MapMode = "FlatFace"
-for start, end in (((0, 0), (40, 0)), ((40, 0), (40, 30)),
-                   ((40, 30), (0, 30)), ((0, 30), (0, 0))):
-    sketch.addGeometry(Part.LineSegment(Vector(*start, 0), Vector(*end, 0)), False)
-for index in range(3):
-    sketch.addConstraint(Sketcher.Constraint("Coincident", index, 2, index + 1, 1))
-sketch.addConstraint(Sketcher.Constraint("Coincident", 3, 2, 0, 1))
-pad = body.newObject("PartDesign::Pad", "Pad")
-pad.Profile = sketch
-pad.Length = 10.0
-doc.recompute()
-print(body.Tip.Name, len(body.Shape.Solids), round(body.Shape.Volume, 3))
+```json
+{
+  "document": "Part",
+  "body": "Body",
+  "kind": "pad",
+  "name": "Pad",
+  "profile": "Profile",
+  "properties": {"Length": 10}
+}
 ```
 
-See [Sketcher profiles](sketcher.md) for the constraint arguments and the null-shape limits.
+See [Sketcher profiles](sketcher.md) for the constraint arguments and the full rectangle recipe.
 
 Prefer sketches attached to Body Origin planes or stable datum geometry. Avoid attaching critical sketches to generated faces when the model will be edited: face numbering can change after upstream edits (the [topological naming problem](https://wiki.freecad.org/Topological_naming_problem)).
 

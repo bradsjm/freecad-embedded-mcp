@@ -9,6 +9,7 @@ document doubles.
 from __future__ import annotations
 
 import importlib.util
+import math
 import sys
 import types
 from collections.abc import Iterator
@@ -69,6 +70,16 @@ class StubArcOfCircle:
         self.Circle = circle
         self.FirstParameter = float(start)
         self.LastParameter = float(end)
+        # Native arcs expose endpoints too; the arc must still be
+        # classified first (probes["geometry.attributes"], ArcOfCircle).
+        self.StartPoint = StubVector(
+            circle.Center.x + circle.Radius * math.cos(start),
+            circle.Center.y + circle.Radius * math.sin(start),
+        )
+        self.EndPoint = StubVector(
+            circle.Center.x + circle.Radius * math.cos(end),
+            circle.Center.y + circle.Radius * math.sin(end),
+        )
 
 
 class StubConstraint:
@@ -88,7 +99,7 @@ class StubConstraint:
         self.Arguments = arguments
         self.Value = None
         self.Name = ""
-        self.IsDriving = True
+        self.Driving = True
         self.IsActive = True
         self.First = arguments[0] if len(arguments) > 0 else None
         self.FirstPos = arguments[1] if len(arguments) > 1 else None
@@ -181,8 +192,13 @@ class FakeSketch:
         self.Geometry: list[Any] = list(geometry or [])
         self.Constraints: list[Any] = list(constraints or [])
         self.degrees_of_freedom = degrees_of_freedom
+        # Native attribute names; solve() returns a status code, the DoF
+        # attribute carries the degree count (probes["solver.attributes"]).
+        self.DoF = degrees_of_freedom
+        self.FullyConstrained = degrees_of_freedom == 0 if degrees_of_freedom is not None else None
         self.ops: list[tuple] = []
         self.datums: dict[int, str] = {}
+        self.construction_flags: dict[int, bool] = {}
         self.expression_engine: list[tuple[str, str]] = []
         self.fail_set_datum: int | None = None
         if with_methods:
@@ -195,7 +211,10 @@ class FakeSketch:
 
     # Native-style methods (bound only when with_methods is true).
     def _add_geometry(self, geo: Any, construction: bool = False) -> int:
-        geo.Construction = construction
+        # Native addGeometry sets no Construction attribute on the
+        # element; the state lives in getConstruction
+        # (probes["geometry.getConstruction"]).
+        self.construction_flags[len(self.Geometry)] = construction
         self.Geometry.append(geo)
         self.ops.append(("addGeometry", type(geo).__name__, construction))
         return len(self.Geometry) - 1
@@ -213,27 +232,28 @@ class FakeSketch:
         self.ops.append(("delConstraint", index))
         self.Constraints.pop(index)
 
-    def _set_datum(self, index: int, datum: str) -> None:
+    def _set_datum(self, index: int, datum: Any) -> None:
+        # Native setDatum fails with exactly this error for a bare
+        # string (probes["setDatum.string"]); the edit path must hand it
+        # a quantity.
+        if isinstance(datum, str):
+            raise TypeError("Wrong arguments")
         if self.fail_set_datum == index:
             raise RuntimeError(f"cannot set datum {index}")
-        self.ops.append(("setDatum", index, datum))
-        self.datums[index] = datum
+        self.ops.append(("setDatum", index, getattr(datum, "text", datum)))
+        self.datums[index] = getattr(datum, "text", str(datum))
 
     def isDerivedFrom(self, type_id: str) -> bool:
         return type_id == "Sketcher::SketchObject"
 
     def solve(self) -> int:
+        # Solver status code, never a degree count
+        # (probes["solver.attributes"]).
         self.solve_calls += 1
         return 0
 
-    def getSolverDoF(self) -> int:
-        return self.degrees_of_freedom
-
-
-class NoSolverDoFSketch(FakeSketch):
-    """Build variant without the native degree-of-freedom getter."""
-
-    getSolverDoF = None  # type: ignore[assignment]
+    def getConstruction(self, index: int) -> bool:
+        return self.construction_flags.get(index, False)
 
 
 class FakeApp:
@@ -352,7 +372,7 @@ def test_inspect_reports_geometry_kinds_in_native_order(sketch_module) -> None:
             unsupported,
         ]
     )
-    sketch.Geometry[4].Construction = True
+    sketch.construction_flags[1] = True  # native: getConstruction(index)
     ctx = FakeCtx(FakeDoc(sketch))
 
     result = call_inspect(sketch_module, ctx)
@@ -379,11 +399,12 @@ def test_inspect_reports_geometry_kinds_in_native_order(sketch_module) -> None:
         "startY": 0.0,
         "endX": 4.0,
         "endY": 4.0,
-        "construction": False,
+        "construction": True,
     }
     assert result["geometry"][2]["radius"] == 3.0
     assert result["geometry"][3]["startAngle"] == 0.0
     assert result["geometry"][3]["endAngle"] == 1.5
+    assert result["geometry"][3]["radius"] == 5.0
     assert result["geometry"][4] == {
         "index": 4,
         "kind": "unsupported",
@@ -415,7 +436,7 @@ def test_inspect_reports_constraints_datum_and_bindings(sketch_module) -> None:
     assert result["expressionBindings"] == [{"constraint": "width", "expression": "BaseWidth"}]
 
 
-def test_inspect_solver_summary_from_solve_and_get_solver_dof(sketch_module) -> None:
+def test_inspect_solver_summary_reads_dof_attributes(sketch_module) -> None:
     sketch = rectangle_sketch()
     ctx = FakeCtx(FakeDoc(sketch))
 
@@ -429,8 +450,14 @@ def test_inspect_solver_summary_from_solve_and_get_solver_dof(sketch_module) -> 
     assert sketch.solve_calls == 1
 
 
-def test_inspect_solver_summary_is_null_without_native_getters(sketch_module) -> None:
-    sketch = NoSolverDoFSketch(geometry=rectangle_sketch().Geometry)
+def test_inspect_solver_summary_is_null_when_dof_attribute_is_missing(
+    sketch_module,
+) -> None:
+    # Build variant: a null DoF attribute with no getter reports nulls
+    # instead of failing the page.
+    sketch = rectangle_sketch()
+    sketch.DoF = None
+    sketch.FullyConstrained = None
     ctx = FakeCtx(FakeDoc(sketch))
 
     result = call_inspect(sketch_module, ctx)
@@ -438,6 +465,28 @@ def test_inspect_solver_summary_is_null_without_native_getters(sketch_module) ->
     assert result["solver"] == {
         "fullyConstrained": None,
         "degreesOfFreedom": None,
+        "solverMessages": [],
+    }
+
+
+def test_inspect_solver_summary_uses_getter_fallback_not_the_solve_value(
+    sketch_module,
+) -> None:
+    # Build variant: a build with getSolverDoF but a null DoF attribute
+    # falls back to the getter. The recorded fixture (probes
+    # ["solver.attributes"]) returned solve() == 0 with DoF == 4: the
+    # status code is never read as the degree count.
+    sketch = rectangle_sketch()
+    sketch.DoF = None
+    sketch.FullyConstrained = None
+    sketch.getSolverDoF = lambda: 4
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    result = call_inspect(sketch_module, ctx)
+
+    assert result["solver"] == {
+        "fullyConstrained": False,
+        "degreesOfFreedom": 4,
         "solverMessages": [],
     }
 
@@ -469,8 +518,8 @@ CONSTRAINT_OPS = [
     {"type": "Horizontal", "arguments": [2]},
     {"type": "Vertical", "arguments": [1]},
     {"type": "Vertical", "arguments": [3]},
-    {"type": "DistanceX", "arguments": [0, 1, 1], "datum": "10 mm"},
-    {"type": "DistanceY", "arguments": [1, 2, 2], "datum": "10 mm"},
+    {"type": "DistanceX", "arguments": [0, 1], "datum": "10 mm"},
+    {"type": "DistanceY", "arguments": [1, 2], "datum": "10 mm"},
 ]
 
 
@@ -525,7 +574,7 @@ def test_add_geometry_supports_all_four_kinds(sketch_module) -> None:
         "StubCircle",
         "StubArcOfCircle",
     ]
-    assert sketch.Geometry[3].Construction is True
+    assert sketch.getConstruction(3) is True
     assert isinstance(sketch.Geometry[0], StubPoint)
 
 
@@ -560,7 +609,7 @@ def test_set_datums_run_after_additions_with_final_indexes(sketch_module) -> Non
     result = call_edit(
         sketch_module,
         ctx,
-        addConstraints=[{"type": "DistanceX", "arguments": [0, 1, 1], "datum": "10 mm"}],
+        addConstraints=[{"type": "DistanceX", "arguments": [0, 1], "datum": "10 mm"}],
         setDatums=[{"index": 0, "datum": "12 mm"}],
     )
 
@@ -616,8 +665,8 @@ def test_datum_edits_validate_against_the_final_constraint_state(
         ctx,
         deleteConstraints=[0, 1],
         addConstraints=[
-            {"type": "Radius", "arguments": [0]},
-            {"type": "Radius", "arguments": [1]},
+            {"type": "Radius", "arguments": [0], "datum": "3 mm"},
+            {"type": "Radius", "arguments": [1], "datum": "3 mm"},
         ],
         setDatums=[{"index": 1, "datum": "3 mm"}],
     )
@@ -629,8 +678,8 @@ def test_datum_edits_validate_against_the_final_constraint_state(
             ctx,
             deleteConstraints=[0, 1],
             addConstraints=[
-                {"type": "Radius", "arguments": [0]},
-                {"type": "Radius", "arguments": [1]},
+                {"type": "Radius", "arguments": [0], "datum": "3 mm"},
+                {"type": "Radius", "arguments": [1], "datum": "3 mm"},
             ],
             setDatums=[{"index": 2, "datum": "3 mm"}],
         )
@@ -700,7 +749,7 @@ def test_invalid_datum_strings_are_rejected(sketch_module) -> None:
                 addConstraints=[
                     {
                         "type": "DistanceX",
-                        "arguments": [0, 1, 1],
+                        "arguments": [0, 1],
                         "datum": bad_datum,
                     }
                 ],
@@ -720,4 +769,55 @@ def test_unknown_constraint_type_is_rejected(sketch_module) -> None:
         )
 
     assert excinfo.value.code == VALIDATION_FAILED
-    assert "documented Sketcher constraint types" in excinfo.value.message
+    assert "accepted Sketcher constraint types" in excinfo.value.message
+
+
+def test_point_position_outside_the_domain_is_rejected_before_the_native_call(
+    sketch_module,
+) -> None:
+    # probes["constraint.forms"]: the four-token DistanceX form with a
+    # position value outside 0..2 is the recorded D1 crash input; the
+    # pattern table rejects it before Sketcher.Constraint runs.
+    sketch = rectangle_sketch()
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addConstraints=[{"type": "DistanceX", "arguments": [0, 1, 1, 7], "datum": "10 mm"}],
+        )
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert "point position" in excinfo.value.message
+
+
+def test_datum_edits_reach_the_native_call_as_quantities(sketch_module) -> None:
+    # probes["setDatum.quantity"]: the native call accepts a quantity;
+    # the string variant fails with TypeError: Wrong arguments.
+    sketch = rectangle_sketch()
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addConstraints=[{"type": "DistanceX", "arguments": [0, 1], "datum": "10 mm"}],
+        setDatums=[{"index": 0, "datum": "12 mm"}],
+    )
+
+    assert result["changedDatums"] == [{"index": 0, "datum": "12 mm"}]
+    assert sketch.datums == {0: "12 mm"}
+    with pytest.raises(TypeError, match="Wrong arguments"):
+        sketch._set_datum(0, "12 mm")
+
+
+def test_construction_state_comes_from_getconstruction(sketch_module) -> None:
+    # probes["geometry.getConstruction"]: the element attribute does not
+    # exist; the flag is read from the sketch.
+    sketch = FakeSketch(geometry=[line(0, 0, 10, 0), line(0, 5, 10, 5)])
+    sketch.construction_flags[1] = True
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    result = call_inspect(sketch_module, ctx)
+
+    assert [row["construction"] for row in result["geometry"]] == [False, True]

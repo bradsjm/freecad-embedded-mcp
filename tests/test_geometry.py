@@ -142,6 +142,10 @@ class FakeShape:
         copied._section = self._section
         return copied
 
+    def isNull(self):
+        # probes["shape.null_attributes"]: a real shape is not null.
+        return False
+
     def isValid(self):
         return True
 

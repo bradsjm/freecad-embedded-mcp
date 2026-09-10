@@ -176,7 +176,13 @@ class FakeBody(FakeFeature):
         return type_id == "PartDesign::Body"
 
     def newObject(self, type_id: str, name: str) -> FakeFeature:
-        properties = ("Profile", "Support", "MapMode", "Length")
+        # probes["attachment.properties"]: the sketch exposes
+        # AttachmentSupport and MapMode but not Support; the datum plane
+        # the same; the Pad exposes none of the attachment properties.
+        properties = {
+            "Sketcher::SketchObject": ("Profile", "AttachmentSupport", "MapMode"),
+            "PartDesign::Plane": ("AttachmentSupport", "MapMode", "Placement"),
+        }.get(type_id, ("Profile", "Length", "Type"))
         feature = FakeFeature(
             name,
             type_id,
@@ -539,8 +545,31 @@ def test_support_and_properties_apply_to_the_created_feature() -> None:
 
         feature = doc.getObject("Sketch002")
         assert feature.MapMode == "FlatFace"
-        assert feature.Support == [(doc.getObject("Sketch"), "")]
+        # probes["attachment.properties"]: a sketch exposes
+        # AttachmentSupport, not Support.
+        assert feature.AttachmentSupport == [(doc.getObject("Sketch"), "")]
         assert result["applied"] == ["Body", "Sketch002"]
+
+
+def test_support_without_attachment_properties_is_rejected() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc()
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                ctx,
+                kind="pad",
+                name="Pad",
+                profile="Sketch",
+                support={"object": "Sketch", "subelement": ""},
+                properties={"MapMode": "FlatFace"},
+            )
+
+        # probes["attachment.properties"]: the Pad exposes neither
+        # Support nor AttachmentSupport.
+        assert "exposes neither Support nor AttachmentSupport" in excinfo.value.message
 
 
 def test_datum_plane_uses_the_registered_core_type() -> None:

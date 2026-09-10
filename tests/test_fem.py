@@ -92,6 +92,8 @@ class FakeCalculiXToolsBase:
         self.prepare_called = False
         self.compute_called = False
         self.super_update_called = False
+        # probes["qt.signals"]: queued Qt signals deliver on the
+        # application thread between GUI operations.
         self.process.finished.connect(self._process_finished)
 
     def _process_finished(self, code: int, status: Any) -> None:
@@ -245,6 +247,8 @@ def load_fem(
     membertools.get_mesh_to_solve = lambda analysis: (FakeMesh(), mesh_message)
     membertools.AnalysisMember = lambda analysis: types.SimpleNamespace()
     objects_fem = types.ModuleType("ObjectsFem")
+    # probes["fem.objects"]: makeSolverCalculiX is a recorded 1.1.3
+    # ObjectsFem factory name.
     objects_fem.makeSolverCalculiX = lambda doc, name="SolverCalculiX": FakeSolver()
     qt_core = types.ModuleType("PySide.QtCore")
     qt_core.QTimer = FakeQTimer

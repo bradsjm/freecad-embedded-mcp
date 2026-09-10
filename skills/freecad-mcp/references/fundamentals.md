@@ -42,7 +42,6 @@ print([t for t in App.ActiveDocument.supportedTypes() if t.startswith(("Part::",
 
 `create_object` uses `doc.addObject(type, name)` for generic Part/App types and an explicit `ObjectsFem` factory mapping for FEM types. The registered object type determines which properties exist. Inspect `PropertiesList` through `inspect_objects(detail="full")` before editing unfamiliar objects.
 
-`create_object` fails and rolls back for a type that has no shape after recompute. Those types include `PartDesign::Body` and a bare `Part::Feature`: the mutation gate cannot report a null shape. Create those through `run_script`. See [Null-shape objects block the mutation gate](sketcher.md#null-shape-objects-block-the-mutation-gate).
 
 A Part feature stores BRep geometry in `Shape`; a mesh feature stores mesh data in `Mesh`; a Body stores a feature history and exposes a `Tip`. Do not assign a mesh to a Shape property or overwrite a parametric feature casually.
 

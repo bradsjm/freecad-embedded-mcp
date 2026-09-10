@@ -111,6 +111,8 @@ class FakeMesh:
         return self.facets
 
     def write(self, path: str, Format: str | None = None) -> None:
+        # probes["mesh.pipeline"]: the 3MF write takes Format="3MF"; the
+        # STL write takes none.
         self.write_calls.append((str(path), Format))
         with open(path, "wb") as handle:
             handle.write(b"BAD" if hooks.mesh_write_poison else f"FACETS:{self.facets}".encode())
@@ -146,7 +148,24 @@ class FakeReadShape:
         self.Volume = 1000.0
         self.BoundBox = FakeBoundBox(0.0, 0.0, 0.0, 10.0, 10.0, 10.0)
 
+    def isNull(self) -> bool:
+        # probes["shape.null_attributes"]: a good STEP readback is a
+        # real, non-null shape.
+        return False
+
     def isValid(self) -> bool:
+        return True
+
+
+class FakeNullReadShape:
+    """A STEP readback that produced no geometry (isNull() True)."""
+
+    @property
+    def Volume(self) -> float:
+        # probes["shape.null_attributes"]: .Volume raises on a null shape.
+        raise RuntimeError("shape is invalid")
+
+    def isNull(self) -> bool:
         return True
 
 
@@ -353,6 +372,16 @@ def load_export_module() -> Iterator[types.ModuleType]:
     object_validation.geometry_report = _fake_geometry_report
     object_validation.object_validity_error = lambda obj: None
     object_validation.compare_expected_bounds = _fake_compare_expected_bounds
+
+    def _stub_shape_is_null(shape):
+        if shape is None:
+            return True
+        try:
+            return bool(shape.isNull())
+        except Exception:
+            return False
+
+    object_validation.shape_is_null = _stub_shape_is_null
 
     sys.modules["FreeCAD"] = freecad
     sys.modules["Mesh"] = mesh
@@ -574,6 +603,31 @@ def test_step_export_publishes_and_returns_readback(export_module, tmp_path) -> 
     }
     with open(destination, "rb") as handle:
         assert handle.read() == b"STEP-OK"
+
+
+def test_step_readback_of_a_null_shape_fails_validation(
+    export_module, tmp_path, monkeypatch
+) -> None:
+    ctx = FakeCtx(str(tmp_path))
+    make_box_document(ctx)
+    destination = os.path.join(ctx.root, "null.step")
+
+    monkeypatch.setattr(export_module.Part, "read", lambda path: FakeNullReadShape())
+
+    with pytest.raises(ToolError) as excinfo:
+        export_module.export(
+            ctx,
+            {
+                "document": "Smoke",
+                "objects": ["Box1"],
+                "format": "step",
+                "path": destination,
+            },
+        )
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert "produced no geometry" in excinfo.value.message
+    assert not os.path.exists(destination)
 
 
 def test_new_file_race_requires_fresh_consent(export_module, tmp_path, monkeypatch) -> None:

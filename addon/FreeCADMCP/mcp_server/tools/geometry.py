@@ -23,7 +23,11 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from ..object_validation import compare_expected_bounds, geometry_report
+from ..object_validation import (
+    compare_expected_bounds,
+    geometry_report,
+    shape_is_null,
+)
 from ..protocol import (
     DOMAIN_CURSOR,
     VALIDATION_FAILED,
@@ -81,6 +85,8 @@ def _shape_of(obj: Any) -> Any:
     try:
         shape = getattr(obj, "Shape", None)
     except Exception:
+        return None
+    if shape_is_null(shape):
         return None
     return shape or None
 

@@ -26,30 +26,44 @@ Then choose a registered type, load the relevant workbench/module if appropriate
 
 Inspect property names, types, and metadata with `inspect_objects(document, detail="full")`. `edit_object` prevalidates every property before the transaction opens, so a failed call assigns nothing. Use plain numbers for quantity properties (internal units apply) and canonical `{"object", "subelement"}` links for references. Feature-specific assignments the mapper cannot express go through `run_script`.
 
-## `RuntimeError: shape is invalid` on a create or edit
-
-The mutation aborted and rolled back. The cause is a null-shape object in the validated set, not bad arguments. On FreeCAD 1.1.3 a fresh object raises `RuntimeError: shape is invalid` for `.Volume`, `.Area`, `.ShapeType`, and `.isValid()` until geometry is assigned.
-
-Common triggers, all verified:
-
-- `create_object` for `PartDesign::Body` or `Part::Feature`. `create_object` for `Part::Box` works.
-- `create_feature` for the first sketch, datum plane, or pad inside a Body that has no solid.
-- `edit_sketch` on a sketch inside a Body that has no solid. The Body is a validated dependent.
-
-Do not retry the same call. Bootstrap the Body, its first sketch, and its first Pad through `run_script`, then use the structured tools. For a standalone sketch, create it through `run_script` and `edit_sketch` works immediately. See [Null-shape objects block the mutation gate](sketcher.md#null-shape-objects-block-the-mutation-gate).
-
-A related argument error: `feature '...' exposes no Support property` means the target type uses `AttachmentSupport` instead. That is the case for `Sketcher::SketchObject` and `PartDesign::Plane`. Set `AttachmentSupport` and `MapMode` through `run_script`. Do not pass `support` to `create_feature` for those kinds.
 
 ## Sketch edit failed
 
 `edit_sketch` is atomic: a rejected entry rolls back the whole batch and reports `nextAction: retry_from_original_state`. The document is unchanged, so no cleanup is needed.
 
-- `TypeError: Wrong arguments` from a `setDatums` entry is expected in FreeCAD 1.1.3. The server passes a string where the native `setDatum` needs a `FreeCAD.Units.Quantity`. Re-add the constraint with the corrected `datum`, or set the value through `run_script` with `sketch.setDatum(index, App.Units.Quantity("45 mm"))`. See [Sketcher profiles through MCP](sketcher.md).
-- `TypeError: Invalid parameters` names a constraint type whose native constructor does not accept the documented argument list. `Collinear`, `InternalAlignment`, `SnellsLaw`, `AngleViaPoint`, and some `Weight` forms rejected their wiki argument lists on FreeCAD 1.1.3. Use `Tangent` between two lines, or assert the exact native form before you rely on it.
+- A `setDatums` datum that is not a valid quantity fails with `VALIDATION_FAILED` before the transaction opens. Correct the datum string; the native call always receives a `FreeCAD.Units.Quantity`.
+- `VALIDATION_FAILED` naming the accepted forms means the server rejected the constraint entry before any native call. `Collinear`, `InternalAlignment`, `SnellsLaw`, `AngleViaPoint`, and `Weight` are rejected without a native call, because the native 1.1.3 constructor accepted no verified form of them. Use `Tangent` between two lines, or use `run_script` with a form recorded in `tests/native_contract.json`.
 - A batch that used geometry indices for constraints added in the same batch fails or constrains the wrong element. Add the geometry, read the returned `addedGeometry` indices, then add the constraints.
 - Deleting geometry or constraints renumbers the remaining rows. Never reuse a pre-delete index after a delete.
 
 A sketch that reports `Invalid` after a batch accepted a conflicting or redundant constraint. The native `addConstraint` does not reject it. Delete the redundant constraint, then re-read the sketch. A conflicting pair and a redundant pair each produced a negative `solve()` result and state `['Touched', 'Invalid']` on FreeCAD 1.1.3.
+
+## FreeCAD crash during a live session
+
+The client connection dropping mid-call may mean FreeCAD died. A dropped connection alone does not prove it: check for a live process first.
+
+```bash
+pgrep -f FreeCAD
+```
+
+When FreeCAD died, read the newest crash report and the triggered thread frames:
+
+```bash
+ls -t ~/Library/Logs/DiagnosticReports/freecad-*.ips | head -1
+```
+
+The `.ips` file holds two JSON documents: the first line is one object, the remainder is a second. Read `exception`, `termination`, and the frames of the thread whose `triggered` key is true.
+
+When you verify work, stop with the reason. Record the step, the journal path, and the crash-report path. Do not restart FreeCAD and do not retry the step.
+
+When you develop tests, restart FreeCAD and resume only with the `--dev` mode of `examples/native_contract_probe.py`:
+
+```bash
+osascript -e 'quit app "FreeCAD"'
+osascript -e 'tell application "FreeCAD" to activate'
+```
+
+When `osascript activate` fails, use `open -a FreeCAD`. Never resume by replaying the interrupted call. Recreate the probe document, confirm `discover_capabilities` reports `gui.state == "healthy"` with `queuedJobs == 0`, and complete one trivial GUI-thread call before the next step.
 
 ## Invalid or touched object
 

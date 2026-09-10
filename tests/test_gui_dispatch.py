@@ -25,6 +25,8 @@ if str(ADDON_DIR) not in sys.path:
 
 
 class FakeSignal:
+    # probes["qt.signals"]: queued Qt signals deliver on the
+    # application thread between GUI operations.
     def __init__(self) -> None:
         self.callback = None
 

@@ -114,6 +114,22 @@ def _finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def shape_is_null(shape: Any) -> bool:
+    """True when the shape carries no geometry.
+
+    FreeCAD raises ``RuntimeError: shape is invalid`` for ``.Volume``,
+    ``.Area``, ``.ShapeType`` and ``.isValid()`` on such a shape. ``len(Solids)``
+    stays safe. A shape without ``isNull()`` (a double) is not null.
+    """
+
+    if shape is None:
+        return True
+    try:
+        return bool(shape.isNull())
+    except Exception:
+        return False
+
+
 def _shape_bounds(shape: Any) -> list[float] | None:
     try:
         box = shape.BoundBox
@@ -167,10 +183,11 @@ def geometry_report(obj: Any, expected_solids: int | None = None) -> dict:
     The solid contract: an explicit ``expected_solids`` requires the shape to
     have exactly that many solids. The default wants exactly one solid *only*
     for shapes that actually contain solids; zero-solid shapes (wires, empty
-    bodies) and shapeless objects (groups, sketches, spreadsheets, FEM
-    containers) are valid without one. A shape that contains solids must
-    also enclose a positive volume: zero, negative, or non-finite volume is
-    degenerate and fails the report.
+    bodies), null shapes, and shapeless objects (groups, sketches,
+    spreadsheets, FEM containers) are valid without one. A null shape and a
+    shapeless object are both valid without a solid contract. A shape that
+    contains solids must also enclose a positive volume: zero, negative, or
+    non-finite volume is degenerate and fails the report.
     """
 
     name = str(getattr(obj, "Name", "<unknown>"))
@@ -195,15 +212,17 @@ def geometry_report(obj: Any, expected_solids: int | None = None) -> dict:
         shape = obj.Shape
     except Exception:
         shape = None
-    if shape is None:
-        # Shapeless objects are valid without a solid contract; an explicit
-        # nonzero expected_solids cannot be satisfied without a shape.
+    if shape_is_null(shape):
+        # A null shape is a valid object with no geometry, exactly like a
+        # shapeless one: only an explicit positive expected_solids
+        # contract can fail it.
         if expected_solids is not None and expected_solids > 0:
             report["error"] = (
-                f"Object '{name}' has no shape; expected_solids="
+                f"Object '{name}' has no geometry; expected_solids="
                 f"{expected_solids} cannot be satisfied."
             )
             return report
+        report["solid_count"] = 0 if shape is not None else None
         report["ok"] = True
         report["error"] = None
         return report
@@ -213,7 +232,10 @@ def geometry_report(obj: Any, expected_solids: int | None = None) -> dict:
     except Exception:
         report["shape_valid"] = None
     report["solid_count"] = _solid_count(shape)
-    report["volume"] = _finite(getattr(shape, "Volume", None))
+    try:
+        report["volume"] = _finite(shape.Volume)
+    except Exception:
+        report["volume"] = None
     report["bounds"] = _shape_bounds(shape)
     report["diagnostics"] = _shape_diagnostics(shape)
     try:

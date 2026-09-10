@@ -21,6 +21,9 @@ from mcp_server.tools import parameters
 
 
 class FakeObj:
+    # probes["object.property_status"]: property containers report
+    # PropertiesList and type ids via getTypeIdOfProperty, and a
+    # missing property raises AttributeError.
     """Dynamic-property bookkeeping without FreeCAD."""
 
     def __init__(

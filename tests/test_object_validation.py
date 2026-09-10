@@ -95,7 +95,9 @@ def test_validity_check_exception_is_reported_as_failure() -> None:
 from mcp_server.object_validation import (
     compare_expected_bounds,
     dependent_count,
+    geometry_report,
     mutation,
+    shape_is_null,
 )
 from mcp_server.protocol import ToolError
 
@@ -174,6 +176,13 @@ def test_dependent_count_is_capped_at_the_limit() -> None:
 # ---------------------------------------------------------------------------
 
 
+class _NonNullShape:
+    """Real-shape double: isNull() is False; nothing else is implemented."""
+
+    def isNull(self) -> bool:
+        return False
+
+
 class FakeShapeObj:
     """Minimal valid solid-shaped object for gate drives."""
 
@@ -182,7 +191,9 @@ class FakeShapeObj:
         self.TypeId = "Part::Feature"
         self.State: list[str] = []
         self.InList = list(in_list)
-        self.Shape = None  # shapeless: valid without a solid contract
+        # A non-null shape double (probes["shape.null_attributes"]): the
+        # isNull() verdict drives the report, all other reads stay guarded.
+        self.Shape = _NonNullShape()
 
     def isValid(self) -> bool:
         return True
@@ -329,3 +340,93 @@ def test_prevalidation_failure_has_no_operation_state() -> None:
         pass
 
     assert (excinfo.value.details or {}).get("operationState") is None
+
+
+# ---------------------------------------------------------------------------
+# Null-shape doubles (probes["shape.null_attributes"]).
+# ---------------------------------------------------------------------------
+
+
+class FreeCADError(RuntimeError):
+    pass
+
+
+class OCCError(RuntimeError):
+    pass
+
+
+class FakeNullShape:
+    """A fresh PartDesign::Body's null shape, per the recorded probe.
+
+    ``Volume`` and ``Area`` raise ``RuntimeError: shape is invalid``;
+    ``ShapeType`` raises ``FreeCADError``; ``isValid`` raises
+    ``OCCError``; ``check()`` returns None; ``getTolerance`` wants an
+    argument; ``Solids`` stays a safe empty list; ``isNull()`` is True.
+    """
+
+    def isNull(self) -> bool:
+        return True
+
+    @property
+    def Volume(self) -> float:
+        raise RuntimeError("shape is invalid")
+
+    @property
+    def Area(self) -> float:
+        raise RuntimeError("shape is invalid")
+
+    @property
+    def ShapeType(self) -> str:
+        raise FreeCADError("cannot determine type of null shape")
+
+    def isValid(self) -> bool:
+        raise OCCError("Standard_NullObject BRepCheck_Analyzer::Init() - NULL shape")
+
+    def check(self) -> None:
+        return None
+
+    def getTolerance(self, *_: Any) -> float:
+        raise TypeError("function takes at least 1 argument (0 given)")
+
+    @property
+    def Solids(self) -> list:
+        return []
+
+
+def test_null_shape_is_valid_without_a_solid_contract() -> None:
+    obj = FakeObject(Name="Body", TypeId="PartDesign::Body")
+    obj.Shape = FakeNullShape()
+
+    report = geometry_report(obj)
+
+    assert report["ok"] is True
+    assert report["error"] is None
+    assert report["solid_count"] == 0
+    assert report["volume"] is None
+
+
+def test_null_shape_fails_positive_expected_solids_with_the_recorded_message() -> None:
+    obj = FakeObject(Name="Body")
+    obj.Shape = FakeNullShape()
+
+    report = geometry_report(obj, expected_solids=1)
+
+    assert report["ok"] is False
+    assert "has no geometry; expected_solids=1 cannot be satisfied" in report["error"]
+
+
+def test_geometry_report_never_raises_on_a_null_shape() -> None:
+    obj = FakeObject(Name="Body")
+    obj.Shape = FakeNullShape()
+
+    report = geometry_report(obj, expected_solids=0)
+
+    assert report["ok"] is True
+    assert report["volume"] is None
+    assert shape_is_null(obj.Shape) is True
+
+
+def test_shape_is_null_is_false_for_a_real_shape_double() -> None:
+    assert shape_is_null(FakeShapeObj("Box").Shape) is False
+    assert shape_is_null(None) is True
+    assert shape_is_null(object()) is False

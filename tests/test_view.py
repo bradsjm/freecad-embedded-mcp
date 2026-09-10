@@ -94,7 +94,15 @@ class FakeSelection:
         self.complete = []
         self.clear_count += 1
 
-    def addSelection(self, obj: Any, subelement: str | None = None) -> None:
+    # probes["gui.selection"]: the native addSelection accepts the
+    # single-object form and the six-argument document form; the
+    # two-argument object+subelement form is what this tool calls.
+    def addSelection(self, obj: Any, subelement: str | None = None, *extra: Any) -> None:
+        if extra:
+            # Native six-argument form: (docname, objname, sub, x, y, z).
+            if len(extra) != 4:
+                raise TypeError("addSelection arity not supported")
+            subelement = extra[0]
         entry = next((item for item in self.complete if item["object"] is obj), None)
         if entry is None:
             entry = {
@@ -140,6 +148,9 @@ class FakeView:
         self.calls.append("fitAll")
 
     def saveImage(self, path, width, height, mode, method) -> None:
+        # probes["gui.selection"]: the recorded call is
+        # saveImage(path, width, height, style) and it writes the file;
+        # this tool passes the extra framebuffer style argument.
         self.calls.append(("saveImage", width, height, mode, method))
         self.saved_paths.append(str(path))
         if self.save_error is not None:
