@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no" ?>
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
   <name>FreeCAD MCP</name>
-  <description>Embedded Model Context Protocol (MCP) server for FreeCAD. Exposes 17 schema-validated tools over streamable HTTP so MCP clients and coding agents can create, inspect, edit, validate, measure, and export FreeCAD models, run CalculiX FEM analyses, capture 3D views, and execute FreeCAD Python through persistent script sessions. Local-only by default; opt-in remote mode with bearer-token authentication.</description>
+  <description>Embedded Model Context Protocol (MCP) server for FreeCAD. Exposes 23 schema-validated tools over streamable HTTP so MCP clients and coding agents can create, inspect, edit, validate, measure, and export FreeCAD models, run CalculiX FEM analyses, capture 3D views, and execute FreeCAD Python through persistent script sessions. Local-only by default; opt-in remote mode with bearer-token authentication.</description>
   <version>2.0.0</version>
   <date>2026-09-09</date>
   <maintainer email="jb@nrgup.net">Jonathan</maintainer>

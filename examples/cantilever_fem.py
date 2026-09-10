@@ -16,7 +16,7 @@ Prerequisites:
 - "Start MCP Server" clicked (or Auto-Start Server enabled).
 
 Configuration:
-- ``FREECAD_MCP_TOKEN``: bearer token from the "Show Auth Token" dialog.
+- ``FREECAD_MCP_TOKEN``: bearer token shown in the "Connection Details…" dialog.
   It is read from the environment only and is never printed or logged.
 - ``FREECAD_MCP_URL``: optional endpoint override
   (default ``http://127.0.0.1:9876/mcp``).
@@ -50,7 +50,7 @@ import sys
 import urllib.parse
 
 PROTOCOL_VERSION = "2026-07-28"
-EXPECTED_TOOLS = 17
+EXPECTED_TOOLS = 23
 
 DOC = "MCPExampleCantilever"
 BEAM = "Beam"
@@ -389,7 +389,7 @@ def range_lookup(blocks: list[dict], needle: str) -> tuple[str, dict] | None:
 def main() -> int:
     token = os.environ.get("FREECAD_MCP_TOKEN")
     if not token:
-        print("FATAL: set FREECAD_MCP_TOKEN (Show Auth Token dialog).")
+        print("FATAL: set FREECAD_MCP_TOKEN (shown in the Connection Details dialog).")
         return 2
     url = os.environ.get("FREECAD_MCP_URL", "http://127.0.0.1:9876/mcp")
     client = FreeCadMcpClient(url, token)
