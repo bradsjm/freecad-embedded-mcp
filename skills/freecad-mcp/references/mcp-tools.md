@@ -6,10 +6,14 @@ Use this file for exact tool behavior. The authoritative implementation is the [
 
 The add-on embeds the MCP server inside FreeCAD's GUI process. There is no separate server package and no second bridge process.
 
-1. The server speaks JSON-RPC over streamable HTTP with SSE at `http://127.0.0.1:9876/mcp` (port from settings). Current-protocol clients send the `MCP-Protocol-Version` header (`2026-07-28`) and the `Mcp-Method`/`Mcp-Name` request-metadata headers. Clients that speak the 2025 revisions (`2025-03-26`, `2025-06-18`, `2025-11-25`) connect without changes and address the session with the returned `MCP-Session-Id`; an unsupported offered version negotiates `2025-11-25`.
+1. The server speaks JSON-RPC over streamable HTTP with SSE at `http://127.0.0.1:9876/mcp` (port from settings). Current-protocol clients send the `MCP-Protocol-Version` header (`2026-07-28`) and the `Mcp-Method`, `Mcp-Name`, and applicable `Mcp-Param-*` request-metadata headers. Clients that speak the 2025 revisions (`2025-03-26`, `2025-06-18`, `2025-11-25`) connect without changes and address the session with the returned `MCP-Session-Id`; an unsupported offered version negotiates `2025-11-25`.
 2. HTTP worker threads never touch FreeCAD. Every document or GUI operation is dispatched onto FreeCAD's main GUI thread through a queue drained by the Qt loop. One long GUI operation delays later GUI operations; there is one shared dispatch.
 
 `run_script` executes arbitrary Python inside the FreeCAD process with the user's privileges. It is deliberately not sandboxed.
+
+The modern server also routes `server/discover`, `tasks/get`, `tasks/update`, `tasks/cancel`, `subscriptions/listen`, `resources/list`, and `resources/read`. `resources/list` exposes `freecad://documents`; `resources/read` returns the live document inventory. `subscriptions/listen` opens a POST-created SSE stream for acknowledged, task, and resource-update notifications. The legacy adapter does not offer detached Tasks or resource subscriptions.
+
+The transport accepts 64 HTTP connections and 32 active SSE streams. Request bodies and responses are limited to 8 MiB, and each SSE event is limited to 1 MiB. Subscription admission is limited to 32 streams, each subscription id is limited to 1024 characters, and each subscription queue is limited to 256 events and 4 MiB.
 
 ## Tool matrix
 
@@ -31,18 +35,18 @@ default server exposes 25. Document tools return the actual sanitized
 | `reload_document` | Close and reopen the saved file | `document`; consent to discard unsaved changes |
 | `inspect_objects` | List objects sorted by Name, or a 1–64 object selection; signed-cursor pagination | `document`; optional `objects`, `cursor`, `detail` (`compact`/`full`), `property_filter`, `limit` (default 32, max 500), `property_offset`, `property_limit` |
 | `create_object` | Create a supported Part/App type or a FEM object | `document`, `type`, `name`; optional `properties`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
-| `create_objects` | Create 1–32 objects atomically; returns the requested-to-actual `nameMapping` | `document`, `entries`; optional `expectations` keyed by requested name, `response_detail` |
-| `edit_object` | Assign properties with full prevalidation; returns before/after deltas | `document`, `object`, `properties`; optional `expected_solids`, `expected_bounds`, `bounds_tolerance` |
-| `edit_objects` | Edit 1–32 objects atomically | `document`, `edits`; optional `expectations` per object |
+| `create_objects` | Create 1–32 independent objects atomically; returns the requested-to-actual `nameMapping` | `document`, `entries`; optional `expectations` keyed by requested name, `response_detail` |
+| `edit_object` | Assign properties with full prevalidation; returns before/after deltas | `document`, `object`, `properties`; optional `expected_solids`, `expected_bounds`, `bounds_tolerance`, `response_detail` |
+| `edit_objects` | Edit 1–32 objects atomically | `document`, `edits`; optional `expectations` per object, `response_detail` |
 | `delete_object` | Delete one object; refuses objects with dependents | `document`, `object` |
 | `validate_geometry` | State, validity, solid count, volume, bounds, tolerance | `document`, `objects` (max 100); optional `expected_solids`, `expected_bounds`, `bounds_tolerance` |
 | `measure` | Distance, interference, section, or face measurement. Positive distance does not prove separation; zero common volume does not prove clearance. Combine modes for fit decisions (see [validation](validation.md)) | `document`, `a`, `mode`; optional `b`, `plane`; selectors accept names, bbox objects, or signed `{object, subelement}` references |
-| `inspect_topology` | Page through faces or edges with signed references | `document`, `object`, `role`; optional `cursor`, `limit` (default 50, max 100) |
+| `inspect_topology` | Page through faces or edges with native indices and signed references | `document`, `object`, `role`; optional `cursor`, `indices`, `limit` (default 50, max 100), `detail` (`compact`/`full`) |
 | `edit_parameters` | Add/rename dynamic properties, bind expressions, clear expressions; reports `document`, `generation`, and `applied` | `document`, `object`; optional `add`, `rename`, `expressions`, `clear_expressions` |
 | `inspect_sketch` | Sketch geometry/constraint rows, solver summary, `state`, `statusText`, and `solver.solverStatus` | `document`, `sketch` |
 | `edit_sketch` | Atomic sketch batch: geometry (including `rectangle`, `polyline`, `regularPolygon`), constraints, datums, constraint expressions, deletes | `document`, `sketch`; optional `addGeometry`, `addConstraints`, `setDatums`, `setExpressions`, `deleteGeometry`, `deleteConstraints`, `expected_generation` |
-| `create_feature` | One of 24 PartDesign feature kinds inside a Body: `datum_plane`, `datum_line`, `sketch`, `pad`, `pocket`, `hole`, `revolve`, `groove`, `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, `pipe`, `gear_profile`, `helix`, `primitive`, `subshape_binder`, `multi_transform`, `scaled`, `datum_point` | `document`, `body`, `kind`, `name`; optional `parameters` (typed semantic; see its section), `properties` (raw; only the five kinds `sketch`, `pad`, `pocket`, `hole`, `datum_plane`; never combinable with `parameters`), `profile`, `support`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
-| `edit_feature` | Edit one existing scalar feature's native parameters in one transaction: pad/pocket extent, length, up-to face, symmetric, reversed; hole diameter/depth plus its cut, depth-type and thread parameters; gear teeth/module/pressure angle | `document`, `body`, `object`, `parameters`; optional `expected_generation`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
+| `create_feature` | One of 24 PartDesign feature kinds inside a Body: `datum_plane`, `datum_line`, `sketch`, `pad`, `pocket`, `hole`, `revolve`, `groove`, `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, `pipe`, `gear_profile`, `helix`, `primitive`, `subshape_binder`, `multi_transform`, `scaled`, `datum_point` | `document`, `body`, `kind`, `name`; optional `parameters` (typed semantic; see its section), `properties` (raw; only the five kinds `sketch`, `pad`, `pocket`, `hole`, `datum_plane`; never combinable with `parameters`), `profile`, `support`, `expected_solids`, `expected_bounds`, `bounds_tolerance`, `response_detail` |
+| `edit_feature` | Edit one existing scalar feature's native parameters in one transaction: pad/pocket extent, length, up-to face, symmetric, reversed; hole diameter/depth plus its cut, depth-type and thread parameters; gear teeth/module/pressure angle | `document`, `body`, `object`, `parameters`; optional `expected_generation`, `expected_solids`, `expected_bounds`, `bounds_tolerance`, `response_detail` |
 | `export` | STL/STEP/3MF or native FCStd copy with readback verification | `document`, `objects`, `format`, `path`; optional `linear_deflection`, `angular_deflection`, `bed_align` |
 | `capture_view` | PNG of the 3D view with an explicit orientation | `document`, `focus_object`, `view_name`; optional `focus_subelement` (one validated `FaceN`/`EdgeN` of the focus object), `width`, `height` |
 | `run_fem` | Modern CalculiX solve; returns a VTK result summary | `document`, `analysis`; optional `timeout_s` (default 600) |
@@ -60,7 +64,7 @@ clients can read the active policy without calling anything else.
 
 `inspect_documents` takes no arguments. It returns `documents[]` rows with `name`, `label`, `fileName`, `objectCount`, `generation`, `dirty`, `active`, `transactionOpen`, and `editObject`, plus `activeDocument`. Use it when the document name is unknown; it replaces document discovery through `run_script`.
 
-The tools cover CAD-side modeling, inspection, validation, export, and FEM operations only. Report anything outside these operations as outside this skill's boundary.
+The registered tools cover CAD-side modeling, inspection, validation, export, and FEM operations. The server methods also expose document resources and task/resource subscriptions. Report anything outside these operations as outside this skill's boundary.
 
 Valid `view_name` values are `Isometric`, `Front`, `Top`, `Right`, `Back`, `Left`, `Bottom`, `Dimetric`, and `Trimetric`. `capture_view` returns base64 PNG content. An omitted size resolves from the active on-screen viewport, scaled down to a 768 px longest edge and never upscaled; an explicit size up to 4096 px is honored. Pass `focus_subelement` to frame one validated face or edge of the focus object instead of the whole object. The caller's selection (with subelements) and active document are preserved.
 
@@ -69,13 +73,13 @@ Valid `view_name` values are `Isometric`, `Front`, `Top`, `Right`, `Back`, `Left
 1. Call `discover_capabilities`. Read `gui.state`, exporter/FEM availability, and the supported-type inventory; add `detail: "full"` when the complete `supportedTypes` list is needed.
 2. Address the target document by the `name` returned by `new_document` or `open_document`. When the name is unknown, call `inspect_documents` and read its rows before choosing the target.
 3. Call `inspect_objects(document)` and read the compact rows before editing.
-4. Create or edit one dependency stage at a time; inspect after each recompute.
+4. Create or edit one dependency stage at a time; use `create_objects` only for independent entries, then inspect after each recompute.
 5. Run `validate_geometry` and `measure` on the final solid.
 6. Call `export`, then `capture_view` from the most informative orientation when useful.
 
 ## Property mapping
 
-`create_object` and `edit_object` map JSON-like values onto native FreeCAD property types. Every property is prevalidated before the transaction opens, so a later invalid property leaves earlier ones unchanged.
+`create_object`, `create_objects`, `edit_object`, and `edit_objects` map JSON-like values onto native FreeCAD property types. Every property is prevalidated before the transaction opens, so a later invalid property leaves earlier ones unchanged.
 
 - Placement properties take `{"position": [x, y, z], "axis": [x, y, z], "angle_deg": n}`. The legacy `{"Base": ..., "Rotation": ...}` form is also accepted.
 - Vector properties take `{"x": n, "y": n, "z": n}` or `[x, y, z]`.
@@ -87,7 +91,7 @@ Valid `view_name` values are `Isometric`, `Front`, `Top`, `Right`, `Back`, `Left
 
 Bounds arrays use document-space `[xmin, ymin, zmin, xmax, ymax, zmax]` order. This order applies to `bounds` and `expected_bounds`; `bounds_tolerance` is a scalar value.
 
-A failure during the transaction aborts the whole operation, recomputes the restored document, and reports rollback failure separately. Change summaries from `create_object`, `edit_object`, and `edit_objects` report `dependentCountBefore` alongside `dependentCount`, the post-mutation count. Feature-specific assignments the mapper cannot express go through `run_script`.
+A failure during the transaction aborts the whole operation, recomputes the restored document, and reports rollback failure separately. Full change summaries from `create_object`, `edit_object`, and `edit_objects` report `dependentCountBefore` alongside `dependentCount`; `response_detail: "compact"` omits before-state deltas and dependent counts while retaining the post-state verdict. `create_objects` returns `nameMapping`; sibling links need a later `edit_objects` call because actual names are assigned after creation. Feature-specific assignments the mapper cannot express go through `run_script`.
 
 ## Inspection response
 
@@ -144,7 +148,7 @@ Shapeless and null-shape objects are valid on FreeCAD 1.1.3: `create_object` cre
 
 An enumeration property such as `PartDesign::Pocket.Type` takes the exact string (`"Length"`), never an index.
 
-With `recovery_enabled` in settings, an expensive feature operation first writes one verified recovery copy of the document into the configured `recovery_directory` (see Recovery checkpoints). An operation is expensive when `create_feature` creates one of `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, or `pipe`, or when `edit_feature` edits a Body whose feature chain contains one of those types. The feature result then carries a `checkpoint` object with `path`, `document`, and `generation`.
+With `recovery_enabled` in settings, an expensive feature operation first writes one verified recovery copy of the document into the configured `recovery_directory` (see Recovery checkpoints). An operation is expensive when `create_feature` creates one of `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, `pipe`, `helix`, `multi_transform`, or `scaled`, or when `edit_feature` edits a Body whose feature chain contains one of those types. The feature result then carries a `checkpoint` object with `path`, `document`, and `generation`.
 
 ## `create_object` details
 
@@ -174,11 +178,11 @@ Discovery reports `capabilities.recoveryEnabled` so clients can read the active 
 
 ## Caching and resources
 
-Discovery, `tools/list`, and static resource results carry released caching hints as top-level `ttlMs`/`cacheScope` fields (public results: `ttlMs: 3600000`; live document data: `ttlMs: 0`, private scope). `resources/list` exposes one document resource, `freecad://documents`, whose `resources/read` returns the live open-document inventory. `tasks/update` exists as an acknowledgement-only method; all tools elicit before task creation, so it never grants input keys.
+Discovery, `tools/list`, and resource results carry released caching hints as top-level `ttlMs`/`cacheScope` fields (public results: `ttlMs: 3600000`; live document data: `ttlMs: 0`, private scope). `resources/list` exposes one document resource, `freecad://documents`, whose `resources/read` returns the live open-document inventory. `subscriptions/listen` accepts `resourceSubscriptions` for that URI and `taskIds` for same-principal Tasks, then streams acknowledged, resource-update, and task notifications. The server does not honor the list-changed boolean filters. `tasks/update` exists as an acknowledgement-only method; consent preflights complete before task creation, so it never grants input keys.
 
 ## Long-running operations and cancellation
 
-`run_fem`, `run_script`, `export`, and `measure` may detach as tasks under the `io.modelcontextprotocol/tasks` extension: the call returns a task id immediately, `tasks/get` polls for the terminal result, and `tasks/cancel` requests cooperative cancellation. Cancellation is honest about its limits: a running CalculiX solve is never killed, and a `run_script` deadline that already started does not stop the code. Clients without the tasks extension receive blocking final results.
+`run_fem`, `run_script`, `export`, and `measure` may detach as tasks under the `io.modelcontextprotocol/tasks` extension: the call returns a task id immediately, `tasks/get` polls for the terminal result, and `tasks/cancel` requests cooperative cancellation. The store allows 32 active tasks, retains up to 1024 records, uses a one-hour terminal TTL, and advertises a 500 ms poll interval. Cancellation is honest about its limits: a running CalculiX solve is never killed, and a `run_script` deadline that already started does not stop the code. Clients without the tasks extension receive blocking final results.
 
 ## Timeouts and stuck state
 
@@ -194,7 +198,9 @@ Read `details.nextTool` when present and call that tool next: its value is alway
 
 There are exactly two modes. Local (default): the server binds `127.0.0.1`, accepts only loopback peers, checks Host/Origin, and needs no token. Network access (opt-in in MCP Settings): the server binds `0.0.0.0`, the bearer token becomes mandatory on every request, and `allowed_ips` (empty means any host) restricts peers further. There is no TLS in either mode; never forward or tunnel the endpoint to an untrusted network.
 
-The bearer token is full local code-execution authority: `run_script` is not restricted by `allowed_roots`. Treat the token like a shell on this machine; never log or print it. `allowed_roots` (default: the user's home directory) contains the file-touching tools only — document open/save paths, export destinations, and FEM working directories. It is path containment inside this server, not a sandbox.
+The settings file is `freecad_mcp_settings.json` and accepts `port`, `token`, `auto_start`, `remote_enabled`, `allowed_ips`, `allowed_roots`, `recovery_enabled`, `recovery_directory`, and `allow_scripts`. Invalid settings fail closed. When network access is enabled without a token, settings loading generates and persists one. Changes made in MCP Settings apply on the next server start.
+
+The bearer token is full local code-execution authority: `run_script` is not restricted by `allowed_roots`. Treat the token like a shell on this machine; never log or print it. `allowed_roots` (default: the user's home directory) contains document open/save paths, export destinations, FEM working directories, and the optional recovery directory. It is path containment inside this server, not a sandbox.
 
 ## Sources
 

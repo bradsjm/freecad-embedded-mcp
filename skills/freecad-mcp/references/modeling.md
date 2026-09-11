@@ -190,7 +190,7 @@ For an attached sketch or feature, edit its attachment support/offset rather tha
 
 ## Units and names
 
-Quantity properties reached through `create_object`, `edit_object`, and `edit_objects` take plain JSON numbers in the property's internal unit; the mapper rejects unit strings such as `"5 mm"`. Assign explicit unit strings (`"5 mm"`, `"100 N"`, `"210 GPa"`) only through `run_script`, or inside string maps such as a FEM `Material` map, whose values are strings. Read one object with `inspect_objects(document, detail="full")` before editing unfamiliar properties and copy the reported property convention.
+Quantity properties reached through `create_object`, `create_objects`, `edit_object`, and `edit_objects` take plain JSON numbers in the property's internal unit; the mapper rejects unit strings such as `"5 mm"`. Assign explicit unit strings (`"5 mm"`, `"100 N"`, `"210 GPa"`) only through `run_script`, or inside string maps such as a FEM `Material` map, whose values are strings. Read one object with `inspect_objects(document, detail="full")` before editing unfamiliar properties and copy the reported property convention.
 
 Avoid spaces and punctuation in requested internal names. Use concise ASCII names with a semantic role. A descriptive `Label` can be longer.
 

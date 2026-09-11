@@ -1,6 +1,6 @@
 # Python scripting and export through MCP
 
-Use `run_script` for Python that touches FreeCAD documents, geometry, GUI state, selection, recompute, or import. Use the structured tools where they cover the operation: `save_document` for saving, `export` for STL/STEP/3MF/FCStd, `validate_geometry` and `measure` for checks. The [FreeCAD Scripting Basics](https://wiki.freecad.org/FreeCAD_Scripting_Basics) page documents the `App`/`Gui` split, `addObject`, object inspection, and recompute workflow.
+Use `run_script` for Python that touches FreeCAD documents, geometry, GUI state, selection, recompute, or import when no structured tool covers the operation. Use the structured tools where they cover the operation: `save_document` for saving, `export` for STL/STEP/3MF/FCStd, `validate_geometry` and `measure` for checks. The [FreeCAD Scripting Basics](https://wiki.freecad.org/FreeCAD_Scripting_Basics) page documents the `App`/`Gui` split, `addObject`, object inspection, and recompute workflow.
 
 ## Persistent script sessions
 
@@ -13,7 +13,7 @@ import FreeCADGui as Gui
 print(App.ActiveDocument.Name if App.ActiveDocument else "no active document")
 ```
 
-`run_script` is synchronous on the GUI thread. There is no asynchronous execution tool; keep scripts within the `timeout_s` deadline (default 90 s, maximum 3600 s) and split long work into stages. `stdout`, `stderr`, and the traceback are captured even when the script fails.
+`run_script` executes on the GUI thread. A client that declares the Tasks extension may detach it, but the code remains cooperative and cannot be preempted after it starts. Keep scripts within the `timeout_s` deadline (default 90 s, maximum 3600 s) and split long work into stages. `stdout`, `stderr`, and the traceback are captured even when the script fails.
 
 ## Scripted modeling skeleton
 

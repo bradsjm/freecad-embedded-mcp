@@ -9,9 +9,9 @@ FreeCAD separates application data from its graphical representation. `App`/`Fre
 For MCP work:
 
 - Use `inspect_objects` to inspect application objects; request `detail: "full"` when serialized properties are useful.
-- Use the structured tools (`create_object`, `edit_object`, `edit_parameters`, `delete_object`) for covered document mutations; use `run_script` for `FreeCAD`/`App` and `FreeCADGui`/`Gui` operations the tools do not cover.
+- Use the structured tools (`create_object`, `create_objects`, `edit_object`, `edit_objects`, `edit_parameters`, `delete_object`) for covered document mutations; use `run_script` for `FreeCAD`/`App` and `FreeCADGui`/`Gui` operations the tools do not cover.
 - Use `capture_view` for a screenshot rather than trying to treat a screenshot as geometry evidence. It needs an explicit orientation and a focus object and returns PNG image content.
-- All tool execution and `run_script` code run on the GUI thread; there is no asynchronous execution path.
+- All document and GUI handlers run on the GUI thread. `run_fem`, `run_script`, `export`, and `measure` may detach under the Tasks extension; clients without that extension receive blocking results.
 
 ## Documents and object identity
 
@@ -47,7 +47,7 @@ A Part feature stores BRep geometry in `Shape`; a mesh feature stores mesh data 
 
 ## Property types
 
-The value shape must match the property type. `create_object`, `edit_object`, and `edit_objects` map these forms.
+The value shape must match the property type. `create_object`, `create_objects`, `edit_object`, and `edit_objects` map these forms.
 
 | Property type | Send |
 |---|---|
@@ -91,7 +91,7 @@ doc.recompute()
 print(obj.State, obj.Shape.isValid())
 ```
 
-`create_object`, `edit_object`, `edit_parameters`, and `delete_object` recompute inside an MCP-owned transaction and validate the edited object, its dependents, and solid-count baselines. A successful tool response is not permission to ignore an invalid state; inspect the returned geometry report.
+`create_object`, `create_objects`, `edit_object`, `edit_objects`, `edit_parameters`, and `delete_object` recompute inside MCP-owned transactions and validate the edited objects, their dependents, and solid-count baselines. A successful tool response is not permission to ignore an invalid state; inspect the returned geometry report.
 
 ## Units and quantities
 

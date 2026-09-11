@@ -22,6 +22,10 @@ Then choose a registered type, load the relevant workbench/module if appropriate
 
 Inspect property names, types, and metadata with `inspect_objects(document, detail="full")`. `edit_object` prevalidates every property before the transaction opens, so a failed call assigns nothing. Use plain numbers for quantity properties (internal units apply) and canonical `{"object", "subelement"}` links for references. Feature-specific assignments the mapper cannot express go through `run_script`.
 
+### Atomic object batch failed
+
+`create_objects` and `edit_objects` roll back the whole 1–32-entry batch when validation or recompute fails. Read the error details, correct the invalid entry, and retry from the original document state. `create_objects` does not resolve sibling links inside the batch; create the entries first, read `nameMapping`, then use `edit_objects`.
+
 
 ## Sketch edit failed
 
@@ -87,6 +91,8 @@ A tool deadline (60 s default) does not prove that the operation failed or rolle
 
 Save each validated milestone with `save_document`; do not wait until export. Preserve the last known-good source and exports during experiments. A transaction or `finally` block cannot guarantee restoration after a process crash.
 
+When `capabilities.recoveryEnabled` is true, the server also creates a verified FCStd checkpoint before expensive feature mutations. `create_feature` checkpoints `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, `pipe`, `helix`, `multi_transform`, and `scaled`; `edit_feature` checkpoints when the affected Body contains one of these types. The checkpoint directory must resolve inside an `allowed_roots` entry. A failed checkpoint refuses the mutation with `VALIDATION_FAILED`, `reason: checkpoint_failed`, and `nextAction: inspect_recovery_directory`.
+
 1. Create a separate validation document before parameter sweeps or expensive geometry checks.
 2. Separate each mutation, recompute, inspection, and restoration into bounded calls.
 3. Start with the smallest functional probe. Avoid large GUI-thread loops of booleans or point-in-solid queries.
@@ -112,7 +118,7 @@ Do not force-cancel a running GUI operation or start parallel FEM/GUI calls.
 
 ## FEM failure
 
-Confirm the analysis contains the solid, material, generated Gmsh mesh, fixed constraint, force/pressure constraint, and a modern `Fem::SolverCalculiX` solver; `run_fem` selects or creates the modern solver and refuses legacy `Fem::SolverCcxTools` or ambiguous setups. Missing CalculiX produces an actionable error, never an auto-install. A solver failure reports `SOLVER_FAILED`; report the actual error and working directory. Cancellation is cooperative: a running solve is never killed. Use the dependency-free [client example](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/examples/cantilever_fem.py) as the working reference.
+Confirm the analysis contains the solid, material, generated Gmsh mesh, fixed constraint, force/pressure constraint, and a modern `Fem::SolverCalculiX` solver; `run_fem` selects or creates the modern solver and refuses legacy `Fem::SolverCcxTools` or ambiguous setups. Missing CalculiX produces an actionable error, never an auto-install. A solver failure reports `SOLVER_FAILED`; report the actual error and working directory. Cancellation is cooperative: a running solve is never killed. The dependency-free [client example](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/examples/cantilever_fem.py) shows the intended flow, but update its checked-in `EXPECTED_TOOLS = 23` guard to 25 before running it against the current default server.
 
 ## Export mismatch
 

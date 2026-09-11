@@ -21,7 +21,7 @@ Use the known local path supplied by the task. Call `import_model` with `documen
 
 Create or open the target document first with `new_document` or `open_document`; `import_model` imports into an existing document. Do not assume the imported object name, units, or solid count.
 
-For a format `import_model` does not support, such as IGES or a mesh format other than STL, use `run_script` with the registered importer of the running installation. Import executes synchronously on the GUI thread; there is no asynchronous execution path.
+For a format `import_model` does not support, such as IGES or a mesh format other than STL, use `run_script` with the registered importer of the running installation. The import code executes on the GUI thread; keep the call bounded and inspect the resulting document before continuing.
 
 ```python
 import os

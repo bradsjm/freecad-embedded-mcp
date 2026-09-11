@@ -1,6 +1,6 @@
 # Part geometry and topology
 
-Use this reference for deterministic shape construction, CSG, topology inspection, and scripted shape work. Use `run_script` for document mutation because it runs synchronously on the GUI thread; use `export` for STL/STEP/3MF/FCStd output and `validate_geometry` for structured validity reports.
+Use this reference for deterministic shape construction, CSG, topology inspection, and scripted shape work. Use structured mutation tools when they cover the operation, and use `run_script` for Part shape construction or document changes the structured tools do not cover. All document changes run on the GUI thread; use `export` for STL/STEP/3MF/FCStd output and `validate_geometry` for structured validity reports.
 
 ## Geometry versus document features
 

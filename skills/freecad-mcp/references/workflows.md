@@ -14,6 +14,8 @@ A PartDesign Body represents one component and contains cumulative features. Sha
 6. Keep fillets/chamfers/thickness late where possible.
 7. Inspect the Body `Tip` after each feature.
 
+Use `create_objects` for independent Part or FEM objects that share one setup stage. It accepts 1–32 entries in one transaction and returns `nameMapping`; use `edit_objects` afterward for links that need the actual names.
+
 The [PartDesign Workbench](https://wiki.freecad.org/PartDesign_Workbench), [PartDesign Body](https://wiki.freecad.org/PartDesign_Body), [PartDesign Pad](https://wiki.freecad.org/PartDesign_Pad), and [PartDesign Pocket](https://wiki.freecad.org/PartDesign_Pocket) pages are the primary references.
 
 PartDesign is best when the user wants editable design intent. It is not automatically the best representation for every object; a scripted Part feature can be easier to validate and reproduce.
