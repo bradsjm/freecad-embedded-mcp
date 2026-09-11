@@ -367,6 +367,7 @@ class _DocumentObserver:
         # other change; the entry is retained so stale instances of the
         # deleted document can never adopt or report a live identity.
         self._server._on_document_event(doc, bump=True, publish=True)
+        self._server._invalidate_capabilities_for_document(doc)
 
     def slotRelabelDocument(self, doc) -> None:
         self._server._on_document_event(doc, bump=True, publish=True)
@@ -919,6 +920,32 @@ class Server:
                 self._registry.publish_resource_updated(DOCUMENTS_RESOURCE_URI)
             except Exception:
                 pass  # observer callbacks must never raise into FreeCAD
+
+    def _invalidate_capabilities_for_document(self, doc: Any) -> None:
+        """Retire cached supported-types provenance when its source closes.
+
+        The static snapshot records which document the supported-types
+        probe ran in. Once that document closes the provenance is stale:
+        keep the static blocks, but mark the type list unavailable so a
+        cached read stops presenting a closed document as its source.
+        Invalidation happens at event time precisely so a cached read
+        never needs the GUI thread; a refresh recaptures through the GUI
+        path. Runs after ``_on_document_event``, so ``_doc_lock`` and
+        ``_capabilities_lock`` are never held together.
+        """
+
+        try:
+            name = str(doc.Name)
+        except Exception:
+            return  # a dying document may not answer; never break FreeCAD
+        with self._capabilities_lock:
+            snapshot = self._static_capabilities
+            if not snapshot or snapshot.get("supportedTypesDocument") != name:
+                return
+            tombstone = dict(snapshot)
+            tombstone["supportedTypes"] = {"unavailable": f"snapshot document '{name}' was closed"}
+            tombstone["supportedTypesDocument"] = None
+            self._static_capabilities = tombstone
 
     def _register_observer(self) -> None:
         self._observer = _DocumentObserver(self)
@@ -1674,6 +1701,13 @@ class Server:
             if isinstance(value, ToolError):
                 self._merge_receipt(value, op.checkpoint)
                 return tool_error_result(value)
+            if name == "discover_capabilities" and isinstance(value, dict):
+                # The handler captured GUI health mid-flight, while its own
+                # job was still the active dispatch. That job has finalized
+                # before the waiter resolves (health finish precedes future
+                # resolution), so recapture here: the response reports the
+                # dispatcher as it stands after this operation completed.
+                value["gui"] = _gui_health_snapshot()
             return self._validated_tool_result(name, value)
         error = outcome.error
         if _STUCK_RUNNING_MARKER in error:
