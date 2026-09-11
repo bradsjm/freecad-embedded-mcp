@@ -1264,6 +1264,54 @@ def test_delete_without_dependents_removes_and_commits() -> None:
     assert ("commit", None) in doc.calls
 
 
+def test_delete_allows_a_feature_grouped_by_its_body() -> None:
+    """A Body's ``Group`` membership is not a data dependency.
+
+    Every PartDesign feature lists its Body in ``InList``, which made every
+    feature under a Body undeletable; the native removal updates the Group
+    entry and the Body Tip.
+    """
+
+    feature = box("Pad")
+    body = FakeObj(
+        "Body",
+        TypeId="PartDesign::Body",
+        properties=("Group",),
+        values={"Group": [feature]},
+    )
+    feature.InList.append(body)
+    doc = FakeDoc(objects=[body, feature])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.delete_object(ctx, {"document": doc.Name, "object": "Pad"})
+
+    assert result["removed"]["name"] == "Pad"
+    assert doc.getObject("Pad") is None
+    assert ("commit", None) in doc.calls
+
+
+def test_delete_still_refuses_a_feature_a_later_feature_uses() -> None:
+    """Body membership is excused; a real dependency is still refused."""
+
+    feature = box("Pad")
+    body = FakeObj(
+        "Body",
+        TypeId="PartDesign::Body",
+        properties=("Group",),
+        values={"Group": [feature]},
+    )
+    pocket = box("Pocket", in_list=(feature,))
+    feature.InList.extend([body, pocket])
+    doc = FakeDoc(objects=[body, feature, pocket])
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.delete_object(ctx, {"document": doc.Name, "object": "Pad"})
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["dependents"] == ["Pocket"]
+
+
 # ---------------------------------------------------------------------------
 # inspect_objects pagination.
 # ---------------------------------------------------------------------------
@@ -1369,6 +1417,24 @@ def test_stale_cursor_after_generation_change_is_rejected() -> None:
 
     error = expect_tool_error(exc_info, VALIDATION_FAILED)
     assert error.details == {"reason": "stale_cursor"}
+
+
+def test_malformed_cursor_is_rejected_as_a_pagination_error() -> None:
+    """A truncated cursor is a client mistake, not a dispatch failure.
+
+    The raw signature error used to escape as GUI_DISPATCH_FAILED with a
+    server traceback, while the documented answer is restart-pagination.
+    """
+
+    doc, ctx = _three_box_doc()
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.inspect_objects(
+            ctx, {"document": doc.Name, "limit": 2, "cursor": "not-a-token"}
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details == {"reason": "malformed_cursor"}
 
 
 def test_cursor_with_changed_filters_is_rejected() -> None:

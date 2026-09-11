@@ -246,6 +246,29 @@ def _object_row(obj: Any) -> dict:
     }
 
 
+def _multi_solid_expectations(objects: list[Any]) -> dict[str, dict]:
+    """Pin each imported multi-solid object to the count the file carries.
+
+    The gate's default solid contract accepts one solid and refuses more, so
+    a mutation cannot silently produce a multi-solid result. An imported file
+    defines its own topology: a multi-body STEP carries the count it was
+    authored with, and refusing it would make every such file unimportable.
+    The count is read from the object the import just created and is then
+    held as the contract across the gate's recompute.
+    """
+
+    expectations: dict[str, dict] = {}
+    for obj in objects:
+        try:
+            shape = getattr(obj, "Shape", None)
+            count = len(list(shape.Solids)) if shape is not None else None
+        except Exception:
+            continue
+        if isinstance(count, int) and count > 1:
+            expectations[str(getattr(obj, "Name", ""))] = {"expected_solids": count}
+    return expectations
+
+
 # ---------------------------------------------------------------------------
 # Handler.
 # ---------------------------------------------------------------------------
@@ -263,7 +286,10 @@ def _import_model(ctx: Any, arguments: dict) -> dict:
     requested_name = str(arguments.get("name") or "ImportedMesh")
     created: list[Any] = []
 
-    with mutation(ctx, doc, "import_model", lambda: created):
+    # The gate reads ``expectations`` after the body, where the imported
+    # objects and their solid counts first exist.
+    expectations: dict[str, dict] = {}
+    with mutation(ctx, doc, "import_model", lambda: created, expectations=expectations):
         before_ids = {id(entry) for entry in (doc.Objects or ())}
         try:
             if fmt == "step":
@@ -298,6 +324,7 @@ def _import_model(ctx: Any, arguments: dict) -> dict:
                     continue
             created.clear()
             raise
+        expectations.update(_multi_solid_expectations(created))
 
     return {
         "document": str(getattr(doc, "Name", "")),

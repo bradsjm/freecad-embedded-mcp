@@ -1,4 +1,5 @@
 import sys
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -330,6 +331,169 @@ def test_failed_rollback_recompute_reports_rollback_failed() -> None:
     details = excinfo.value.details or {}
     assert details["operationState"] == "rollback_failed"
     assert details["rollbackStage"] == "recompute"
+
+
+class _SurvivingTransactionApp:
+    """FreeCAD 1.1 stack double: a raised body leaves the label active.
+
+    The entry check must see a clean stack; every later read reports the
+    surviving transaction until ``closeActiveTransaction`` clears it, which
+    is what that native call did in the observed session.
+    """
+
+    def __init__(self, *, label: str = "gate", closable: bool = True) -> None:
+        self.label = label
+        self.closable = closable
+        self.calls = 0
+        self.closed: list[bool] = []
+        self._survives = True
+
+    def getActiveTransaction(self) -> tuple[str, int] | None:
+        self.calls += 1
+        if self.calls == 1 or not self._survives:
+            return None
+        return (self.label, 7)
+
+    def closeActiveTransaction(self, abort: bool) -> None:
+        self.closed.append(bool(abort))
+        if self.closable:
+            self._survives = False
+
+
+def _run_gate_with(app: Any, doc: FakeGateDoc, obj: FakeShapeObj, body: Any) -> None:
+    ctx = FakeGateCtx(doc)
+    ctx.App = app
+    with mutation(ctx, doc, "gate", [obj]):
+        body()
+
+
+def _raise_in_body() -> None:
+    raise RuntimeError("nope")
+
+
+def test_raised_body_closes_its_surviving_transaction() -> None:
+    """A raised body leaves the transaction on FreeCAD's stack.
+
+    ``abortTransaction`` undoes the recorded changes but not the transaction
+    itself, so the gate must force-close its own label; otherwise every later
+    mutation is refused as a user transaction while health reads healthy.
+    """
+
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
+    app = _SurvivingTransactionApp()
+
+    with pytest.raises(ToolError) as excinfo:
+        _run_gate_with(app, doc, obj, _raise_in_body)
+
+    details = excinfo.value.details or {}
+    assert details["operationState"] == "rolled_back"
+    assert app.closed == [True]  # this operation's own label was closed
+
+
+def test_transaction_that_survives_the_cleanup_is_reported_truthfully() -> None:
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
+    app = _SurvivingTransactionApp(closable=False)
+
+    with pytest.raises(ToolError) as excinfo:
+        _run_gate_with(app, doc, obj, _raise_in_body)
+
+    details = excinfo.value.details or {}
+    assert details["operationState"] == "rollback_failed"
+    assert details["rollbackFailed"] is True
+    assert details["rollbackStage"] == "close_transaction"
+    assert details["originalError"] == "RuntimeError: nope"
+
+
+def test_a_foreign_surviving_transaction_is_never_closed() -> None:
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
+    app = _SurvivingTransactionApp(label="Pad (user edit)")
+
+    with pytest.raises(ToolError) as excinfo:
+        _run_gate_with(app, doc, obj, _raise_in_body)
+
+    details = excinfo.value.details or {}
+    assert app.closed == []  # a user's transaction is never aborted for us
+    assert details["operationState"] == "rolled_back"
+
+
+class _InsetBox:
+    def __init__(self, xmin: float, ymin: float, xmax: float, ymax: float) -> None:
+        self.XMin = xmin
+        self.YMin = ymin
+        self.ZMin = 0.0
+        self.XMax = xmax
+        self.YMax = ymax
+        self.ZMax = 20.0
+
+
+class _InsetShape:
+    """Native 1.1.3 read: a raw bound box is triangulation-approximated."""
+
+    def isNull(self) -> bool:
+        return False
+
+    @property
+    def BoundBox(self) -> _InsetBox:
+        return _InsetBox(-2.9988, -2.9997, 3.0, 2.9997)
+
+    def copy(self) -> Any:
+        return _RebuiltShape()
+
+
+class _RebuiltShape:
+    """The document-space copy, whose axis-aligned box is exact."""
+
+    Placement: Any = None
+
+    @property
+    def BoundBox(self) -> _InsetBox:
+        return _InsetBox(-3.0, -3.0, 3.0, 3.0)
+
+
+class _CurvedObject:
+    """A curved solid whose local and document-space readings disagree."""
+
+    Name = "Cyl"
+    TypeId = "Part::Feature"
+    State = ["Up-to-date"]
+
+    def __init__(self, *, placeable: bool = True) -> None:
+        self.Shape = _InsetShape()
+        self._placeable = placeable
+
+    def isValid(self) -> bool:
+        return True
+
+    def getStatusString(self) -> str:
+        return ""
+
+    def getGlobalPlacement(self) -> Any:
+        if not self._placeable:
+            raise AttributeError("no global placement")
+        return types.SimpleNamespace()
+
+
+def test_geometry_report_bounds_use_the_document_space_reading() -> None:
+    """One bounds authority for every tool.
+
+    validate_geometry, inspect_objects and the gate's expected_bounds check
+    report document-space bounds; a report that used the raw local box
+    disagreed with them and read a cylinder up to 0.05 mm narrower.
+    """
+
+    report = geometry_report(_CurvedObject())
+
+    assert report["bounds"] == [-3.0, -3.0, 0.0, 3.0, 3.0, 20.0]
+    assert report["ok"] is True
+
+
+def test_geometry_report_falls_back_to_local_bounds_when_unplaceable() -> None:
+    report = geometry_report(_CurvedObject(placeable=False))
+
+    assert report["bounds"] == [-2.9988, -2.9997, 0.0, 3.0, 2.9997, 20.0]
 
 
 def test_failed_commit_reports_may_have_changed_with_inspect_action() -> None:

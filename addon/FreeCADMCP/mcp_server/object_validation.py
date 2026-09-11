@@ -236,7 +236,14 @@ def geometry_report(obj: Any, expected_solids: int | None = None) -> dict:
         report["volume"] = _finite(shape.Volume)
     except Exception:
         report["volume"] = None
-    report["bounds"] = _shape_bounds(shape)
+    # Document-space bounds, the same reading the gate's expected_bounds
+    # check and validate_geometry/inspect_objects report: a raw
+    # ``Shape.BoundBox`` is the triangulated approximation on curved faces
+    # and ignores the object's placement, so the same solid read up to
+    # 0.05 mm narrower here than in every other tool.
+    report["bounds"] = document_bounds(obj)
+    if report["bounds"] is None:
+        report["bounds"] = _shape_bounds(shape)
     report["diagnostics"] = _shape_diagnostics(shape)
     try:
         report["max_tolerance"] = _finite(shape.getTolerance(1))
@@ -324,33 +331,45 @@ def _mark_rolled_back(exc: ToolError) -> None:
     exc.details = details
 
 
-def _force_close_surviving_transaction(ctx: Any, doc: Any, label: str) -> None:
-    """Close a just-committed transaction FreeCAD kept on the stack.
+def _own_transaction_active(ctx: Any, label: str) -> bool:
+    """True when ``label``'s own transaction is still on FreeCAD's stack.
 
-    FreeCAD 1.1 can leave an EMPTY transaction (no recorded changes,
-    UndoMode enabled moments earlier) alive through its own
-    ``commitTransaction``; every later mutation would then be refused with
-    "user transaction already active". Only a transaction still carrying
-    this operation's own label is closed, and only through the abort-free
-    commit path — there are no recorded changes to lose.
+    ``App.getActiveTransaction()`` answers ``(label, id)`` for the innermost
+    open transaction, so the label separates this operation's transaction
+    from a user's without ever touching the latter.
     """
 
-    app = getattr(ctx, "App", None)
-    if app is None:
-        return
-    getter = getattr(app, "getActiveTransaction", None)
-    closer = getattr(app, "closeActiveTransaction", None)
-    if not callable(getter) or not callable(closer):
-        return
+    getter = getattr(getattr(ctx, "App", None), "getActiveTransaction", None)
+    if not callable(getter):
+        return False
     try:
         active = getter()
     except Exception:
+        return False
+    return isinstance(active, (tuple, list)) and bool(active) and str(active[0]) == label
+
+
+def _force_close_surviving_transaction(ctx: Any, doc: Any, label: str) -> None:
+    """Close a transaction FreeCAD kept on the stack for ``label``.
+
+    FreeCAD 1.1 keeps a transaction alive past ``commitTransaction`` (an
+    empty one) and past ``abortTransaction`` whenever the transaction body
+    raised — a native or a Python error; every later mutation would then be
+    refused with "user transaction already active". The single argument of
+    ``closeActiveTransaction`` is the native abort flag, so a transaction
+    that still holds changes is discarded, never committed. Only a
+    transaction carrying this operation's own label is ever closed.
+    """
+
+    if not _own_transaction_active(ctx, label):
         return
-    if isinstance(active, (tuple, list)) and active and str(active[0]) == label:
-        try:
-            closer(True)
-        except Exception:
-            pass  # a wedged cleanup must never mask the committed mutation
+    closer = getattr(getattr(ctx, "App", None), "closeActiveTransaction", None)
+    if not callable(closer):
+        return
+    try:
+        closer(True)
+    except Exception:
+        pass  # a wedged cleanup must never mask the caller's own outcome
 
 
 def _reject_user_transaction(ctx: Any, doc: Any) -> None:
@@ -819,6 +838,19 @@ def mutation(
                     f"mutation '{label}' failed and its rollback also failed: "
                     f"{_describe(abort_exc)}",
                     _rollback_failure_details("abort", exc),
+                ) from abort_exc
+            # A raised body leaves the transaction on the application stack
+            # even though abortTransaction undid its changes; close this
+            # operation's own transaction before the rollback recompute, or
+            # every later mutation is refused as a user transaction.
+            _force_close_surviving_transaction(ctx, doc, label)
+            if _own_transaction_active(ctx, label):
+                raise ToolError(
+                    VALIDATION_FAILED,
+                    f"mutation '{label}' failed and left its transaction open; "
+                    "later mutations are refused until it is closed or FreeCAD "
+                    "restarts",
+                    _rollback_failure_details("close_transaction", exc),
                 ) from exc
             # FreeCAD's abortTransaction undoes the recorded changes without
             # recomputing: targets and dependents can stay Touched/Invalid

@@ -2229,7 +2229,10 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
             if name not in parameters:
                 continue
             prop = _contracts.SEMANTIC_PROPERTIES[kind][name][0]
-            number = _contracts.finite_number(getattr(feature, prop, None))
+            # Every name here is a length: a native length property reads
+            # back as ``Base.Quantity``, not as a plain number, so the
+            # magnitude needs the quantity reader.
+            number = _contracts.quantity_mm(getattr(feature, prop, None))
             if number is None or number <= 0:
                 raise _fail(f"{name} resolved to a non-positive value; the edit was refused")
 

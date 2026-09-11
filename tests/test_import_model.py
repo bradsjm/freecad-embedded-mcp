@@ -336,6 +336,35 @@ def test_step_import_failure_removes_only_new_objects(tmp_path) -> None:
     assert [obj.Name for obj in doc.Objects] == ["Same"]
 
 
+def test_step_import_accepts_a_multisolid_file(tmp_path) -> None:
+    """An imported multi-body STEP defines its own solid topology.
+
+    The gate's default contract accepts one solid and refuses more, which
+    made every multi-solid STEP (including one this server exported from two
+    objects) unimportable with advice the schema cannot express.
+    """
+
+    path = tmp_path / "assembly.step"
+    path.write_text("ISO-10303-21")
+
+    with load_import() as module:
+        doc = FakeDoc(str(path))
+        ctx = FakeCtx(doc)
+        ctx.approved_target = consent_target(module, ctx, str(path), "step")
+
+        def fake_insert(path: str, document: str) -> None:
+            shape = StubShape()
+            shape.Solids = [object(), object()]
+            doc.Objects.append(StubObject("Assembly", "Part::Feature", shape=shape))
+
+        module._import_step = fake_insert
+        result = call(module, ctx, path=str(path), format="step")
+
+    assert [row["name"] for row in result["objects"]] == ["Assembly"]
+    assert result["objects"][0]["solidCount"] == 2
+    assert doc.transactions[-1] == ("commit",)
+
+
 # ---------------------------------------------------------------------------
 # STL import.
 # ---------------------------------------------------------------------------

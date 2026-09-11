@@ -1842,3 +1842,60 @@ def test_edit_feature_updates_thread_size_on_existing_threaded_hole() -> None:
         rows = {row["name"]: row for row in result["change"]["properties"]}
         assert rows["thread_size"] == {"name": "thread_size", "before": "M6", "after": "M8"}
         assert doc.transactions[-1] == ("commit",)
+
+
+class _Quantity:
+    """Native ``Base.Quantity`` double: a length property reads back as this."""
+
+    def __init__(self, value: float) -> None:
+        self.Value = float(value)
+        self.UserString = f"{self.Value:g} mm"
+
+    def __str__(self) -> str:
+        return self.UserString
+
+
+class _QuantityPad(FakeFeature):
+    """A pad whose ``Length`` reads back as a quantity, like native FreeCAD."""
+
+    def __getattr__(self, name: str) -> Any:
+        value = super().__getattr__(name)
+        return _Quantity(value) if name == "Length" else value
+
+
+def test_edit_feature_accepts_a_native_quantity_length() -> None:
+    """A native length property reads back as ``Base.Quantity``, not a float.
+
+    Reading it with a plain-number test made every pad/pocket length edit
+    report "length resolved to a non-positive value" after the value had
+    already been applied, so the edit could never succeed.
+    """
+
+    with load_features() as module:
+        shape = FakeShape()
+        pad = _QuantityPad(
+            "Pad",
+            "PartDesign::Pad",
+            properties=("Profile", "Length", "Type"),
+            shape=shape,
+        )
+        object.__setattr__(pad, "_values", {"Length": 10.0, "Type": "Length"})
+        body = FakeBody(members=[pad], tip=pad, shape=shape)
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.append(pad)
+        ctx = FakeCtx(doc)
+
+        result = module.HANDLERS["edit_feature"](
+            ctx,
+            {
+                "document": "Doc",
+                "body": "Body",
+                "object": "Pad",
+                "parameters": {"length": 25},
+            },
+        )
+
+    assert pad.Length.Value == 25.0
+    assert doc.transactions[-1] == ("commit",)
+    rows = {row["name"]: row for row in result["change"]["properties"]}
+    assert rows["length"]["after"] == "25 mm"

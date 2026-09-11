@@ -24,7 +24,7 @@ from ..object_validation import (
     mutation,
     shape_is_null,
 )
-from ..protocol import DOMAIN_CURSOR, VALIDATION_FAILED, ToolError
+from ..protocol import DOMAIN_CURSOR, VALIDATION_FAILED, ProtocolError, ToolError
 
 _MAX_LIMIT = 500
 _MAX_LINKS = 64
@@ -1804,7 +1804,17 @@ def _open_cursor(
     property_limit: int = _MAX_PROPERTY_PAGE,
     selection: list[str] | None = None,
 ) -> dict:
-    payload = ctx.signer.verify(DOMAIN_CURSOR, cursor)
+    try:
+        payload = ctx.signer.verify(DOMAIN_CURSOR, cursor)
+    except ProtocolError as exc:
+        # A tampered or truncated cursor is a client-side pagination
+        # mistake, not an infrastructure failure: answer the documented
+        # restart-pagination verdict instead of leaking a dispatch error.
+        raise ToolError(
+            VALIDATION_FAILED,
+            "pagination cursor signature rejected; restart from the first page",
+            {"reason": "malformed_cursor"},
+        ) from exc
     expected = _cursor_payload(
         ctx,
         doc,
@@ -2140,6 +2150,30 @@ def edit_object(ctx: Any, args: dict) -> dict:
     }
 
 
+#: Body containers hold their features in ``Group``; that membership is not
+#: a data dependency, and the native removal updates both ``Group`` and
+#: ``Tip`` (verified on FreeCAD 1.1.3).
+_BODY_CONTAINER_TYPES = ("PartDesign::Body", "Part::BodyBase")
+
+
+def _groups_the_target(dependent: Any, target: Any) -> bool:
+    """True when ``dependent`` is a Body that only groups ``target``.
+
+    A PartDesign feature sits in its Body's ``Group``, so the Body appears in
+    the feature's ``InList``; treating that as a blocking dependent made every
+    feature under a Body undeletable. A real data dependency (another feature
+    using this one) still refuses the deletion.
+    """
+
+    if str(getattr(dependent, "TypeId", "")) not in _BODY_CONTAINER_TYPES:
+        return False
+    try:
+        members = list(getattr(dependent, "Group", None) or ())
+    except Exception:
+        return False
+    return any(member is target for member in members)
+
+
 def delete_object(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
     obj = ctx.require_object(doc, str(args["object"]))
@@ -2150,7 +2184,7 @@ def delete_object(ctx: Any, args: dict) -> dict:
             {
                 str(getattr(dep, "Name", ""))
                 for dep in list(getattr(obj, "InList", ()) or ())
-                if getattr(dep, "Name", "")
+                if getattr(dep, "Name", "") and not _groups_the_target(dep, obj)
             }
         )
     except Exception as exc:  # InList must be readable to refuse safely.
