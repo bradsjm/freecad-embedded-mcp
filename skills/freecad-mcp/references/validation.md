@@ -52,7 +52,7 @@ When booleans leave redundant coplanar edges, consider a refined copy or `remove
 ## 4. Assert the expected global bounds
 
 
-Compute the final shape's global bounding box. `validate_geometry` reports document-space bounds; use `expected_bounds` with `bounds_tolerance` to assert them. Placement and shape definition both affect the result, so check the actual global bounds, not only object dimensions. This `run_script` screen prints the raw values:
+Compute the final shape's global bounding box. `validate_geometry` reports document-space bounds in `[xmin, ymin, zmin, xmax, ymax, zmax]` order; use `expected_bounds` with `bounds_tolerance` to assert them. Placement and shape definition both affect the result, so check the actual global bounds, not only object dimensions. This `run_script` screen prints the raw values:
 
 ```python
 obj = App.ActiveDocument.getObject("Final")

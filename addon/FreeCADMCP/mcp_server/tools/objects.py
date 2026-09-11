@@ -745,7 +745,8 @@ TOOL_DEFINITIONS = [
             "Part/App types use doc.addObject; FEM types use an explicit "
             "factory mapping (modern analysis/solver/material plus "
             "constraints and elements). Optional expected_bounds (six "
-            "document-space mm coordinates plus bounds_tolerance) gate the "
+            "document-space mm coordinates in xmin, ymin, zmin, xmax, ymax, "
+            "zmax order plus bounds_tolerance) gate the "
             "commit. Returns the actual sanitized identity, post-recompute "
             "validation and a compact factual change summary."
         ),
@@ -762,7 +763,8 @@ TOOL_DEFINITIONS = [
             "placement, color, ViewObject and link conversions; "
             "FuzzyTolerance is honored only when the feature actually "
             "exposes it. Optional expected_bounds (six document-space mm "
-            "coordinates plus bounds_tolerance) gate the commit. Returns "
+            "coordinates in xmin, ymin, zmin, xmax, ymax, zmax order plus "
+            "bounds_tolerance) gate the commit. Returns "
             "before/after property values, geometry deltas, the dependent "
             "counts before and after, and post-recompute validation."
         ),
@@ -945,7 +947,16 @@ def _placement_value(value: Any, what: str) -> Any:
     if not isinstance(value, dict):
         raise ToolError(
             VALIDATION_FAILED,
-            f"{what} must be an object with Base/Position and Rotation parts",
+            f"{what} must be an object with position/axis/angle_deg or "
+            "Base/Position and Rotation parts",
+        )
+    if any(key in value for key in ("position", "axis", "angle_deg")):
+        position = value.get("position", [0, 0, 0])
+        axis = value.get("axis", [0, 0, 1])
+        angle = _number(value.get("angle_deg", 0), f"{what}.angle_deg")
+        return FreeCAD.Placement(
+            _vector_value(position, f"{what}.position"),
+            FreeCAD.Rotation(_vector_value(axis, f"{what}.axis"), angle),
         )
     position = value.get("Base") or value.get("Position") or {}
     return FreeCAD.Placement(

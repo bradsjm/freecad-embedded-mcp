@@ -115,9 +115,9 @@ print({
     "vertices": len(shape.Vertexes),
     "volume": shape.Volume,
     "valid": shape.isValid(),
-    "bounds": (shape.BoundBox.XMin, shape.BoundBox.XMax,
-               shape.BoundBox.YMin, shape.BoundBox.YMax,
-               shape.BoundBox.ZMin, shape.BoundBox.ZMax),
+    "bounds": (shape.BoundBox.XMin, shape.BoundBox.YMin,
+               shape.BoundBox.ZMin, shape.BoundBox.XMax,
+               shape.BoundBox.YMax, shape.BoundBox.ZMax),
 })
 ```
 

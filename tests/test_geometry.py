@@ -1049,6 +1049,23 @@ def test_topology_cursor_rejects_malformed_indexes():
         assert malformed.value.details["reason"] == "malformed_cursor"
 
 
+def test_topology_cursor_rejects_malformed_signed_token():
+    ctx = _topology_doc()
+    with pytest.raises(protocol.ToolError) as malformed:
+        geometry.HANDLERS["inspect_topology"](
+            ctx,
+            {
+                "document": "Doc",
+                "object": "Shell",
+                "role": "face",
+                "cursor": "bogus.cursor",
+            },
+        )
+
+    assert malformed.value.code == protocol.VALIDATION_FAILED
+    assert malformed.value.details["reason"] == "malformed_cursor"
+
+
 def test_inspect_topology_unknown_object_is_object_not_found():
     ctx = _topology_doc()
     with pytest.raises(protocol.ToolError) as excinfo:

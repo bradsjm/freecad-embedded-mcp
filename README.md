@@ -267,6 +267,10 @@ The server registers 25 tools. `run_script` is hidden unless the
 | `run_fem` | Run a FEM analysis through the modern `Fem::SolverCalculiX` pipeline and return the loaded VTK result summary (`.vtm` and `.vtu` blocks, point/cell counts, and finite result ranges). |
 | `run_script` | Execute arbitrary FreeCAD Python code in a persistent per-session namespace. This is the escape hatch for workflows that structured tools do not cover, such as meshing or the parts library. |
 
+### Placement and bounds conventions
+
+`App::PropertyPlacement` values use `{"position": [x, y, z], "axis": [x, y, z], "angle_deg": n}`. Object bounds and `expected_bounds` use document-space `[xmin, ymin, zmin, xmax, ymax, zmax]` order.
+
 Document creation, opening, and reloading return `name`, `label`, and `objectCount`. Use the returned `name` as the `document` argument in later calls.
 
 Structured object and parameter edits use MCP-owned transactions and refuse to nest inside a user's active transaction. A failed edit aborts and recomputes the restored document; rollback failures are reported separately. New volumetric geometry defaults to one solid unless `expected_solids` specifies otherwise. Existing valid dependent solid counts are preserved when their inputs change.

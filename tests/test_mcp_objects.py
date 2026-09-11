@@ -609,6 +609,31 @@ def test_edit_applies_converted_values_and_commits() -> None:
     validate_schema(result, objects_mod.TOOL_DEFINITIONS[2]["outputSchema"])
 
 
+def test_edit_accepts_documented_lowercase_placement() -> None:
+    doc = FakeDoc(objects=[box()])
+    ctx = FakeCtx(doc)
+
+    objects_mod.edit_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "Box",
+            "properties": {
+                "Placement": {
+                    "position": [1, 2, 3],
+                    "axis": [0, 0, 1],
+                    "angle_deg": 90,
+                }
+            },
+        },
+    )
+
+    placement = doc.getObject("Box").Placement
+    assert placement.Base == StubVector(1, 2, 3)
+    assert placement.Rotation.Axis == StubVector(0, 0, 1)
+    assert placement.Rotation.Angle == 90
+
+
 def test_fuzzy_tolerance_rejected_when_not_a_property() -> None:
     doc = FakeDoc(objects=[box()])
     ctx = FakeCtx(doc)

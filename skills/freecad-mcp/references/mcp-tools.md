@@ -76,13 +76,15 @@ Valid `view_name` values are `Isometric`, `Front`, `Top`, `Right`, `Back`, `Left
 
 `create_object` and `edit_object` map JSON-like values onto native FreeCAD property types. Every property is prevalidated before the transaction opens, so a later invalid property leaves earlier ones unchanged.
 
-- Placement properties take `{"position": [x, y, z], "axis": [x, y, z], "angle_deg": n}`.
+- Placement properties take `{"position": [x, y, z], "axis": [x, y, z], "angle_deg": n}`. The legacy `{"Base": ..., "Rotation": ...}` form is also accepted.
 - Vector properties take `{"x": n, "y": n, "z": n}` or `[x, y, z]`.
 - Link and link-sub properties take only the canonical form `{"object": "<Name>", "subelement": ""}` or `{"object": "<Name>", "subelement": "Face1"}`; link lists take arrays of these values.
 - Color properties take `[r, g, b]` or `[r, g, b, a]`.
 - Quantity and float properties (`App::PropertyQuantity`, `Distance`, `Length`, `Angle`, `Speed`, `Area`, `Volume`, `Percent`) take plain JSON numbers; the value lands in the property's internal unit.
 - Enumeration properties take the exact string; validation reports the allowed values.
 - Prefix a key with `ViewObject.` to target a view property explicitly; an unprefixed key resolves against the document object first and the ViewObject as fallback.
+
+Bounds arrays use document-space `[xmin, ymin, zmin, xmax, ymax, zmax]` order. This order applies to `bounds` and `expected_bounds`; `bounds_tolerance` is a scalar value.
 
 A failure during the transaction aborts the whole operation, recomputes the restored document, and reports rollback failure separately. Change summaries from `create_object`, `edit_object`, and `edit_objects` report `dependentCountBefore` alongside `dependentCount`, the post-mutation count. Feature-specific assignments the mapper cannot express go through `run_script`.
 

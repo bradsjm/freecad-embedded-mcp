@@ -64,6 +64,8 @@ The value shape must match the property type. `create_object`, `edit_object`, an
 
 Every mapped number must be a JSON number, not a numeric string, and must be finite.
 
+Object bounds use `[xmin, ymin, zmin, xmax, ymax, zmax]` order in document coordinates.
+
 `edit_parameters` adds dynamic properties, renames dynamic properties, and binds or clears expressions. The added property types are `App::PropertyBool`, `Integer`, `Float`, `String`, `Length`, `Distance`, `Angle`, `Vector`, `Color`, `StringList`, `FloatList`, and `IntegerList`. It refuses to rename a built-in property.
 
 A `Part::FeaturePython` object keeps a custom property such as `Side` across a save and reload. Its Python proxy does not survive unless the proxy class is importable from an installed module. See [Parametric and scripted workflows](workflows.md).

@@ -920,7 +920,14 @@ def _open_topology_cursor(
 ) -> int:
     """Return the page start index, rejecting stale or changed cursors."""
 
-    payload = ctx.signer.verify(DOMAIN_CURSOR, cursor)
+    try:
+        payload = ctx.signer.verify(DOMAIN_CURSOR, cursor)
+    except ProtocolError as exc:
+        raise ToolError(
+            VALIDATION_FAILED,
+            "topology cursor signature rejected; restart from the first page",
+            {"reason": "malformed_cursor"},
+        ) from exc
     expected = _topology_cursor_payload(ctx, doc, object_name, role, limit, 0)
     if payload.get("kind") != "topology-page":
         raise _stale_topology_cursor()
