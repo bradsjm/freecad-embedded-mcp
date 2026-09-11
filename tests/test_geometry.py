@@ -850,6 +850,9 @@ def test_resolve_rejects_stale_generation():
         geometry.resolve_reference(ctx, doc, reference)
     assert excinfo.value.code == protocol.VALIDATION_FAILED
     assert excinfo.value.details["reason"] == "stale_generation"
+    assert excinfo.value.details["expectedGeneration"] == 1
+    assert excinfo.value.details["actualGeneration"] == 2
+    assert excinfo.value.details["nextTool"] == "inspect_topology"
 
 
 def test_resolve_rejects_tampered_token():
@@ -1018,15 +1021,18 @@ def test_topology_cursor_rejects_generation_change_and_mismatched_arguments():
     with pytest.raises(protocol.ToolError) as stale:
         geometry.HANDLERS["inspect_topology"](ctx, {**arguments, "cursor": cursor})
     assert stale.value.details["reason"] == "stale_cursor"
+    assert stale.value.details["nextTool"] == "inspect_topology"
 
     ctx.generation -= 1
     with pytest.raises(protocol.ToolError) as role_changed:
         geometry.HANDLERS["inspect_topology"](ctx, {**arguments, "role": "edge", "cursor": cursor})
     assert role_changed.value.details["reason"] == "stale_cursor"
+    assert role_changed.value.details["nextTool"] == "inspect_topology"
 
     with pytest.raises(protocol.ToolError) as limit_changed:
         geometry.HANDLERS["inspect_topology"](ctx, {**arguments, "limit": 10, "cursor": cursor})
     assert limit_changed.value.details["reason"] == "stale_cursor"
+    assert limit_changed.value.details["nextTool"] == "inspect_topology"
 
 
 def test_topology_cursor_rejects_malformed_indexes():
@@ -1047,6 +1053,7 @@ def test_topology_cursor_rejects_malformed_indexes():
         with pytest.raises(protocol.ToolError) as malformed:
             geometry.HANDLERS["inspect_topology"](ctx, {**arguments, "cursor": cursor})
         assert malformed.value.details["reason"] == "malformed_cursor"
+        assert malformed.value.details["nextTool"] == "inspect_topology"
 
 
 def test_topology_cursor_rejects_malformed_signed_token():
@@ -1064,6 +1071,74 @@ def test_topology_cursor_rejects_malformed_signed_token():
 
     assert malformed.value.code == protocol.VALIDATION_FAILED
     assert malformed.value.details["reason"] == "malformed_cursor"
+    assert malformed.value.details["nextTool"] == "inspect_topology"
+
+
+def test_inspect_topology_indices_return_exact_rows_ascending():
+    ctx = _topology_doc()
+    result = geometry.HANDLERS["inspect_topology"](
+        ctx, {"document": "Doc", "object": "Shell", "role": "face", "indices": [5, 2]}
+    )
+
+    _assert_output_schema(result, "inspect_topology")
+    assert [item["index"] for item in result["items"]] == [2, 5]
+    assert result["total"] == 130
+    assert result["count"] == 2
+    assert result["nextCursor"] is None
+    for item in result["items"]:
+        assert item["reference"]["object"] == "Shell"
+
+
+def test_inspect_topology_rejects_out_of_range_duplicate_and_cursor_mix():
+    ctx = _topology_doc()
+    base = {"document": "Doc", "object": "Shell", "role": "face"}
+
+    with pytest.raises(protocol.ToolError) as out_of_range:
+        geometry.HANDLERS["inspect_topology"](ctx, {**base, "indices": [131]})
+    assert out_of_range.value.details == {
+        "reason": "index_out_of_range",
+        "index": 131,
+        "total": 130,
+    }
+
+    with pytest.raises(protocol.ToolError) as duplicate:
+        geometry.HANDLERS["inspect_topology"](ctx, {**base, "indices": [3, 2, 3]})
+    assert duplicate.value.details == {"reason": "duplicate_index", "index": 3}
+
+    first = geometry.HANDLERS["inspect_topology"](ctx, {**base, "limit": 50})
+    with pytest.raises(protocol.ToolError) as mixed:
+        geometry.HANDLERS["inspect_topology"](
+            ctx, {**base, "indices": [2], "cursor": first["nextCursor"]}
+        )
+    assert mixed.value.details == {"reason": "indices_with_cursor"}
+
+
+def test_inspect_topology_compact_rows_carry_only_the_compact_keys():
+    ctx = _topology_doc()
+
+    faces = geometry.HANDLERS["inspect_topology"](
+        ctx,
+        {"document": "Doc", "object": "Shell", "role": "face", "indices": [1], "detail": "compact"},
+    )
+    assert set(faces["items"][0]) == {"index", "reference", "bounds", "surfaceType"}
+
+    edges = geometry.HANDLERS["inspect_topology"](
+        ctx,
+        {
+            "document": "Doc",
+            "object": "Shell",
+            "role": "edge",
+            "indices": [1, 2],
+            "detail": "compact",
+        },
+    )
+    for item in edges["items"]:
+        assert set(item) == {"index", "reference", "bounds", "curveType"}
+
+    doc = ctx.require_document("Doc")
+    obj, subelement = geometry.resolve_reference(ctx, doc, edges["items"][0]["reference"])
+    assert obj.Name == "Shell"
+    assert subelement == "Edge1"
 
 
 def test_inspect_topology_unknown_object_is_object_not_found():

@@ -674,6 +674,66 @@ def test_pad_requires_tip_update_and_reports_body_report() -> None:
         validate_schema(result, definition["outputSchema"])
 
 
+def test_create_feature_compact_response_detail_keeps_body_report() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+        ctx = FakeCtx(doc)
+
+        result = call(
+            module,
+            ctx,
+            kind="pad",
+            name="Pad",
+            profile="Sketch",
+            expected_solids=1,
+            response_detail="compact",
+        )
+
+        assert set(result["change"]) == {"properties"}
+        assert result["change"]["properties"] == []
+        assert result["bodyReport"]["ok"] is True
+        definition = next(
+            entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "create_feature"
+        )
+        validate_schema(result, definition["outputSchema"])
+
+
+def test_edit_feature_compact_response_detail_keeps_body_report() -> None:
+    with load_features() as module:
+        shape = FakeShape()
+        pad = _QuantityPad(
+            "Pad",
+            "PartDesign::Pad",
+            properties=("Profile", "Length", "Type"),
+            shape=shape,
+        )
+        object.__setattr__(pad, "_values", {"Length": 10.0, "Type": "Length"})
+        body = FakeBody(members=[pad], tip=pad, shape=shape)
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.append(pad)
+        ctx = FakeCtx(doc)
+
+        result = module.HANDLERS["edit_feature"](
+            ctx,
+            {
+                "document": "Doc",
+                "body": "Body",
+                "object": "Pad",
+                "parameters": {"length": 25},
+                "response_detail": "compact",
+            },
+        )
+
+        change = result["change"]
+        assert set(change) == {"properties"}
+        assert change["properties"] == [{"name": "length", "after": "25 mm"}]
+        assert result["bodyReport"]["ok"] is True
+        definition = next(
+            entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "edit_feature"
+        )
+        validate_schema(result, definition["outputSchema"])
+
+
 def test_tip_mismatch_rolls_the_creation_back() -> None:
     class TipStuckBody(FakeBody):
         """A build where newObject never advances the Body Tip."""
@@ -1899,3 +1959,36 @@ def test_edit_feature_accepts_a_native_quantity_length() -> None:
     assert doc.transactions[-1] == ("commit",)
     rows = {row["name"]: row for row in result["change"]["properties"]}
     assert rows["length"]["after"] == "25 mm"
+
+
+def test_edit_feature_stale_expected_generation_refuses_before_the_transaction() -> None:
+    with load_features() as module:
+        pad = FakeFeature("Pad", "PartDesign::Pad", properties=("Length",), shape=FakeShape())
+        object.__setattr__(pad, "_values", {"Length": 10.0, "Type": "Length"})
+        body = FakeBody(members=[pad], tip=pad, shape=pad.Shape)
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.append(pad)
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            module.HANDLERS["edit_feature"](
+                ctx,
+                {
+                    "document": "Doc",
+                    "body": "Body",
+                    "object": "Pad",
+                    "expected_generation": 2,
+                    "parameters": {"length": 25},
+                },
+            )
+
+        assert excinfo.value.code == VALIDATION_FAILED
+        assert "changed since inspection" in excinfo.value.message
+        assert excinfo.value.details == {
+            "reason": "stale_generation",
+            "expectedGeneration": 2,
+            "actualGeneration": 1,
+            "nextTool": "inspect_objects",
+        }
+        assert doc.transactions == []
+        assert pad.Length == 10.0

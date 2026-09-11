@@ -34,6 +34,7 @@ from ..protocol import (
     ProtocolError,
     ToolError,
     check_schema,
+    stale_generation_details,
 )
 
 # Subshape bounding boxes must match each requested coordinate within 1 mm
@@ -248,7 +249,11 @@ def resolve_reference(ctx: Any, doc: Any, reference: Any) -> tuple[Any, str]:
         raise ToolError(
             VALIDATION_FAILED,
             "topology reference is stale for the current document generation",
-            {"reason": "stale_generation"},
+            stale_generation_details(
+                int(payload["generation"]),
+                int(ctx.document_generation(doc)),
+                "inspect_topology",
+            ),
         )
     if payload.get("object") != obj.Name:
         raise ToolError(
@@ -859,43 +864,59 @@ def _first_vertex_point(edge: Any, last: bool) -> list[float] | None:
     return _point(getattr(target, "Point", None))
 
 
-def _topology_face_item(ctx: Any, doc: Any, obj: Any, index: int, face: Any) -> dict:
-    summary = _face_summary(face)
+def _topology_face_item(
+    ctx: Any, doc: Any, obj: Any, index: int, face: Any, detail: str = "full"
+) -> dict:
     surface = getattr(face, "Surface", None)
-    radius = _finite(getattr(surface, "Radius", None))
-    axis = _point(getattr(surface, "Axis", None))
-    return {
+    item = {
         "index": index,
         "reference": make_reference(ctx, doc, obj, "face", index),
         "bounds": _bbox(face),
-        "area": summary.get("area"),
-        "center": summary.get("center"),
-        "normal": summary.get("normal"),
         "surfaceType": _type_name(surface),
-        "radius": radius,
-        "axis": axis,
     }
+    if detail == "compact":
+        return item
+    summary = _face_summary(face)
+    item.update(
+        {
+            "area": summary.get("area"),
+            "center": summary.get("center"),
+            "normal": summary.get("normal"),
+            "radius": _finite(getattr(surface, "Radius", None)),
+            "axis": _point(getattr(surface, "Axis", None)),
+        }
+    )
+    return item
 
 
-def _topology_edge_item(ctx: Any, doc: Any, obj: Any, index: int, edge: Any) -> dict:
+def _topology_edge_item(
+    ctx: Any, doc: Any, obj: Any, index: int, edge: Any, detail: str = "full"
+) -> dict:
     curve = getattr(edge, "Curve", None)
+    item = {
+        "index": index,
+        "reference": make_reference(ctx, doc, obj, "edge", index),
+        "bounds": _bbox(edge),
+        "curveType": _type_name(curve),
+    }
+    if detail == "compact":
+        return item
     try:
         closed = bool(edge.isClosed())
     except Exception:
         closed = None
-    return {
-        "index": index,
-        "reference": make_reference(ctx, doc, obj, "edge", index),
-        "bounds": _bbox(edge),
-        "length": _finite(getattr(edge, "Length", None)),
-        "curveType": _type_name(curve),
-        "closed": closed,
-        "start": _first_vertex_point(edge, last=False),
-        "end": _first_vertex_point(edge, last=True),
-        "center": _point(getattr(curve, "Center", None)),
-        "radius": _finite(getattr(curve, "Radius", None)),
-        "axis": _point(getattr(curve, "Axis", None)),
-    }
+    item.update(
+        {
+            "length": _finite(getattr(edge, "Length", None)),
+            "closed": closed,
+            "start": _first_vertex_point(edge, last=False),
+            "end": _first_vertex_point(edge, last=True),
+            "center": _point(getattr(curve, "Center", None)),
+            "radius": _finite(getattr(curve, "Radius", None)),
+            "axis": _point(getattr(curve, "Axis", None)),
+        }
+    )
+    return item
 
 
 def _topology_cursor_payload(
@@ -933,7 +954,7 @@ def _open_topology_cursor(
         raise ToolError(
             VALIDATION_FAILED,
             "topology cursor signature rejected; restart from the first page",
-            {"reason": "malformed_cursor"},
+            {"reason": "malformed_cursor", "nextTool": "inspect_topology"},
         ) from exc
     expected = _topology_cursor_payload(ctx, doc, object_name, role, limit, 0)
     if payload.get("kind") != "topology-page":
@@ -946,7 +967,7 @@ def _open_topology_cursor(
         raise ToolError(
             VALIDATION_FAILED,
             "topology cursor carries a malformed page index",
-            {"reason": "malformed_cursor"},
+            {"reason": "malformed_cursor", "nextTool": "inspect_topology"},
         )
     return last
 
@@ -956,7 +977,7 @@ def _stale_topology_cursor() -> ToolError:
         VALIDATION_FAILED,
         "topology cursor is stale or was built for a different request; "
         "restart from the first page",
-        {"reason": "stale_cursor"},
+        {"reason": "stale_cursor", "nextTool": "inspect_topology"},
     )
 
 
@@ -965,10 +986,29 @@ def _handle_inspect_topology(ctx: Any, arguments: Mapping[str, Any]) -> dict:
     role = str(arguments["role"])
     if role not in ("face", "edge"):
         raise ToolError(VALIDATION_FAILED, "role must be 'face' or 'edge'")
+    indices = arguments.get("indices")
+    detail = str(arguments.get("detail") or "full")
     limit = arguments.get("limit")
     limit = _DEFAULT_TOPOLOGY_PAGE if limit is None else int(limit)
     limit = max(1, min(_MAX_TOPOLOGY_PAGE, limit))
     obj = ctx.require_object(doc, str(arguments["object"]))
+
+    if indices and arguments.get("cursor"):
+        raise ToolError(
+            VALIDATION_FAILED,
+            "indices cannot be combined with a pagination cursor",
+            {"reason": "indices_with_cursor"},
+        )
+    if indices:
+        seen: set[int] = set()
+        for value in indices:
+            if value in seen:
+                raise ToolError(
+                    VALIDATION_FAILED,
+                    f"indices repeats index {value}",
+                    {"reason": "duplicate_index", "index": value},
+                )
+            seen.add(value)
 
     start_after = 0
     cursor = arguments.get("cursor")
@@ -983,18 +1023,30 @@ def _handle_inspect_topology(ctx: Any, arguments: Mapping[str, Any]) -> dict:
     total = len(subshapes)
 
     build = _topology_face_item if role == "face" else _topology_edge_item
-    items = [
-        build(ctx, doc, obj, index, subshape)
-        for index, subshape in enumerate(
-            subshapes[start_after : start_after + limit], start_after + 1
-        )
-    ]
-    next_cursor = None
-    if start_after + limit < total:
-        next_cursor = ctx.signer.sign(
-            DOMAIN_CURSOR,
-            _topology_cursor_payload(ctx, doc, obj.Name, role, limit, start_after + limit),
-        )
+    if indices:
+        ordered = sorted(int(value) for value in indices)
+        for value in ordered:
+            if value > total:
+                raise ToolError(
+                    VALIDATION_FAILED,
+                    f"index {value} is out of range; the object has {total} {role}s",
+                    {"reason": "index_out_of_range", "index": value, "total": total},
+                )
+        items = [build(ctx, doc, obj, value, subshapes[value - 1], detail) for value in ordered]
+        next_cursor = None
+    else:
+        items = [
+            build(ctx, doc, obj, index, subshape, detail)
+            for index, subshape in enumerate(
+                subshapes[start_after : start_after + limit], start_after + 1
+            )
+        ]
+        next_cursor = None
+        if start_after + limit < total:
+            next_cursor = ctx.signer.sign(
+                DOMAIN_CURSOR,
+                _topology_cursor_payload(ctx, doc, obj.Name, role, limit, start_after + limit),
+            )
     return {
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
@@ -1065,12 +1117,7 @@ _TOPOLOGY_FACE_ITEM = {
         "index",
         "reference",
         "bounds",
-        "area",
-        "center",
-        "normal",
         "surfaceType",
-        "radius",
-        "axis",
     ],
     "properties": {
         "index": {"type": "integer", "minimum": 1},
@@ -1092,14 +1139,7 @@ _TOPOLOGY_EDGE_ITEM = {
         "index",
         "reference",
         "bounds",
-        "length",
         "curveType",
-        "closed",
-        "start",
-        "end",
-        "center",
-        "radius",
-        "axis",
     ],
     "properties": {
         "index": {"type": "integer", "minimum": 1},
@@ -1125,6 +1165,13 @@ _INSPECT_TOPOLOGY_INPUT = {
         "object": {"type": "string", "minLength": 1},
         "role": {"enum": ["face", "edge"]},
         "cursor": {"type": ["string", "null"]},
+        "indices": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 1},
+            "minItems": 1,
+            "maxItems": _MAX_TOPOLOGY_PAGE,
+        },
+        "detail": {"type": "string", "enum": ["compact", "full"], "default": "full"},
         "limit": {
             "type": "integer",
             "minimum": 1,
@@ -1462,7 +1509,11 @@ TOOL_DEFINITIONS = [
             "and curve type names and optional radius/axis data. Each item "
             "carries a signed topology reference usable as a measure "
             "selector; pagination uses a signed cursor bound to the document "
-            "generation, object, role and page size."
+            "generation, object, role and page size. Pass indices (1-based) "
+            "to fetch exactly those rows in ascending order instead of a "
+            "page (nextCursor is then null, total still reports the full "
+            'count), and detail: "compact" for rows carrying only index, '
+            "reference, bounds and surfaceType/curveType."
         ),
         "inputSchema": _INSPECT_TOPOLOGY_INPUT,
         "outputSchema": _INSPECT_TOPOLOGY_OUTPUT,

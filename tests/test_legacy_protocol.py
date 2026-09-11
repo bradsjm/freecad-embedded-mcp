@@ -379,7 +379,7 @@ def test_tools_list_returns_17_with_revision_shape(version):
     assert reply.status == 200
     result = reply.payload["result"]
     assert [t["name"] for t in result["tools"]] == list(server_module.PLAN_TOOL_ORDER)
-    assert len(result["tools"]) == 25
+    assert len(result["tools"]) == 26
     assert "resultType" not in result
     assert "ttlMs" not in result and "cacheScope" not in result
     if version == legacy.BATCH_REVISION:

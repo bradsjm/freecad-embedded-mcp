@@ -73,7 +73,7 @@ Geometry indices must be `>= 0`, axis references must be `-1` or `-2`, and point
 
 `Collinear`, `InternalAlignment`, `SnellsLaw`, `AngleViaPoint`, and `Weight` are rejected before any native call. The native 1.1.3 constructor accepted no verified form of them. Use `Tangent` between two lines instead of `Collinear`, or use `run_script` with a form recorded in `tests/native_contract.json`.
 
-`edit_sketch` refuses a `(type, argument-count)` shape outside the recorded native contract before execution, with a `VALIDATION_FAILED` error rather than a native call, because an unverified native constructor call can abort the FreeCAD process. The error's `acceptedArgumentCounts` lists the safe arities for the requested type (`null` when the type has no recorded form), alongside `reason: unrecorded_constraint_shape` and `nextAction: inspect_sketch`.
+`edit_sketch` refuses a `(type, argument-count)` shape outside the recorded native contract before execution, with a `VALIDATION_FAILED` error rather than a native call, because an unverified native constructor call can abort the FreeCAD process. The error's `acceptedArgumentCounts` lists the safe arities for the requested type (`null` when the type has no recorded form), alongside `reason: unrecorded_constraint_shape` and `nextTool: inspect_sketch`.
 
 Datum strings carry a unit: `"40 mm"`, `"30 mm"`, `"90 deg"`. The value lands in the property's internal unit.
 

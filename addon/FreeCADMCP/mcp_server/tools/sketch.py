@@ -32,7 +32,7 @@ from itertools import pairwise
 from typing import Any
 
 from ..object_validation import mutation
-from ..protocol import VALIDATION_FAILED, ToolError, check_schema
+from ..protocol import VALIDATION_FAILED, ToolError, check_schema, stale_generation_details
 
 _MAX_SKETCH_ROWS = 4096
 _MAX_STATE_NAMES = 32
@@ -135,9 +135,15 @@ _XY_PAIR = {
     "minItems": 2,
     "maxItems": 2,
 }
+_LOCAL_GEOMETRY_REF = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["geometry"],
+    "properties": {"geometry": {"type": "string", "minLength": 1, "maxLength": 64}},
+}
 _INTEGER_ARGUMENTS = {
     "type": "array",
-    "items": {"type": "integer"},
+    "items": {"anyOf": [{"type": "integer"}, _LOCAL_GEOMETRY_REF]},
     "minItems": 1,
     "maxItems": _MAX_CONSTRAINT_ARGUMENTS,
 }
@@ -150,6 +156,7 @@ _GEOMETRY_ADD_SCHEMA = {
             "required": ["kind", "x", "y"],
             "properties": {
                 "kind": {"const": "point"},
+                "id": {"type": "string", "minLength": 1, "maxLength": 64},
                 "x": {"type": "number"},
                 "y": {"type": "number"},
                 "construction": _CONSTRUCTION,
@@ -161,6 +168,7 @@ _GEOMETRY_ADD_SCHEMA = {
             "required": ["kind", "start", "end"],
             "properties": {
                 "kind": {"const": "lineSegment"},
+                "id": {"type": "string", "minLength": 1, "maxLength": 64},
                 "start": _XY_PAIR,
                 "end": _XY_PAIR,
                 "construction": _CONSTRUCTION,
@@ -172,6 +180,7 @@ _GEOMETRY_ADD_SCHEMA = {
             "required": ["kind", "center", "radius"],
             "properties": {
                 "kind": {"const": "circle"},
+                "id": {"type": "string", "minLength": 1, "maxLength": 64},
                 "center": _XY_PAIR,
                 "radius": {"type": "number", "exclusiveMinimum": 0},
                 "construction": _CONSTRUCTION,
@@ -183,6 +192,7 @@ _GEOMETRY_ADD_SCHEMA = {
             "required": ["kind", "center", "radius", "startAngle", "endAngle"],
             "properties": {
                 "kind": {"const": "arcOfCircle"},
+                "id": {"type": "string", "minLength": 1, "maxLength": 64},
                 "center": _XY_PAIR,
                 "radius": {"type": "number", "exclusiveMinimum": 0},
                 "startAngle": {"type": "number"},
@@ -542,6 +552,7 @@ _EDIT_SKETCH_OUTPUT = {
         "state",
         "statusText",
         "addedGeometry",
+        "addedGeometryIds",
         "addedConstraints",
         "deletedGeometry",
         "deletedConstraints",
@@ -559,6 +570,10 @@ _EDIT_SKETCH_OUTPUT = {
             "type": "array",
             "items": {"type": "integer", "minimum": 0},
             "maxItems": _MAX_OPERATIONS,
+        },
+        "addedGeometryIds": {
+            "type": "object",
+            "additionalProperties": {"type": "integer", "minimum": 0},
         },
         "addedConstraints": {
             "type": "array",
@@ -643,6 +658,10 @@ TOOL_DEFINITIONS = [
             "batch on failure. Datums are unit strings ('10 mm', '45 deg'); "
             "angle units apply to Angle constraints. The result reports the "
             "actual native indexes and the post-edit solver summary. "
+            "A one-row addGeometry entry may carry a request-local id, "
+            'constraint arguments may reference it as {"geometry": "<id>"} '
+            "in geometry slots, and the response maps every id to its "
+            "committed index in addedGeometryIds. "
             "Constraint shapes without a recorded native acceptance are "
             "refused before execution because malformed native constructor "
             "calls can terminate FreeCAD."
@@ -940,6 +959,11 @@ def _validate_geometry_add(entry: Any, what: str) -> dict:
     ):
         raise _fail(f"{what} has unsupported kind {kind!r}")
     checked: dict = {"kind": kind, "construction": bool(entry.get("construction"))}
+    entry_id = entry.get("id")
+    if entry_id is not None:
+        if not isinstance(entry_id, str) or not entry_id or len(entry_id) > 64:
+            raise _fail(f"{what}.id must be a non-empty string of at most 64 characters")
+        checked["id"] = entry_id
     if kind == "rectangle":
         origin = entry.get("origin")
         if not isinstance(origin, (list, tuple)) or len(origin) != 2:
@@ -1146,7 +1170,7 @@ def _validate_constraint_add(entry: Any, what: str) -> dict:
                 "type": constraint_type,
                 "argumentCount": len(arguments) if isinstance(arguments, list) else None,
                 "acceptedArgumentCounts": None,
-                "nextAction": "inspect_sketch",
+                "nextTool": "inspect_sketch",
             },
         )
     if not isinstance(arguments, list) or len(arguments) > _MAX_CONSTRAINT_ARGUMENTS:
@@ -1163,15 +1187,19 @@ def _validate_constraint_add(entry: Any, what: str) -> dict:
                 "type": constraint_type,
                 "argumentCount": len(arguments),
                 "acceptedArgumentCounts": sorted(accepted),
-                "nextAction": "inspect_sketch",
+                "nextTool": "inspect_sketch",
             },
         )
     for value in arguments:
+        if isinstance(value, dict):
+            continue
         if isinstance(value, bool) or not isinstance(value, int):
             raise _fail(f"{what}.arguments must contain integers only")
     pattern = _CONSTRAINT_ARGUMENT_ROLES.get(constraint_type, {}).get(len(arguments))
     if pattern is not None:
         for position, (role, value) in enumerate(zip(pattern, arguments, strict=True)):
+            if isinstance(value, dict):
+                continue
             if role == "G" and value < 0:
                 raise _fail(
                     f"{what}.arguments[{position}] is {value}; "
@@ -1207,7 +1235,7 @@ def _validate_constraint_add(entry: Any, what: str) -> dict:
                 "argumentCount": len(arguments),
                 "acceptedArgumentCounts": sorted(accepted),
                 "datumRequired": True,
-                "nextAction": "inspect_sketch",
+                "nextTool": "inspect_sketch",
             },
         )
     if has_datum and not datum_required:
@@ -1221,12 +1249,57 @@ def _validate_constraint_add(entry: Any, what: str) -> dict:
                 "argumentCount": len(arguments),
                 "acceptedArgumentCounts": sorted(accepted),
                 "datumForbidden": True,
-                "nextAction": "inspect_sketch",
+                "nextTool": "inspect_sketch",
             },
         )
     if has_datum:
         checked["datum"] = _check_datum(entry["datum"], f"{what}.datum")
     return checked
+
+
+def _resolve_local_references(entries: list[dict], local_ids: dict[str, int]) -> None:
+    """Replace request-local geometry references with planned indexes.
+
+    Every ``{"geometry": "<id>"}`` argument becomes the integer index the
+    batch plans for that id; forward references work because resolution
+    runs after the whole geometry expansion. Only a geometry-bearing slot
+    is resolvable: one the recorded pattern marks ``G``/``A``, or slot 0
+    of a form with no recorded pattern (the two-token Radius/Diameter
+    form, whose remaining slot is the numeric value). A point position
+    (``P``) and a value slot refuse a local reference, since a bare
+    integer there would be read as a number instead of an index.
+    """
+
+    for position, entry in enumerate(entries):
+        arguments = entry["arguments"]
+        if not any(isinstance(value, dict) for value in arguments):
+            continue
+        constraint_type = entry["type"]
+        pattern = _CONSTRAINT_ARGUMENT_ROLES.get(constraint_type, {}).get(len(arguments))
+        resolved: list[Any] = []
+        for slot, value in enumerate(arguments):
+            if not isinstance(value, dict):
+                resolved.append(value)
+                continue
+            reference_id = value.get("geometry")
+            role = pattern[slot] if pattern is not None else ("G" if slot == 0 else None)
+            if role not in ("G", "A"):
+                raise ToolError(
+                    VALIDATION_FAILED,
+                    f"addConstraints[{position}].arguments[{slot}] references geometry "
+                    f"{reference_id!r}; slot {slot} of {constraint_type} with "
+                    f"{len(arguments)} argument(s) does not accept a geometry reference",
+                    {"reason": "local_ref_wrong_slot", "position": slot},
+                )
+            if reference_id not in local_ids:
+                raise ToolError(
+                    VALIDATION_FAILED,
+                    f"addConstraints[{position}].arguments[{slot}] references "
+                    f"unknown geometry id {reference_id!r}",
+                    {"reason": "unknown_geometry_id", "id": reference_id},
+                )
+            resolved.append(local_ids[reference_id])
+        entry["arguments"] = resolved
 
 
 def _constraint_types(sketch: Any) -> list[str | None]:
@@ -1334,6 +1407,21 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
         for position, entry in enumerate(add_constraints)
     ]
     checked_constraints.extend(expanded_constraints)
+
+    local_ids: dict[str, int] = {}
+    for position, entry in enumerate(checked_geometry):
+        entry_id = entry.get("id")
+        if entry_id is None:
+            continue
+        if entry_id in local_ids:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"addGeometry[{position}] repeats geometry id {entry_id!r}; "
+                "ids must be unique within one request",
+                {"reason": "duplicate_geometry_id", "id": entry_id},
+            )
+        local_ids[entry_id] = (geometry_count - len(delete_geometry)) + position
+    _resolve_local_references(checked_constraints, local_ids)
 
     total_operations = (
         len(delete_geometry)
@@ -1447,6 +1535,7 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
         "setExpressions": checked_expressions,
         "geometryBase": geometry_count - len(delete_geometry),
         "constraintBase": constraint_count - len(delete_constraints),
+        "localGeometryIds": local_ids,
     }
 
 
@@ -1526,11 +1615,7 @@ def _require_expected_generation(ctx: Any, doc: Any, arguments: dict) -> None:
     raise ToolError(
         VALIDATION_FAILED,
         "sketch changed since inspection; re-run inspect_sketch",
-        {
-            "expectedGeneration": expected,
-            "actualGeneration": actual,
-            "nextAction": "inspect_sketch",
-        },
+        stale_generation_details(expected, actual, "inspect_sketch"),
     )
 
 
@@ -1547,9 +1632,26 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
         for index in plan["deleteConstraints"]:
             sketch.delConstraint(index)
         added_geometry: list[int] = []
+        added_geometry_ids: dict[str, int] = {}
         for entry in plan["addGeometry"]:
             result = sketch.addGeometry(_native_geometry(entry), entry["construction"])
-            added_geometry.append(_added_index(result, plan["geometryBase"] + len(added_geometry)))
+            index = _added_index(result, plan["geometryBase"] + len(added_geometry))
+            added_geometry.append(index)
+            entry_id = entry.get("id")
+            if entry_id is not None:
+                planned = plan["localGeometryIds"][entry_id]
+                if index != planned:
+                    raise ToolError(
+                        VALIDATION_FAILED,
+                        f"native addGeometry returned index {index} for geometry id "
+                        f"{entry_id!r}; the batch planned index {planned}",
+                        {
+                            "reason": "native_index_mismatch",
+                            "expectedIndex": planned,
+                            "actualIndex": index,
+                        },
+                    )
+                added_geometry_ids[entry_id] = index
         added_constraints: list[int] = []
         for position, entry in enumerate(plan["addConstraints"]):
             import Sketcher
@@ -1588,6 +1690,7 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
         "state": _state_names(sketch),
         "statusText": _status_text(sketch),
         "addedGeometry": added_geometry,
+        "addedGeometryIds": added_geometry_ids,
         "addedConstraints": added_constraints,
         "deletedGeometry": list(plan["deleteGeometry"]),
         "deletedConstraints": list(plan["deleteConstraints"]),

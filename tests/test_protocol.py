@@ -685,6 +685,16 @@ class TestBuilders:
         result = protocol.tool_error_result(bare)
         assert "details" not in result["structuredContent"]["error"]
 
+    def test_tool_error_result_text_includes_next_tool(self):
+        error = protocol.ToolError(
+            protocol.VALIDATION_FAILED,
+            "stale",
+            details={"reason": "stale_generation", "nextTool": "inspect_objects"},
+        )
+        result = protocol.tool_error_result(error)
+        text = result["content"][0]["text"]
+        assert '"nextTool": "inspect_objects"' in text
+
     def test_input_required_result_requires_one_field(self):
         challenge = protocol.consent_input_request("Proceed?")
         result = protocol.input_required_result(challenge, "state-token")

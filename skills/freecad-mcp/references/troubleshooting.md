@@ -25,7 +25,7 @@ Inspect property names, types, and metadata with `inspect_objects(document, deta
 
 ## Sketch edit failed
 
-`edit_sketch` is atomic: a rejected entry rolls back the whole batch and reports `nextAction: inspect_sketch`. The document is unchanged, so no cleanup is needed. Pass `expected_generation` to refuse a batch whose target changed since you last read it; a mismatch fails before the transaction opens and the details carry `expectedGeneration` and `actualGeneration`.
+`edit_sketch` is atomic: a rejected entry rolls back the whole batch and reports `nextTool: inspect_sketch`. The document is unchanged, so no cleanup is needed. Pass `expected_generation` to refuse a batch whose target changed since you last read it; a mismatch fails before the transaction opens and the details carry `reason: stale_generation`, `expectedGeneration`, `actualGeneration`, and `nextTool: inspect_sketch`.
 
 - A `setDatums` datum that is not a valid quantity fails with `VALIDATION_FAILED` before the transaction opens. Correct the datum string; the native call always receives a `FreeCAD.Units.Quantity`.
 - `VALIDATION_FAILED` naming the accepted forms means the server rejected the constraint entry before any native call. `Collinear`, `InternalAlignment`, `SnellsLaw`, `AngleViaPoint`, and `Weight` are rejected without a native call, because the native 1.1.3 constructor accepted no verified form of them. Use `Tangent` between two lines, or use `run_script` with a form recorded in `tests/native_contract.json`.

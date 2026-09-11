@@ -160,7 +160,7 @@ from mcp_server.tools.view import (
 #: Tool errors are complete ``isError`` results, never JSON-RPC errors.
 SERVER_BUSY = "SERVER_BUSY"
 
-#: The 25 registered tools, in the exact plan section 5 order.
+#: The 26 registered tools, in the exact plan section 5 order.
 PLAN_TOOL_ORDER = (
     "discover_capabilities",
     "inspect_documents",
@@ -172,6 +172,7 @@ PLAN_TOOL_ORDER = (
     "reload_document",
     "inspect_objects",
     "create_object",
+    "create_objects",
     "edit_object",
     "edit_objects",
     "delete_object",
@@ -817,7 +818,7 @@ class Server:
                     "document": doc.Name,
                     "object": name,
                     "suggestions": suggestions,
-                    "nextAction": "inspect_objects",
+                    "nextTool": "inspect_objects",
                 },
             )
         return obj

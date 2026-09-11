@@ -509,8 +509,10 @@ class _FemSolve:
                 VALIDATION_FAILED,
                 "document changed during the solve; results were not loaded; run run_fem again",
                 details={
-                    "expected_generation": self.generation,
-                    "actual_generation": generation,
+                    "reason": "stale_generation",
+                    "expectedGeneration": self.generation,
+                    "actualGeneration": generation,
+                    "nextTool": "inspect_documents",
                     "working_dir": self.working_dir,
                 },
             )

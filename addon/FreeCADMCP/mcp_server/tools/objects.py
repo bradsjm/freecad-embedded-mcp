@@ -428,7 +428,7 @@ _ROW_DEFS = {
 _CHANGE_PROPERTY = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["name", "before", "after"],
+    "required": ["name", "after"],
     "properties": {
         "name": {"type": "string"},
         "before": _PROPERTY_VALUE,
@@ -470,7 +470,7 @@ _CHANGE_GEOMETRY = {
 _CHANGE = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["properties", "geometry", "dependentCountBefore", "dependentCount"],
+    "required": ["properties"],
     "properties": {
         "properties": {"type": "array", "items": _CHANGE_PROPERTY},
         "geometry": _CHANGE_GEOMETRY,
@@ -513,6 +513,11 @@ _BOUNDS_TOLERANCE = {
     "minimum": 0,
     "maximum": 1000000,
     "default": 0.000001,
+}
+_RESPONSE_DETAIL = {
+    "type": "string",
+    "enum": ["compact", "full"],
+    "default": "full",
 }
 _PROPERTIES_MAP = {"type": "object", "additionalProperties": _INPUT_VALUE}
 _INSPECT_INPUT = {
@@ -562,6 +567,7 @@ _CREATE_INPUT = {
         "expected_solids": _EXPECTED_SOLIDS,
         "expected_bounds": _EXPECTED_BOUNDS,
         "bounds_tolerance": _BOUNDS_TOLERANCE,
+        "response_detail": _RESPONSE_DETAIL,
     },
     "$defs": _VALUE_DEFS,
 }
@@ -577,6 +583,7 @@ _EDIT_INPUT = {
         "expected_solids": _EXPECTED_SOLIDS,
         "expected_bounds": _EXPECTED_BOUNDS,
         "bounds_tolerance": _BOUNDS_TOLERANCE,
+        "response_detail": _RESPONSE_DETAIL,
     },
     "$defs": _VALUE_DEFS,
 }
@@ -614,6 +621,7 @@ _EDIT_OBJECTS_INPUT = {
                 },
             },
         },
+        "response_detail": _RESPONSE_DETAIL,
     },
     "$defs": _VALUE_DEFS,
 }
@@ -721,6 +729,88 @@ _MUTATED_OUTPUT["properties"]["checkpoint"] = _CHECKPOINT_RECEIPT
 _DELETE_OUTPUT["properties"]["checkpoint"] = _CHECKPOINT_RECEIPT
 _EDIT_OBJECTS_OUTPUT["properties"]["checkpoint"] = _CHECKPOINT_RECEIPT
 
+_CREATE_OBJECTS_INPUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["document", "entries"],
+    "properties": {
+        "document": _DOCUMENT_FIELD,
+        "entries": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["type", "name"],
+                "properties": {
+                    "type": _NAME_FIELD,
+                    "name": _NAME_FIELD,
+                    "properties": _PROPERTIES_MAP,
+                },
+            },
+        },
+        "expectations": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "expected_solids": _EXPECTED_SOLIDS,
+                    "expected_bounds": _EXPECTED_BOUNDS,
+                    "bounds_tolerance": _BOUNDS_TOLERANCE,
+                },
+            },
+        },
+        "response_detail": _RESPONSE_DETAIL,
+    },
+    "$defs": _VALUE_DEFS,
+}
+
+_CREATE_OBJECTS_OUTPUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "document",
+        "generation",
+        "objects",
+        "nameMapping",
+        "changes",
+        "applied",
+    ],
+    "properties": {
+        "document": {"type": "string"},
+        "generation": _GENERATION,
+        "objects": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/objectIdentity"},
+            "maxItems": 32,
+        },
+        "nameMapping": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["requested", "actual"],
+                "properties": {
+                    "requested": {"type": "string"},
+                    "actual": {"type": "string"},
+                },
+            },
+        },
+        "changes": {
+            "type": "array",
+            "items": _CHANGE,
+            "maxItems": 32,
+        },
+        "applied": _APPLIED,
+    },
+    "$defs": _MUTATION_OUTPUT_DEFS,
+}
+
+_CREATE_OBJECTS_OUTPUT["properties"]["checkpoint"] = _CHECKPOINT_RECEIPT
+
 TOOL_DEFINITIONS = [
     {
         "name": "inspect_objects",
@@ -749,9 +839,37 @@ TOOL_DEFINITIONS = [
             "zmax order plus bounds_tolerance) gate the "
             "commit. Returns the actual sanitized identity, post-recompute "
             "validation and a compact factual change summary."
+            'response_detail: "compact" omits before-state geometry '
+            "deltas, property before-values, and dependent counts from "
+            "change; report always carries the post-state verdict."
         ),
         "inputSchema": _CREATE_INPUT,
         "outputSchema": _MUTATED_OUTPUT,
+    },
+    {
+        "name": "create_objects",
+        "description": (
+            "Create 1-32 objects atomically in one transaction; entries may "
+            "mix supported types and are applied in request order inside one "
+            "transaction and one recompute, with optional per-object expectations "
+            "(expected_solids, expected_bounds, bounds_tolerance) keyed by "
+            "the requested name and enforced against the actual sanitized "
+            "object before commit. Every type and property is prevalidated "
+            "before the transaction opens. A requested name that collides "
+            "with an existing object or an earlier entry dedupes natively "
+            "(Box001) and nameMapping reports the actual name. A failing "
+            "expectation or recompute rolls back the whole batch; the result "
+            "reports actual identities, the requested-to-actual nameMapping, "
+            "per-object change summaries and applied names. "
+            "Sibling cross-references inside one batch are not supported "
+            "because link values need actual object names; use edit_objects "
+            'afterwards. response_detail: "compact" omits before-state '
+            "geometry deltas, property before-values, and dependent counts "
+            "from each change; per-object reports always carry the "
+            "post-state verdict."
+        ),
+        "inputSchema": _CREATE_OBJECTS_INPUT,
+        "outputSchema": _CREATE_OBJECTS_OUTPUT,
     },
     {
         "name": "edit_object",
@@ -767,6 +885,9 @@ TOOL_DEFINITIONS = [
             "bounds_tolerance) gate the commit. Returns "
             "before/after property values, geometry deltas, the dependent "
             "counts before and after, and post-recompute validation."
+            'response_detail: "compact" omits before-state geometry '
+            "deltas, property before-values, and dependent counts from "
+            "change; report always carries the post-state verdict."
         ),
         "inputSchema": _EDIT_INPUT,
         "outputSchema": _MUTATED_OUTPUT,
@@ -783,6 +904,10 @@ TOOL_DEFINITIONS = [
             "the transaction opens. A failing expectation or recompute "
             "rolls back the whole batch; the result reports actual "
             "identities, per-object change summaries and applied names."
+            'response_detail: "compact" omits before-state geometry '
+            "deltas, property before-values, and dependent counts from "
+            "each change; per-object reports always carry the post-state "
+            "verdict."
         ),
         "inputSchema": _EDIT_OBJECTS_INPUT,
         "outputSchema": _EDIT_OBJECTS_OUTPUT,
@@ -1168,7 +1293,7 @@ def _plan_create(ctx: Any, doc: Any, obj_type: str, properties: dict) -> tuple[A
                 {
                     "supportedTypes": types[:_MAX_FILTER],
                     "suggestions": _suggestions(obj_type, types),
-                    "nextAction": "inspect_objects",
+                    "nextTool": "inspect_objects",
                 },
             )
     return None, {}
@@ -1249,7 +1374,7 @@ def _check_document_property(obj: Any, prop: str) -> None:
                 "object": name,
                 "property": prop,
                 "suggestions": _suggestions(prop, _all_property_names(obj)),
-                "nextAction": "inspect_objects",
+                "nextTool": "inspect_objects",
             },
         )
     if _is_read_only(obj, prop):
@@ -1771,7 +1896,7 @@ def _stale_cursor() -> ToolError:
     return ToolError(
         VALIDATION_FAILED,
         "pagination cursor is stale; restart pagination from the beginning",
-        {"reason": "stale_cursor"},
+        {"reason": "stale_cursor", "nextTool": "inspect_objects"},
     )
 
 
@@ -1997,6 +2122,7 @@ def _snapshot_requested(obj: Any, properties: dict) -> list[tuple[str, Any]]:
 def _change_summary(
     properties: list[dict],
     *,
+    detail: str = "full",
     solid_before: int | None,
     solid_after: int | None,
     volume_before: float | None,
@@ -2008,6 +2134,8 @@ def _change_summary(
 ) -> dict:
     """Build the compact factual ``change`` summary for one target."""
 
+    if detail == "compact":
+        return {"properties": [{"name": row["name"], "after": row["after"]} for row in properties]}
     return {
         "properties": properties,
         "geometry": {
@@ -2040,6 +2168,7 @@ def create_object(ctx: Any, args: dict) -> dict:
     obj_type = str(args["type"])
     requested_name = str(args["name"])
     properties = dict(args.get("properties") or {})
+    detail = str(args.get("response_detail") or "full")
     expected_solids = args.get("expected_solids")
     expected_bounds = args.get("expected_bounds")
     bounds_tolerance = args.get("bounds_tolerance")
@@ -2085,6 +2214,7 @@ def create_object(ctx: Any, args: dict) -> dict:
         "applied": applied,
         "change": _change_summary(
             [{"name": name, "before": None, "after": after} for name, after in after_rows],
+            detail=detail,
             solid_before=None,
             solid_after=report["solid_count"],
             volume_before=None,
@@ -2109,6 +2239,7 @@ def edit_object(ctx: Any, args: dict) -> dict:
     bounds_tolerance = args.get("bounds_tolerance")
     if bounds_tolerance is None:
         bounds_tolerance = _DEFAULT_BOUNDS_TOLERANCE
+    detail = str(args.get("response_detail") or "full")
     prepared = _prepare_properties(ctx, doc, obj, properties)
 
     before_rows = _snapshot_requested(obj, properties)
@@ -2149,6 +2280,7 @@ def edit_object(ctx: Any, args: dict) -> dict:
                 {"name": name, "before": before, "after": after}
                 for (name, before), (_after, after) in zip(before_rows, after_rows, strict=True)
             ],
+            detail=detail,
             solid_before=before_report["solid_count"],
             solid_after=report["solid_count"],
             volume_before=before_report["volume"],
@@ -2230,6 +2362,7 @@ def delete_object(ctx: Any, args: dict) -> dict:
 def edit_objects(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
     edits = args["edits"]
+    detail = str(args.get("response_detail") or "full")
     if not isinstance(edits, list) or not (1 <= len(edits) <= 32):
         raise ToolError(VALIDATION_FAILED, "edits must be an array of 1 to 32 entries")
     names: list[str] = []
@@ -2299,6 +2432,7 @@ def edit_objects(ctx: Any, args: dict) -> dict:
                         before_rows[obj.Name], after_rows, strict=True
                     )
                 ],
+                detail=detail,
                 solid_before=before_reports[obj.Name]["solid_count"],
                 solid_after=report["solid_count"],
                 volume_before=before_reports[obj.Name]["volume"],
@@ -2325,9 +2459,110 @@ def edit_objects(ctx: Any, args: dict) -> dict:
     }
 
 
+def create_objects(ctx: Any, args: dict) -> dict:
+    doc = ctx.require_document(args["document"])
+    detail = str(args.get("response_detail") or "full")
+    entries = args["entries"]
+    if not isinstance(entries, list) or not (1 <= len(entries) <= 32):
+        raise ToolError(VALIDATION_FAILED, "entries must be an array of 1 to 32 objects")
+    plans: list[dict] = []
+    requested_names: set[str] = set()
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ToolError(VALIDATION_FAILED, f"entries[{position}] must be an object")
+        obj_type = str(entry.get("type"))
+        requested_name = str(entry.get("name"))
+        properties = dict(entry.get("properties") or {})
+        requested_names.add(requested_name)
+        factory, factory_kwargs = _plan_create(ctx, doc, obj_type, properties)
+        plans.append(
+            {
+                "type": obj_type,
+                "name": requested_name,
+                "properties": properties,
+                "factory": factory,
+                "kwargs": factory_kwargs,
+            }
+        )
+
+    expectations = args.get("expectations") or {}
+    if not isinstance(expectations, dict):
+        raise ToolError(VALIDATION_FAILED, "expectations must be an object")
+    unknown = sorted(set(expectations) - requested_names)
+    if unknown:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"expectations name objects that are not created: {unknown}",
+        )
+
+    created: list[Any] = []
+    name_mapping: list[dict] = []
+    expectations_by_actual: dict[str, dict] = {}
+    outcome: dict = {}
+    with mutation(
+        ctx,
+        doc,
+        "create_objects",
+        lambda: created,
+        expectations=expectations_by_actual,
+        outcome=outcome,
+        check_workload=_check_workload,
+    ) as applied:
+        for plan in plans:
+            if plan["factory"] is not None:
+                obj = _call_factory(plan["factory"], doc, plan["name"], plan["kwargs"])
+            else:
+                obj = doc.addObject(plan["type"], plan["name"])
+            created.append(obj)
+            actual_name = str(getattr(obj, "Name", ""))
+            name_mapping.append({"requested": plan["name"], "actual": actual_name})
+            if plan["name"] in expectations:
+                expectations_by_actual[actual_name] = expectations[plan["name"]]
+            if plan["properties"]:
+                _apply_properties(ctx, doc, obj, plan["properties"])
+
+    identities = []
+    changes = []
+    for obj, plan in zip(created, plans, strict=True):
+        # The gate already reported each new object after its recompute.
+        report = outcome["reports"][str(obj.Name)]
+        after_rows = _snapshot_requested(obj, plan["properties"])
+        identities.append(
+            {
+                "name": str(getattr(obj, "Name", "")),
+                "label": _label(obj),
+                "typeId": str(getattr(obj, "TypeId", "")),
+            }
+        )
+        changes.append(
+            _change_summary(
+                [{"name": name, "before": None, "after": after} for name, after in after_rows],
+                detail=detail,
+                solid_before=None,
+                solid_after=report["solid_count"],
+                volume_before=None,
+                volume_after=report["volume"],
+                bounds_before=None,
+                bounds_after=report["bounds"],
+                # A created object had no pre-mutation dependent closure.
+                dependents_before=0,
+                dependents=outcome["dependentCountAfter"],
+            )
+        )
+    return {
+        "document": str(getattr(doc, "Name", "")),
+        "generation": int(ctx.document_generation(doc)),
+        "objects": identities,
+        "nameMapping": name_mapping,
+        "changes": changes,
+        "applied": applied,
+    }
+
+
 HANDLERS = {
     "inspect_objects": inspect_objects,
     "create_object": create_object,
+    "create_objects": create_objects,
     "edit_object": edit_object,
     "edit_objects": edit_objects,
     "delete_object": delete_object,

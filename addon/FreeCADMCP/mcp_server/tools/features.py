@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from ..object_validation import document_bounds, geometry_report, mutation
-from ..protocol import VALIDATION_FAILED, ToolError, check_schema
+from ..protocol import VALIDATION_FAILED, ToolError, check_schema, stale_generation_details
 from . import feature_contracts as _contracts
 from . import objects as _objects
 
@@ -545,6 +545,7 @@ _CREATE_FEATURE_INPUT = {
         "expected_solids": _objects._EXPECTED_SOLIDS,
         "expected_bounds": _objects._EXPECTED_BOUNDS,
         "bounds_tolerance": _objects._BOUNDS_TOLERANCE,
+        "response_detail": _objects._RESPONSE_DETAIL,
     },
     "$defs": _objects._VALUE_DEFS,
 }
@@ -650,6 +651,7 @@ _EDIT_FEATURE_INPUT = {
         "expected_solids": _objects._EXPECTED_SOLIDS,
         "expected_bounds": _objects._EXPECTED_BOUNDS,
         "bounds_tolerance": _objects._BOUNDS_TOLERANCE,
+        "response_detail": _objects._RESPONSE_DETAIL,
     },
 }
 
@@ -678,7 +680,10 @@ TOOL_DEFINITIONS = [
             "(lengths in mm, angles in degrees) and accept either a number or "
             "an {expression} binding. Everything runs in one transaction; a "
             "property, profile, reference, Tip, bounds or geometry failure "
-            "aborts and removes the feature."
+            'aborts and removes the feature. response_detail: "compact" '
+            "omits before-state geometry deltas, property before-values, "
+            "and dependent counts from change; bodyReport always carries "
+            "the post-state verdict."
         ),
         "inputSchema": _CREATE_FEATURE_INPUT,
         "outputSchema": _CREATE_FEATURE_OUTPUT,
@@ -695,6 +700,9 @@ TOOL_DEFINITIONS = [
             "expression. The feature and its Body are recomputed and "
             "validated in one mutation, and the result reports the feature's "
             "actual before/after values and the Body's final geometry."
+            'response_detail: "compact" omits before-state geometry '
+            "deltas, property before-values, and dependent counts from "
+            "change; bodyReport always carries the post-state verdict."
         ),
         "inputSchema": _EDIT_FEATURE_INPUT,
         "outputSchema": _EDIT_FEATURE_OUTPUT,
@@ -1928,6 +1936,7 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
     bounds_tolerance = arguments.get("bounds_tolerance")
     if bounds_tolerance is None:
         bounds_tolerance = _objects._DEFAULT_BOUNDS_TOLERANCE
+    detail = str(arguments.get("response_detail") or "full")
 
     if kind == "datum_plane":
         type_id = _datum_type_id(doc)
@@ -2112,6 +2121,7 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
                 {"name": name, "before": None, "after": _objects._jsonify(value)}
                 for name, value in after_rows
             ],
+            detail=detail,
             solid_before=None,
             solid_after=report["solid_count"],
             volume_before=None,
@@ -2206,10 +2216,16 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
     _editable_type_id(feature)
     _require_member(body, feature)
     expected_generation = arguments.get("expected_generation")
-    if expected_generation is not None and expected_generation != int(ctx.document_generation(doc)):
-        raise _fail("feature changed since inspection; re-run inspect_objects")
+    if expected_generation is not None:
+        actual_generation = int(ctx.document_generation(doc))
+        if expected_generation != actual_generation:
+            raise _fail(
+                "feature changed since inspection; re-run inspect_objects",
+                stale_generation_details(expected_generation, actual_generation, "inspect_objects"),
+            )
 
     parameters = dict(arguments.get("parameters") or {})
+    detail = str(arguments.get("response_detail") or "full")
     if not parameters:
         raise _fail("parameters must contain at least one semantic value")
     kind = _semantic_kind(feature)
@@ -2322,6 +2338,7 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
         "bodyReport": outcome["reports"][str(body.Name)],
         "change": _objects._change_summary(
             rows,
+            detail=detail,
             solid_before=before_report["solid_count"],
             solid_after=report["solid_count"],
             volume_before=before_report["volume"],

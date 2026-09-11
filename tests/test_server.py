@@ -172,6 +172,7 @@ _DOCUMENT_TOOLS = (
 _OBJECT_TOOLS = (
     "inspect_objects",
     "create_object",
+    "create_objects",
     "edit_object",
     "edit_objects",
     "delete_object",
@@ -491,13 +492,13 @@ def _reset_dispatcher_for_tests() -> ThreadedWaker:
 # ---------------------------------------------------------------------------
 
 
-def test_tools_list_returns_exactly_25_in_plan_order():
+def test_tools_list_returns_exactly_26_in_plan_order():
     server = make_server()
     response = dispatch(server, "tools/list")
     result = response["result"]
     names = [tool["name"] for tool in result["tools"]]
     assert names == list(server_module.PLAN_TOOL_ORDER)
-    assert len(names) == 25
+    assert len(names) == 26
     assert names[0] == "discover_capabilities"
     assert names[1] == "inspect_documents"
     assert result["resultType"] == "complete"

@@ -459,6 +459,12 @@ def expect_tool_error(exc_info: Any, code: str) -> ToolError:
     return error
 
 
+def _output_schema(name: str) -> dict:
+    return next(entry for entry in objects_mod.TOOL_DEFINITIONS if entry["name"] == name)[
+        "outputSchema"
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Registration: schemas are finite and checkable.
 # ---------------------------------------------------------------------------
@@ -606,7 +612,7 @@ def test_edit_applies_converted_values_and_commits() -> None:
     assert result["applied"] == ["Box"]
     assert ("commit", None) in doc.calls
     assert doc.UndoMode == 0
-    validate_schema(result, objects_mod.TOOL_DEFINITIONS[2]["outputSchema"])
+    validate_schema(result, _output_schema("edit_object"))
 
 
 def test_edit_accepts_documented_lowercase_placement() -> None:
@@ -652,7 +658,7 @@ def test_fuzzy_tolerance_rejected_when_not_a_property() -> None:
     assert doc.calls == []
 
 
-def test_unknown_property_suggests_close_names_and_next_action() -> None:
+def test_unknown_property_suggests_close_names_and_next_tool() -> None:
     doc = FakeDoc(objects=[box()])
     ctx = FakeCtx(doc)
 
@@ -672,11 +678,11 @@ def test_unknown_property_suggests_close_names_and_next_action() -> None:
     assert error.details["property"] == "Lenght"
     assert "Length" in error.details["suggestions"]
     assert len(error.details["suggestions"]) <= 5
-    assert error.details["nextAction"] == "inspect_objects"
+    assert error.details["nextTool"] == "inspect_objects"
     assert doc.calls == []
 
 
-def test_unknown_property_without_close_match_keeps_next_action() -> None:
+def test_unknown_property_without_close_match_keeps_next_tool() -> None:
     doc = FakeDoc(objects=[box()])
     ctx = FakeCtx(doc)
 
@@ -692,7 +698,7 @@ def test_unknown_property_without_close_match_keeps_next_action() -> None:
 
     error = expect_tool_error(exc_info, VALIDATION_FAILED)
     assert error.details["suggestions"] == []
-    assert error.details["nextAction"] == "inspect_objects"
+    assert error.details["nextTool"] == "inspect_objects"
     assert doc.calls == []
 
 
@@ -1105,7 +1111,7 @@ def test_create_unsupported_type_suggests_close_supported_types() -> None:
         "App::DocumentObjectGroup",
     ]
     assert error.details["suggestions"] == ["Part::Box"]
-    assert error.details["nextAction"] == "inspect_objects"
+    assert error.details["nextTool"] == "inspect_objects"
     assert doc.calls == []
     assert doc.recompute_count == 0
 
@@ -1416,7 +1422,7 @@ def test_stale_cursor_after_generation_change_is_rejected() -> None:
         )
 
     error = expect_tool_error(exc_info, VALIDATION_FAILED)
-    assert error.details == {"reason": "stale_cursor"}
+    assert error.details == {"reason": "stale_cursor", "nextTool": "inspect_objects"}
 
 
 def test_malformed_cursor_is_rejected_as_a_pagination_error() -> None:
@@ -2328,3 +2334,217 @@ def test_edit_objects_per_target_expectations_pass_and_commit() -> None:
         entry for entry in objects_mod.TOOL_DEFINITIONS if entry["name"] == "edit_objects"
     )
     validate_schema(result, definition["outputSchema"])
+
+
+# ---------------------------------------------------------------------------
+# Opt-in compact mutation responses.
+# ---------------------------------------------------------------------------
+
+
+def test_edit_object_compact_response_detail_drops_before_state() -> None:
+    dependent = FakeObj("Dep", shape=None)
+    obj = box("Box", values={"Length": 4.0}, in_list=(dependent,))
+    doc = FakeDoc(objects=[obj, dependent])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.edit_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "Box",
+            "properties": {"Length": 40},
+            "response_detail": "compact",
+        },
+    )
+
+    change = result["change"]
+    assert set(change) == {"properties"}
+    assert change["properties"] == [{"name": "Length", "after": 40.0}]
+    assert result["report"]["solid_count"] == 1
+    validate_schema(result, _output_schema("edit_object"))
+
+
+def test_create_object_compact_response_detail_drops_before_state() -> None:
+    doc = FakeDoc()
+
+    def add_box(type_id: str, name: str) -> FakeObj:
+        created = box(name)
+        doc.Objects.append(created)
+        doc._by_name[created.Name] = created
+        return created
+
+    doc.addObject = add_box  # type: ignore[method-assign]
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.create_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "type": "Part::Box",
+            "name": "Created",
+            "properties": {"Length": 4},
+            "response_detail": "compact",
+        },
+    )
+
+    change = result["change"]
+    assert set(change) == {"properties"}
+    assert change["properties"] == [{"name": "Length", "after": 4.0}]
+    validate_schema(result, objects_mod.TOOL_DEFINITIONS[1]["outputSchema"])
+
+
+def test_edit_objects_compact_response_detail_applies_to_every_change() -> None:
+    doc, ctx, _first, _second = _batch_doc()
+
+    result = objects_mod.edit_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "edits": [
+                {"object": "First", "properties": {"Length": 10}},
+                {"object": "Second", "properties": {"Length": 20}},
+            ],
+            "response_detail": "compact",
+        },
+    )
+
+    assert result["changes"][0] == {"properties": [{"name": "Length", "after": 10.0}]}
+    assert result["changes"][1] == {"properties": [{"name": "Length", "after": 20.0}]}
+    validate_schema(result, _output_schema("edit_objects"))
+
+
+# ---------------------------------------------------------------------------
+# create_objects atomic batch.
+# ---------------------------------------------------------------------------
+
+
+class _BoxDoc(FakeDoc):
+    """A document whose addObject creates box-shaped, name-deduped objects."""
+
+    def addObject(self, type_id: str, name: str) -> FakeObj:
+        actual = name
+        if any(obj.Name == actual for obj in self.Objects):
+            actual = f"{name}001"
+        obj = box(actual)
+        self.Objects.append(obj)
+        self._by_name[obj.Name] = obj
+        return obj
+
+
+def test_create_objects_commits_a_batch_with_name_mapping() -> None:
+    doc = _BoxDoc()
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.create_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "entries": [
+                {"type": "Part::Box", "name": "Box", "properties": {"Length": 4}},
+                {"type": "Part::Box", "name": "Box"},
+            ],
+        },
+    )
+
+    assert [obj["name"] for obj in result["objects"]] == ["Box", "Box001"]
+    assert result["nameMapping"] == [
+        {"requested": "Box", "actual": "Box"},
+        {"requested": "Box", "actual": "Box001"},
+    ]
+    assert doc.getObject("Box").Length == 4.0
+    assert [call[0] for call in doc.calls] == ["open", "commit"]
+    assert doc.recompute_count == 1
+    assert result["applied"] == ["Box", "Box001"]
+    definition = next(
+        entry for entry in objects_mod.TOOL_DEFINITIONS if entry["name"] == "create_objects"
+    )
+    validate_schema(result, definition["outputSchema"])
+
+
+def test_create_objects_invalid_second_entry_rolls_back_the_batch() -> None:
+    doc = _BoxDoc()
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_objects(
+            ctx,
+            {
+                "document": doc.Name,
+                "entries": [
+                    {"type": "Part::Box", "name": "First"},
+                    {
+                        "type": "Part::Box",
+                        "name": "Second",
+                        "properties": {"Length": 5, "NotAProperty": 1},
+                    },
+                ],
+            },
+        )
+
+    expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert ("abort", None) in doc.calls
+    assert ("commit", None) not in doc.calls
+    assert doc.Objects == []
+
+
+def test_create_objects_expectations_keyed_by_requested_name() -> None:
+    doc = _BoxDoc()
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_objects(
+            ctx,
+            {
+                "document": doc.Name,
+                "entries": [{"type": "Part::Box", "name": "Box"}],
+                "expectations": {"Box": {"expected_solids": 2}},
+            },
+        )
+
+    expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert ("abort", None) in doc.calls
+    assert doc.Objects == []
+
+    result = objects_mod.create_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "entries": [{"type": "Part::Box", "name": "Box"}],
+            "expectations": {"Box": {"expected_solids": 1}},
+        },
+    )
+
+    assert result["nameMapping"] == [{"requested": "Box", "actual": "Box"}]
+    assert ("commit", None) in doc.calls
+
+
+def test_create_objects_compact_response_detail() -> None:
+    doc = _BoxDoc()
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.create_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "entries": [{"type": "Part::Box", "name": "Box", "properties": {"Length": 4}}],
+            "response_detail": "compact",
+        },
+    )
+
+    assert result["changes"][0] == {"properties": [{"name": "Length", "after": 4.0}]}
+    definition = next(
+        entry for entry in objects_mod.TOOL_DEFINITIONS if entry["name"] == "create_objects"
+    )
+    validate_schema(result, definition["outputSchema"])
+
+
+def test_create_objects_rejects_more_than_32_entries() -> None:
+    doc = FakeDoc()
+    ctx = FakeCtx(doc)
+    entries = [{"type": "Part::Box", "name": f"Box{index}"} for index in range(33)]
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_objects(ctx, {"document": doc.Name, "entries": entries})
+
+    expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert doc.calls == []

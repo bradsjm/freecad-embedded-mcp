@@ -512,8 +512,11 @@ def test_stale_generation_rejects_before_native_loading(tmp_path: Path) -> None:
         assert isinstance(error, ToolError)
         assert error.code == "VALIDATION_FAILED"
         assert "changed during the solve" in error.message
-        assert error.details["expected_generation"] == 7
-        assert error.details["actual_generation"] == 8
+        assert error.details["reason"] == "stale_generation"
+        assert error.details["expectedGeneration"] == 7
+        assert error.details["actualGeneration"] == 8
+        assert error.details["nextTool"] == "inspect_documents"
+        assert "working_dir" in error.details
         assert ctx.active_solves == {}
         assert len(ctx.finished_ops) == 1
 

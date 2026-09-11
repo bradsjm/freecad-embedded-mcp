@@ -13,9 +13,9 @@ The add-on embeds the MCP server inside FreeCAD's GUI process. There is no separ
 
 ## Tool matrix
 
-The server registers 25 tools in a fixed order; `run_script` appears in
+The server registers 26 tools in a fixed order; `run_script` appears in
 `tools/list` only when the local `allow_scripts` setting is enabled, so a
-default server exposes 24. Document tools return the actual sanitized
+default server exposes 25. Document tools return the actual sanitized
 `name`, `label`, and `objectCount`; use the returned `name` as the
 `document` argument in later calls.
 
@@ -31,6 +31,7 @@ default server exposes 24. Document tools return the actual sanitized
 | `reload_document` | Close and reopen the saved file | `document`; consent to discard unsaved changes |
 | `inspect_objects` | List objects sorted by Name, or a 1–64 object selection; signed-cursor pagination | `document`; optional `objects`, `cursor`, `detail` (`compact`/`full`), `property_filter`, `limit` (default 32, max 500), `property_offset`, `property_limit` |
 | `create_object` | Create a supported Part/App type or a FEM object | `document`, `type`, `name`; optional `properties`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
+| `create_objects` | Create 1–32 objects atomically; returns the requested-to-actual `nameMapping` | `document`, `entries`; optional `expectations` keyed by requested name, `response_detail` |
 | `edit_object` | Assign properties with full prevalidation; returns before/after deltas | `document`, `object`, `properties`; optional `expected_solids`, `expected_bounds`, `bounds_tolerance` |
 | `edit_objects` | Edit 1–32 objects atomically | `document`, `edits`; optional `expectations` per object |
 | `delete_object` | Delete one object; refuses objects with dependents | `document`, `object` |
@@ -98,9 +99,9 @@ Use `typeId` and internal `name` for automation. Use `label` only for human pres
 
 Both tools report `state` (a list of state strings), `statusText` (a string or `null`), and `solver.solverStatus` (an integer or `null`, the native `solve()` code) alongside the geometry and constraint rows.
 
-`edit_sketch` accepts optional `expected_generation`. A mismatch fails with `VALIDATION_FAILED` and no transaction opens, so nothing changes; the details carry `expectedGeneration`, `actualGeneration`, and `nextAction: inspect_sketch`.
+`edit_sketch` accepts optional `expected_generation`. A mismatch fails with `VALIDATION_FAILED` and no transaction opens, so nothing changes; the details carry `reason: stale_generation`, `expectedGeneration`, `actualGeneration`, and `nextTool: inspect_sketch`.
 
-A constraint `(type, argument-count)` shape with no recorded native acceptance is refused before execution with `VALIDATION_FAILED` and no transaction; the details carry `reason: unrecorded_constraint_shape`, the `acceptedArgumentCounts` for the requested type (`null` when the type has no recorded form), and `nextAction: inspect_sketch`. The refusal is a process-safety measure: a malformed `Sketcher.Constraint` constructor call can raise an unhandled C++ exception that terminates the whole FreeCAD process.
+A constraint `(type, argument-count)` shape with no recorded native acceptance is refused before execution with `VALIDATION_FAILED` and no transaction; the details carry `reason: unrecorded_constraint_shape`, the `acceptedArgumentCounts` for the requested type (`null` when the type has no recorded form), and `nextTool: inspect_sketch`. The refusal is a process-safety measure: a malformed `Sketcher.Constraint` constructor call can raise an unhandled C++ exception that terminates the whole FreeCAD process.
 
 ## `edit_parameters` results
 
@@ -186,6 +187,8 @@ Per-tool deadlines: 60 s default; `export` and `measure` 600 s; `run_fem` and `r
 ## Errors
 
 Application failures are complete tool results with `isError: true` and a structured `{code, message, details}` payload. Stable codes: `DOCUMENT_NOT_FOUND`, `OBJECT_NOT_FOUND`, `VALIDATION_FAILED`, `GUI_DISPATCH_FAILED`, `CONSENT_DENIED`, `PATH_NOT_ALLOWED`, `UNSUPPORTED_VIEW`, `SOLVER_FAILED`, `SERVER_BUSY`. Only protocol-level violations become JSON-RPC errors. Output-schema violations are infrastructure errors (`-32603`).
+
+Read `details.nextTool` when present and call that tool next: its value is always the name of a tool this server exposes, so it is safe to call directly. `details.nextAction` is a plain-language instruction, never a tool name — for example `retry_from_original_state`, `inspect_target`, or `inspect_recovery_directory`. Do not pass a `nextAction` value as a tool name. `details.reason` is the stable machine token for the refusal; `details.suggestions` lists close matches when a name or a type was rejected.
 
 ## Security and network boundary
 

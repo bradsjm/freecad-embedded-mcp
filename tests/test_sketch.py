@@ -24,7 +24,7 @@ SKETCH_PATH = ADDON_DIR / "mcp_server" / "tools" / "sketch.py"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server.protocol import ToolError, tool_error_result
+from mcp_server.protocol import ProtocolError, ToolError, tool_error_result, validate_schema
 
 VALIDATION_FAILED = "VALIDATION_FAILED"
 
@@ -782,9 +782,10 @@ def test_stale_expected_generation_is_rejected_before_any_mutation(
     assert excinfo.value.code == VALIDATION_FAILED
     assert excinfo.value.message == "sketch changed since inspection; re-run inspect_sketch"
     assert excinfo.value.details == {
+        "reason": "stale_generation",
         "expectedGeneration": 4,
         "actualGeneration": 5,
-        "nextAction": "inspect_sketch",
+        "nextTool": "inspect_sketch",
     }
     # The valid batch never reaches the native methods or the transaction.
     assert sketch.ops == []
@@ -981,7 +982,7 @@ def test_unknown_constraint_type_is_rejected(sketch_module) -> None:
         "type": "Magic",
         "argumentCount": 1,
         "acceptedArgumentCounts": None,
-        "nextAction": "inspect_sketch",
+        "nextTool": "inspect_sketch",
     }
     assert sketch.ops == []
 
@@ -1012,7 +1013,7 @@ def test_unrecorded_constraint_arities_are_rejected_before_any_native_call(
             "type": unrecorded["type"],
             "argumentCount": len(unrecorded["arguments"]),
             "acceptedArgumentCounts": accepted,
-            "nextAction": "inspect_sketch",
+            "nextTool": "inspect_sketch",
         }
         assert sketch.ops == []
         assert doc.transactions == []
@@ -1042,7 +1043,7 @@ def test_unrecorded_constraint_type_reports_no_accepted_argument_counts(
         "type": "Weight",
         "argumentCount": 2,
         "acceptedArgumentCounts": None,
-        "nextAction": "inspect_sketch",
+        "nextTool": "inspect_sketch",
     }
     assert sketch.ops == []
     assert doc.transactions == []
@@ -1108,7 +1109,7 @@ def test_datum_on_a_type_recorded_without_one_is_rejected(sketch_module) -> None
         "argumentCount": 1,
         "acceptedArgumentCounts": [1],
         "datumForbidden": True,
-        "nextAction": "inspect_sketch",
+        "nextTool": "inspect_sketch",
     }
     assert sketch.ops == []
     assert doc.transactions == []
@@ -1136,7 +1137,7 @@ def test_angle_without_a_datum_is_refused(sketch_module) -> None:
         "argumentCount": 2,
         "acceptedArgumentCounts": [2, 4],
         "datumRequired": True,
-        "nextAction": "inspect_sketch",
+        "nextTool": "inspect_sketch",
     }
     assert sketch.ops == []
     assert doc.transactions == []
@@ -1218,7 +1219,7 @@ def test_dateless_four_token_distance_forms_are_refused(sketch_module) -> None:
             "argumentCount": 4,
             "acceptedArgumentCounts": [2, 4],
             "datumRequired": True,
-            "nextAction": "inspect_sketch",
+            "nextTool": "inspect_sketch",
         }
         assert sketch.ops == []
         assert doc.transactions == []
@@ -1265,7 +1266,7 @@ def test_distance_datum_policy_is_arity_aware(sketch_module) -> None:
         "argumentCount": 2,
         "acceptedArgumentCounts": [2, 4],
         "datumForbidden": True,
-        "nextAction": "inspect_sketch",
+        "nextTool": "inspect_sketch",
     }
 
 
@@ -1405,3 +1406,283 @@ def test_construction_state_comes_from_getconstruction(sketch_module) -> None:
     result = call_inspect(sketch_module, ctx)
 
     assert [row["construction"] for row in result["geometry"]] == [False, True]
+
+
+# ---------------------------------------------------------------------------
+# Request-local geometry identifiers.
+# ---------------------------------------------------------------------------
+
+
+def test_local_geometry_ids_commit_geometry_and_constraints_in_one_call(
+    sketch_module,
+) -> None:
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addGeometry=[
+            {"kind": "lineSegment", "id": "left", "start": [0, 0], "end": [0, 5]},
+            {"kind": "lineSegment", "id": "bottom", "start": [0, 0], "end": [5, 0]},
+        ],
+        addConstraints=[
+            {
+                "type": "Coincident",
+                "arguments": [{"geometry": "left"}, 2, {"geometry": "bottom"}, 1],
+            },
+        ],
+    )
+
+    assert result["addedGeometryIds"] == {"left": 4, "bottom": 5}
+    assert result["addedGeometry"] == [4, 5]
+    constraint = sketch.Constraints[-1]
+    assert constraint.Type == "Coincident"
+    assert constraint.First == 4
+    assert constraint.Second == 5
+    assert doc.transactions[-1] == ("commit",)
+    definition = next(
+        entry for entry in sketch_module.TOOL_DEFINITIONS if entry["name"] == "edit_sketch"
+    )
+    validate_schema(result, definition["outputSchema"])
+
+
+def test_local_geometry_forward_reference_resolves(sketch_module) -> None:
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addGeometry=[
+            {"kind": "lineSegment", "id": "first", "start": [0, 0], "end": [0, 5]},
+            {"kind": "lineSegment", "id": "second", "start": [0, 0], "end": [5, 0]},
+        ],
+        addConstraints=[
+            {
+                "type": "Coincident",
+                "arguments": [{"geometry": "second"}, 1, {"geometry": "first"}, 1],
+            },
+        ],
+    )
+
+    assert result["addedGeometryIds"] == {"first": 4, "second": 5}
+    constraint = sketch.Constraints[-1]
+    assert (constraint.First, constraint.Second) == (5, 4)
+    assert doc.transactions[-1] == ("commit",)
+
+
+def test_local_geometry_ids_track_expansion_and_deletion(sketch_module) -> None:
+    """The planned index must follow expanded positions and deletions.
+
+    A regression that used pre-expansion ``addGeometry`` positions would
+    plan index 5 here while the native call returns 7.
+    """
+
+    sketch = rectangle_sketch()  # four existing lines
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        deleteGeometry=[1],
+        addGeometry=[
+            {"kind": "rectangle", "origin": [0, 0], "width": 4, "height": 3},
+            {"kind": "circle", "id": "bore", "center": [2, 2], "radius": 1},
+        ],
+    )
+
+    assert result["addedGeometryIds"] == {"bore": 7}
+    assert result["addedGeometry"] == [3, 4, 5, 6, 7]
+    assert doc.transactions[-1] == ("commit",)
+
+
+def test_added_geometry_ids_is_empty_without_ids(sketch_module) -> None:
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addGeometry=[{"kind": "lineSegment", "start": [0, 0], "end": [1, 0]}],
+    )
+
+    assert result["addedGeometryIds"] == {}
+    assert result["addedGeometry"] == [4]
+    assert doc.transactions[-1] == ("commit",)
+
+
+def test_local_geometry_unknown_id_is_refused_before_the_transaction(
+    sketch_module,
+) -> None:
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addGeometry=[{"kind": "lineSegment", "id": "left", "start": [0, 0], "end": [0, 5]}],
+            addConstraints=[{"type": "Horizontal", "arguments": [{"geometry": "nope"}]}],
+        )
+
+    assert excinfo.value.details["reason"] == "unknown_geometry_id"
+    assert excinfo.value.details["id"] == "nope"
+    assert doc.transactions == []
+    assert sketch.ops == []
+
+
+def test_local_geometry_duplicate_id_is_refused_before_the_transaction(
+    sketch_module,
+) -> None:
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addGeometry=[
+                {"kind": "lineSegment", "id": "dup", "start": [0, 0], "end": [0, 5]},
+                {"kind": "lineSegment", "id": "dup", "start": [0, 0], "end": [5, 0]},
+            ],
+        )
+
+    assert excinfo.value.details == {"reason": "duplicate_geometry_id", "id": "dup"}
+    assert doc.transactions == []
+    assert sketch.ops == []
+
+
+def test_local_geometry_reference_in_point_slot_is_refused(sketch_module) -> None:
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addGeometry=[
+                {"kind": "lineSegment", "id": "left", "start": [0, 0], "end": [0, 5]},
+                {"kind": "lineSegment", "id": "bottom", "start": [0, 0], "end": [5, 0]},
+            ],
+            addConstraints=[
+                {
+                    "type": "Coincident",
+                    "arguments": [{"geometry": "left"}, {"geometry": "bottom"}, 3, 1],
+                },
+            ],
+        )
+
+    assert excinfo.value.details == {"reason": "local_ref_wrong_slot", "position": 1}
+    assert doc.transactions == []
+    assert sketch.ops == []
+
+
+def test_local_geometry_reference_in_radius_value_slot_is_refused(
+    sketch_module,
+) -> None:
+    """Radius/Diameter arity 2 is [geometry, value]; the value slot takes no ref.
+
+    Resolving a reference there would pass its index as the numeric radius
+    (verified: the native constraint became ``Radius (4, 5)`` with
+    ``Value = 5.0``), silently changing the constraint instead of refusing.
+    """
+
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addGeometry=[
+                {"kind": "circle", "id": "c1", "center": [0, 0], "radius": 3},
+                {"kind": "circle", "id": "c2", "center": [9, 9], "radius": 5},
+            ],
+            addConstraints=[
+                {"type": "Radius", "arguments": [{"geometry": "c1"}, {"geometry": "c2"}]},
+            ],
+        )
+
+    assert excinfo.value.details == {"reason": "local_ref_wrong_slot", "position": 1}
+    assert doc.transactions == []
+    assert sketch.ops == []
+
+
+def test_local_geometry_reference_in_axis_slot_resolves(sketch_module) -> None:
+    """An ``A`` slot is geometry-or-axis, so a local reference resolves there."""
+
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addGeometry=[
+            {"kind": "lineSegment", "id": "axis", "start": [0, 0], "end": [0, 5]},
+            {"kind": "lineSegment", "id": "other", "start": [0, 0], "end": [5, 0]},
+        ],
+        addConstraints=[
+            {
+                "type": "Coincident",
+                "arguments": [{"geometry": "other"}, 1, {"geometry": "axis"}, 1],
+            },
+        ],
+    )
+
+    assert result["addedGeometryIds"] == {"axis": 4, "other": 5}
+    constraint = sketch.Constraints[-1]
+    assert (constraint.First, constraint.Second) == (5, 4)
+    assert doc.transactions[-1] == ("commit",)
+
+
+def test_geometry_id_on_a_composite_entry_fails_schema_validation(
+    sketch_module,
+) -> None:
+    definition = next(
+        entry for entry in sketch_module.TOOL_DEFINITIONS if entry["name"] == "edit_sketch"
+    )
+    arguments = {
+        "document": "Doc",
+        "sketch": "Sketch",
+        "addGeometry": [
+            {"kind": "rectangle", "id": "frame", "origin": [0, 0], "width": 4, "height": 3}
+        ],
+    }
+    with pytest.raises(ProtocolError):
+        validate_schema(arguments, definition["inputSchema"])
+
+
+def test_native_index_mismatch_for_an_id_entry_rolls_the_batch_back(
+    sketch_module,
+) -> None:
+    class MisreportingSketch(FakeSketch):
+        def _add_geometry(self, geo: Any, construction: bool = False) -> int:
+            super()._add_geometry(geo, construction)
+            return 99  # native reported an index the plan never predicted
+
+    sketch = MisreportingSketch(geometry=rectangle_sketch().Geometry)
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addGeometry=[{"kind": "lineSegment", "id": "left", "start": [0, 0], "end": [0, 5]}],
+        )
+
+    assert excinfo.value.details["reason"] == "native_index_mismatch"
+    assert excinfo.value.details["expectedIndex"] == 4
+    assert excinfo.value.details["actualIndex"] == 99
+    assert excinfo.value.details["operationState"] == "rolled_back"
+    assert doc.transactions[-1] == ("abort",)

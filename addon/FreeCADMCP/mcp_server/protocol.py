@@ -141,6 +141,16 @@ class ToolError(Exception):
         self.details = details
 
 
+def stale_generation_details(expected: int, actual: int, next_tool: str) -> dict:
+    """Shared machine-readable details for a generation-guard refusal."""
+    return {
+        "reason": "stale_generation",
+        "expectedGeneration": int(expected),
+        "actualGeneration": int(actual),
+        "nextTool": next_tool,
+    }
+
+
 class InputRequired(Exception):
     """Raised by tools that need an MRTR round trip before execution.
 
@@ -247,6 +257,7 @@ def tool_error_result(error: ToolError) -> dict:
                 for key in (
                     "operationState",
                     "nextAction",
+                    "nextTool",
                     "reason",
                     "suggestions",
                     "rollbackStage",
