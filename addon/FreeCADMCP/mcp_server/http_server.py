@@ -36,6 +36,7 @@ import ipaddress
 import json
 import queue
 import re
+import socket
 import sys
 import threading
 import time
@@ -51,7 +52,12 @@ MCP_ENDPOINT = "/mcp"
 DEFAULT_PORT = 9876
 MAX_BODY_BYTES = 8 * 1024 * 1024
 DEFAULT_READ_TIMEOUT = 10.0
+DEFAULT_WRITE_TIMEOUT = 10.0
 DEFAULT_KEEPALIVE_INTERVAL = 15.0
+DEFAULT_MAX_CONNECTIONS = 64
+DEFAULT_MAX_STREAMS = 32
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_STREAM_EVENT_BYTES = 1024 * 1024
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
 
@@ -87,6 +93,12 @@ _HTTP_STATUS_BY_CODE = {
 }
 
 _KEEPALIVE = object()  # sentinel event: emit an SSE comment line
+
+_SO_NOSIGPIPE = getattr(socket, "SO_NOSIGPIPE", None)
+if _SO_NOSIGPIPE is None and sys.platform == "darwin":
+    # Apple defines this Darwin socket option in sys/socket.h. Some
+    # FreeCAD-bundled Python builds do not expose the constant.
+    _SO_NOSIGPIPE = 0x1022
 
 _ALLOWED_CHARACTERS = frozenset(chr(code) for code in (9, 32, *range(0x21, 0x7F)))
 
@@ -127,6 +139,27 @@ def _reject_json_constant(name):
 
 class _StreamClosed(Exception):
     """Internal: the stream source ended abnormally or was force-closed."""
+
+
+class _ResponseTooLarge(Exception):
+    """Internal: a serialized HTTP response exceeds the transport limit."""
+
+
+def _encode_json_bounded(payload, limit: int, *, separators=None) -> bytes:
+    """Encode JSON without retaining more than the configured byte limit."""
+
+    if limit < 1:
+        raise _ResponseTooLarge("serialized response limit is not positive")
+    encoder = json.JSONEncoder(allow_nan=False, separators=separators)
+    output = bytearray()
+    for piece in encoder.iterencode(payload):
+        if len(piece) > limit:
+            raise _ResponseTooLarge(f"serialized response exceeds {limit} bytes")
+        encoded = piece.encode("utf-8")
+        if len(output) + len(encoded) > limit:
+            raise _ResponseTooLarge(f"serialized response exceeds {limit} bytes")
+        output.extend(encoded)
+    return bytes(output)
 
 
 class StreamResponse:
@@ -252,7 +285,12 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
         remote_enabled=False,
         max_body_bytes=MAX_BODY_BYTES,
         read_timeout=DEFAULT_READ_TIMEOUT,
+        write_timeout=DEFAULT_WRITE_TIMEOUT,
         keepalive_interval=DEFAULT_KEEPALIVE_INTERVAL,
+        max_connections=DEFAULT_MAX_CONNECTIONS,
+        max_streams=DEFAULT_MAX_STREAMS,
+        max_response_bytes=MAX_RESPONSE_BYTES,
+        max_stream_event_bytes=MAX_STREAM_EVENT_BYTES,
         service_hook=None,
     ):
         if token is not None and (not isinstance(token, str) or not token.strip()):
@@ -273,7 +311,12 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
         self.bound_host = host
         self.max_body_bytes = max_body_bytes
         self.read_timeout = read_timeout
+        self.write_timeout = write_timeout
         self.keepalive_interval = keepalive_interval
+        self.max_streams = max_streams
+        self.max_response_bytes = max_response_bytes
+        self.max_stream_event_bytes = max_stream_event_bytes
+        self._connection_slots = threading.BoundedSemaphore(max_connections)
         #: Callable invoked from the serve loop's service_actions: the
         #: server's independent monotonic deadline sweep. Must never touch
         #: the GUI or FreeCAD objects; exceptions are swallowed so the
@@ -290,6 +333,45 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
         from .legacy_protocol import LegacyProtocol
 
         self.legacy = LegacyProtocol(dispatch, clock=time.monotonic)
+
+    def get_request(self):
+        """Accept one connection and apply its platform write protection."""
+
+        request, client_address = super().get_request()
+        if _SO_NOSIGPIPE is not None:
+            try:
+                request.setsockopt(socket.SOL_SOCKET, _SO_NOSIGPIPE, 1)
+                if request.getsockopt(socket.SOL_SOCKET, _SO_NOSIGPIPE) != 1:
+                    raise OSError("SO_NOSIGPIPE was not enabled")
+            except OSError:
+                self.shutdown_request(request)
+                raise
+        return request, client_address
+
+    def process_request(self, request, client_address):
+        """Bound request threads before the stdlib creates one."""
+
+        if not self._connection_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        thread = threading.Thread(
+            target=self._process_request_with_slot,
+            args=(request, client_address),
+            daemon=self.daemon_threads,
+            name="mcp-http-request",
+        )
+        try:
+            thread.start()
+        except BaseException:
+            self._connection_slots.release()
+            self.shutdown_request(request)
+            raise
+
+    def _process_request_with_slot(self, request, client_address):
+        try:
+            self.process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
 
     def service_actions(self):
         """Called by ``serve_forever`` each poll; runs the hooked sweep."""
@@ -327,6 +409,8 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
         """Serve in a daemon thread; returns the thread."""
         if self._serving:
             raise RuntimeError("server is already serving")
+        if sys.platform == "darwin" and _SO_NOSIGPIPE is None:
+            raise RuntimeError("MCP transport cannot protect Darwin sockets from SIGPIPE")
         self._serving = True
         thread = threading.Thread(
             target=self.serve_forever,
@@ -364,6 +448,14 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
         if self._serving:
             self.shutdown()
         self.server_close()
+
+    def handle_error(self, request, client_address):
+        """Suppress ordinary peer disconnects from the host console."""
+
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -408,26 +500,42 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                 except OSError:
                     pass
 
+    def _set_write_timeout(self):
+        self.connection.settimeout(self.server.write_timeout)
+
+    def _restore_read_timeout(self):
+        if not self.close_connection:
+            self.connection.settimeout(self.server.read_timeout)
+
     def _send_json(self, status, payload, *, close=False, extra_headers=()):
         if status in (204, 304):
             # RFC 9110: these statuses carry neither body nor framing.
             body = b""
         else:
-            body = b"" if payload is None else json.dumps(payload, allow_nan=False).encode("utf-8")
-        self._response_started = True
-        self.send_response(status)
-        if status not in (204, 304):
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-        for name, value in extra_headers:
-            self.send_header(name, value)
-        if close:
-            self.send_header("Connection", "close")
-            self.close_connection = True
-        self.end_headers()
-        # HEAD responses carry the would-be body's headers but no payload.
-        if body and self.command != "HEAD":
-            self.wfile.write(body)
+            body = (
+                b""
+                if payload is None
+                else _encode_json_bounded(payload, self.server.max_response_bytes)
+            )
+        try:
+            self._set_write_timeout()
+            self._response_started = True
+            self.send_response(status)
+            if status not in (204, 304):
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+            for name, value in extra_headers:
+                self.send_header(name, value)
+            if close:
+                self.send_header("Connection", "close")
+                self.close_connection = True
+            self.end_headers()
+            # HEAD responses carry the would-be body's headers but no payload.
+            if body and self.command != "HEAD":
+                self.wfile.write(body)
+                self.wfile.flush()
+        finally:
+            self._restore_read_timeout()
 
     def _send_rpc_error(self, status, code, message, *, request_id=None, close=False):
         error = {"code": code, "message": message}
@@ -500,8 +608,8 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             except (OSError, TimeoutError):
                 self.close_connection = True
                 return
-            # The request thread now owns the connection for the whole exchange.
-            self.connection.settimeout(None)
+            # Keep a finite timeout for the next request on this connection.
+            self.connection.settimeout(self.server.read_timeout)
         else:
             body = b""
 
@@ -727,11 +835,24 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _send_stream(self, stream):
         server = self.server
+        rejected = False
         with server._streams_lock:
-            server._active_streams.add(stream)
+            if len(server._active_streams) >= server.max_streams:
+                rejected = True
+            else:
+                server._active_streams.add(stream)
+        if rejected:
+            stream.close()
+            stream._finalize(disconnected=True)
+            return self._send_json(
+                503,
+                {"error": "server is busy; too many active streams"},
+                close=True,
+            )
         completed = False
         try:
             self._response_started = True
+            self._set_write_timeout()
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -739,7 +860,6 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             self.close_connection = True
-            self.connection.settimeout(None)
 
             interval = (
                 stream.keepalive_interval
@@ -756,14 +876,25 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                     break
                 if event is _KEEPALIVE:
                     payload = b": keepalive\n\n"
+                    if len(payload) > server.max_stream_event_bytes:
+                        raise _ResponseTooLarge(
+                            f"keepalive exceeds {server.max_stream_event_bytes} bytes"
+                        )
                 else:
-                    data = json.dumps(event, allow_nan=False, separators=(",", ":")).encode("utf-8")
+                    data = _encode_json_bounded(
+                        event,
+                        server.max_stream_event_bytes - len(b"data: \n\n"),
+                        separators=(",", ":"),
+                    )
                     payload = b"data: " + data + b"\n\n"
                 self._write_chunk(payload)
             if completed:
+                self._set_write_timeout()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+            completed = False
+        except _ResponseTooLarge:
             completed = False
         except Exception:
             completed = False
@@ -774,5 +905,6 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             stream._finalize(disconnected=not completed)
 
     def _write_chunk(self, payload):
+        self._set_write_timeout()
         self.wfile.write(f"{len(payload):X}\r\n".encode("ascii") + payload + b"\r\n")
         self.wfile.flush()

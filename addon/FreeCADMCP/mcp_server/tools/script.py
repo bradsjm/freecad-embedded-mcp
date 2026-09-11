@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import sys
+import threading
 import traceback
 from collections.abc import Callable
 from typing import Any
@@ -28,8 +29,9 @@ SERVER_BUSY = "SERVER_BUSY"
 
 # Stored namespaces are bounded; new sessions are rejected when full rather
 # than evicting live state (PLAN item 17).
-# Stream caps: kept output stays bounded in every path; the flags make
-# truncation explicit instead of silent (autonomous-context contract).
+# Stream caps: capture is bounded while the script writes, so an output
+# flood never grows a buffer past the limit; the flags make truncation
+# explicit instead of silent (autonomous-context contract).
 OUTPUT_LIMIT_CHARS = 65536
 TRACEBACK_LIMIT_CHARS = 32768
 
@@ -140,22 +142,22 @@ def run_script(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             "executed": False,
         }
 
-    stdout = io.StringIO()
-    stderr = io.StringIO()
+    stdout = _BoundedStream(OUTPUT_LIMIT_CHARS)
+    stderr = _BoundedStream(OUTPUT_LIMIT_CHARS)
     saved_stdout, saved_stderr = sys.stdout, sys.stderr
     try:
         sys.stdout = stdout
         sys.stderr = stderr
         exec(compile(code, f"<run_script:{session_id}>", "exec"), namespace)
     except BaseException:
-        stdout_text, stdout_truncated = _cap_head(stdout.getvalue())
-        stderr_text, stderr_truncated = _cap_head(stderr.getvalue())
-        traceback_text, traceback_truncated = _cap_tail(traceback.format_exc())
+        stdout_text, stdout_truncated = stdout.captured()
+        stderr_text, stderr_truncated = stderr.captured()
+        traceback_text, traceback_truncated = _format_traceback_tail()
         # Arbitrary code may have mutated documents before raising: the
         # truthful state is may_have_changed, never a clean rollback claim.
         raise ToolError(
             VALIDATION_FAILED,
-            _script_error_message(),
+            _script_error_message(traceback_text),
             details={
                 "session_id": session_id,
                 "stdout": stdout_text,
@@ -170,8 +172,8 @@ def run_script(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     finally:
         sys.stdout, sys.stderr = saved_stdout, saved_stderr
 
-    stdout_text, stdout_truncated = _cap_head(stdout.getvalue())
-    stderr_text, stderr_truncated = _cap_head(stderr.getvalue())
+    stdout_text, stdout_truncated = stdout.captured()
+    stderr_text, stderr_truncated = stderr.captured()
     return {
         "session_id": session_id,
         "stdout": stdout_text,
@@ -182,28 +184,71 @@ def run_script(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _cap_head(text: str) -> tuple[str, bool]:
-    """Keep the first OUTPUT_LIMIT_CHARS characters; report truncation."""
+class _BoundedStream(io.StringIO):
+    """Captured stream that retains at most ``limit`` characters.
 
-    if len(text) > OUTPUT_LIMIT_CHARS:
-        return text[:OUTPUT_LIMIT_CHARS], True
-    return text, False
+    Text is capped as it is written, so a flood cannot grow the capture
+    buffer past the limit: the excess is dropped and only the truncation
+    flag records it. Writes report the length they were offered, like a
+    pipe that silently drops what it cannot hold.
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self._limit = limit
+        self._truncated = False
+        self._lock = threading.Lock()
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        with self._lock:
+            room = self._limit - self.tell()
+            if room <= 0:
+                self._truncated = True
+                return len(text)
+            kept = text[:room]
+            super().write(kept)
+            if len(kept) < len(text):
+                self._truncated = True
+        return len(text)
+
+    def captured(self) -> tuple[str, bool]:
+        """Return the retained head and whether anything was dropped."""
+
+        with self._lock:
+            return self.getvalue(), self._truncated
 
 
-def _cap_tail(text: str) -> tuple[str, bool]:
-    """Keep the last TRACEBACK_LIMIT_CHARS characters; report truncation."""
+def _format_traceback_tail() -> tuple[str, bool]:
+    """Format the pending exception, keeping only its last characters.
 
-    if len(text) > TRACEBACK_LIMIT_CHARS:
-        return text[-TRACEBACK_LIMIT_CHARS:], True
-    return text, False
+    The traceback is consumed as a stream of chunks into a sliding tail, so
+    neither a deep stack nor a huge exception message is joined into one
+    unbounded string before the cap applies.
+    """
+
+    exc_type, exc_value, exc_tb = sys.exc_info()
+    # ``compact=True`` is what traceback.format_exc() uses; the streaming
+    # generator replaces it so the full text is never built.
+    formatter = traceback.TracebackException(exc_type, exc_value, exc_tb, compact=True)
+    tail = ""
+    total = 0
+    for chunk in formatter.format(chain=True):
+        total += len(chunk)
+        if len(chunk) >= TRACEBACK_LIMIT_CHARS:
+            tail = chunk[-TRACEBACK_LIMIT_CHARS:]
+        else:
+            tail = (tail + chunk)[-TRACEBACK_LIMIT_CHARS:]
+    return tail, total > TRACEBACK_LIMIT_CHARS
 
 
 def _seed_namespace(ctx: Any) -> dict[str, Any]:
     return {"FreeCAD": ctx.App, "App": ctx.App, "Gui": ctx.Gui}
 
 
-def _script_error_message() -> str:
-    lines = traceback.format_exc().strip().splitlines()
+def _script_error_message(traceback_text: str) -> str:
+    lines = traceback_text.strip().splitlines()
     return lines[-1] if lines else "the script raised an exception"
 
 

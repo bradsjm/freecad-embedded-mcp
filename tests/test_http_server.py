@@ -13,6 +13,7 @@ import http.client
 import json
 import queue
 import socket
+import struct
 import sys
 import threading
 import time
@@ -939,6 +940,57 @@ def test_valid_request_returns_json_with_principal_and_port0():
         expected = "sha256:" + hashlib.sha256(TOKEN.encode("utf-8")).hexdigest()[:32]
         assert principal == expected
         assert isinstance(connection_id, str) and connection_id
+
+
+def test_idle_keepalive_connection_is_closed_by_read_timeout():
+    with running_server(echo_dispatch, read_timeout=0.2) as server:
+        payload = json.dumps(valid_request()).encode("utf-8")
+        request = (
+            f"POST /mcp HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{server.port}\r\n"
+            f"Authorization: Bearer {TOKEN}\r\n"
+            "Content-Type: application/json\r\n"
+            "Accept: application/json, text/event-stream\r\n"
+            f"MCP-Protocol-Version: {SUPPORTED_VERSION}\r\n"
+            "Mcp-Method: test/echo\r\n"
+            f"Content-Length: {len(payload)}\r\n\r\n"
+        ).encode("latin-1") + payload
+        status, _, body = raw_exchange(server.port, request, timeout=2.0)
+        assert status == 200
+        assert json.loads(body)["id"] == 1
+
+
+def test_reset_peer_during_stream_does_not_stop_server():
+    fixture = StreamFixture()
+    fixture.queue.put({"jsonrpc": "2.0", "id": 9, "result": {"partial": True}})
+
+    def dispatch(message, principal, connection_id):
+        if message["method"] == STREAM_METHOD:
+            return fixture.stream_response(0.1)
+        return echo_dispatch(message, principal, connection_id)
+
+    with running_server(dispatch) as server:
+        sock = open_raw_stream(server, sse_request(rpc_id=9))
+        try:
+            recv_until(sock, b'"partial":true')
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        finally:
+            sock.close()
+        assert fixture.disconnect_event.wait(5.0)
+        status, _, body = server.post(valid_request(rpc_id=10), routing_headers())
+        assert status == 200
+        assert json.loads(body)["id"] == 10
+
+
+def test_oversized_json_response_is_rejected_before_headers():
+    def large_dispatch(message, principal, connection_id):
+        return {"jsonrpc": "2.0", "id": message["id"], "result": {"data": "x" * 2048}}
+
+    with running_server(large_dispatch, max_response_bytes=1024) as server:
+        status, headers, body = server.post(valid_request(), routing_headers())
+        assert status == 500
+        assert headers["connection"].lower() == "close"
+        assert json.loads(body)["error"]["code"] == -32603
 
 
 # --------------------------------------------------------------------------

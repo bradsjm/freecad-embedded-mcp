@@ -99,11 +99,14 @@ def test_failure_raises_tool_error_with_stdout_stderr_and_traceback() -> None:
 
         error = excinfo.value
         assert error.code == "VALIDATION_FAILED"
+        # The message is the last traceback line, as before the cap existed.
+        assert error.message == "ValueError: smoke"
         details = error.details
         assert details["stdout"] == "before\n"
         assert details["session_id"] == "default"
         assert "ValueError: smoke" in details["traceback"]
         assert "Traceback (most recent call last)" in details["traceback"]
+        assert details["tracebackTruncated"] is False
         # stderr capture is wired even when unused by the failure.
         assert details["stderr"] == ""
         # The namespace survives the failure (live state, not evicted).
@@ -181,6 +184,32 @@ def test_output_over_the_limit_keeps_the_head_and_sets_the_flag() -> None:
         assert result["stdoutTruncated"] is True
 
 
+def test_output_flood_never_grows_the_capture_buffers_past_the_limit() -> None:
+    with load_script() as script:
+        ctx = FakeCtx()
+        result = call(
+            script,
+            "import sys\n"
+            "sys.stdout.write('x' * 200000)\n"
+            "for _ in range(1000):\n"
+            "    sys.stderr.write('y' * 1000)\n"
+            "observed = len(sys.stdout.getvalue()), len(sys.stderr.getvalue())\n",
+            ctx=ctx,
+        )
+
+        # The buffers are already capped while the script runs, not after it
+        # returns: the flood is dropped on write instead of being retained.
+        assert ctx.script_namespaces["default"]["observed"] == (
+            script.OUTPUT_LIMIT_CHARS,
+            script.OUTPUT_LIMIT_CHARS,
+        )
+        assert result["stdout"] == "x" * script.OUTPUT_LIMIT_CHARS
+        assert result["stderr"] == "y" * script.OUTPUT_LIMIT_CHARS
+        assert result["stdoutTruncated"] is True
+        assert result["stderrTruncated"] is True
+        assert result["executed"] is True
+
+
 def test_failure_details_are_capped_and_report_may_have_changed() -> None:
     with load_script() as script:
         ctx = FakeCtx()
@@ -201,21 +230,50 @@ def test_failure_details_are_capped_and_report_may_have_changed() -> None:
         assert ctx.script_namespaces["default"]["partial_marker"] == 1
 
 
-def test_traceback_keeps_only_the_tail_when_over_the_limit(
+def test_traceback_is_streamed_into_the_capped_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with load_script() as script:
         ctx = FakeCtx()
+        limit = script.TRACEBACK_LIMIT_CHARS
+        chunks = [
+            "Traceback (most recent call last):\n",
+            "  a deep frame\n",
+            "Z" * (limit + 100),  # one oversized chunk, as a huge message is
+            "\n",
+        ]
+
+        class FakeTracebackException:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def format(self, **_kwargs: Any) -> Iterator[str]:
+                # A generator, exactly like TracebackException.format: the
+                # caller must cap while consuming, never collect it first.
+                return iter(chunks)
+
+        monkeypatch.setattr(
+            script.traceback,
+            "TracebackException",
+            FakeTracebackException,
+        )
         monkeypatch.setattr(
             script.traceback,
             "format_exc",
-            lambda: "head\n" + "Z" * (script.TRACEBACK_LIMIT_CHARS + 100),
+            lambda: pytest.fail("format_exc materializes the whole traceback"),
+        )
+        monkeypatch.setattr(
+            script.traceback,
+            "format_exception",
+            lambda *_args, **_kwargs: pytest.fail(
+                "format_exception collects every chunk before returning"
+            ),
         )
 
         with pytest.raises(ToolError) as excinfo:
             call(script, "raise ValueError('boom')", ctx=ctx)
 
         details = excinfo.value.details
-        assert details["traceback"] == "Z" * script.TRACEBACK_LIMIT_CHARS
+        assert details["traceback"] == "".join(chunks)[-limit:]
         assert details["tracebackTruncated"] is True
         assert details["operationState"] == "may_have_changed"

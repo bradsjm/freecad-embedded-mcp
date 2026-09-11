@@ -34,6 +34,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -229,6 +230,8 @@ def _tool_annotations(name: str) -> dict[str, bool]:
 
 #: One operation cap across blocking calls and tasks (plan section 4).
 MAX_OPERATIONS = 32
+MAX_SUBSCRIPTIONS = 32
+MAX_SUBSCRIPTION_ID_LENGTH = 1024
 
 #: Orientation applied when a committed mutation reveals its targets. This is
 #: the same Isometric perspective ``capture_view`` documents as its first
@@ -644,6 +647,7 @@ class Server:
 
         self._state_lock = threading.Lock()
         self._state = "stopped"  # stopped | starting | running | draining
+        self._bound = False
         self._http: McpHTTPServer | None = None
         self._observer: _DocumentObserver | None = None
         self._observer_registered = False
@@ -652,6 +656,9 @@ class Server:
         self._doc_entries: dict[str, _DocEntry] = {}
         self._ops_lock = threading.Lock()
         self._ops: dict[str, _Operation] = {}
+        self._direct_gui_lock = threading.Lock()
+        self._direct_gui_jobs = 0
+        self._subscription_admission_lock = threading.Lock()
 
         self._script_lock = threading.Lock()
         self.script_namespaces: dict[str, dict] = {}
@@ -1048,31 +1055,34 @@ class Server:
                     error["details"] = exc.details
                 return {"_refreshError": error}
 
-        outcome = gui_dispatch.dispatch_to_gui(
-            _candidate,
-            timeout=_PREFLIGHT_TIMEOUT_S,
-            operation_name="discover:refresh",
-        )
-        if outcome.error is not None:
-            error: dict = {
-                "code": GUI_DISPATCH_FAILED,
-                "message": f"capability refresh failed: {outcome.error}",
-            }
-            if outcome.traceback:
-                error["details"] = {"traceback": outcome.traceback}
-            return {}, error
-        candidate = outcome.value
-        if not isinstance(candidate, dict):
-            return {}, {
-                "code": GUI_DISPATCH_FAILED,
-                "message": "capability refresh returned an invalid snapshot",
-            }
-        refresh_error = candidate.pop("_refreshError", None)
-        if refresh_error is not None:
-            return {}, refresh_error
-        with self._capabilities_lock:
-            self._static_capabilities = candidate
-        return candidate, None
+        with self._direct_gui_scope("discover:refresh") as rejection:
+            if rejection is not None:
+                return {}, {"code": GUI_DISPATCH_FAILED, "message": rejection.error}
+            outcome = gui_dispatch.dispatch_to_gui(
+                _candidate,
+                timeout=_PREFLIGHT_TIMEOUT_S,
+                operation_name="discover:refresh",
+            )
+            if outcome.error is not None:
+                error: dict = {
+                    "code": GUI_DISPATCH_FAILED,
+                    "message": f"capability refresh failed: {outcome.error}",
+                }
+                if outcome.traceback:
+                    error["details"] = {"traceback": outcome.traceback}
+                return {}, error
+            candidate = outcome.value
+            if not isinstance(candidate, dict):
+                return {}, {
+                    "code": GUI_DISPATCH_FAILED,
+                    "message": "capability refresh returned an invalid snapshot",
+                }
+            refresh_error = candidate.pop("_refreshError", None)
+            if refresh_error is not None:
+                return {}, refresh_error
+            with self._capabilities_lock:
+                self._static_capabilities = candidate
+            return candidate, None
 
     def _capability_snapshot(self) -> dict:
         """Static startup snapshot; live GUI health is reported separately.
@@ -1351,25 +1361,28 @@ class Server:
 
     def _run_preflight(self, name: str, arguments: dict) -> dict | None:
         preflight = self._preflights[name]
-        outcome = gui_dispatch.dispatch_to_gui(
-            lambda: preflight(self, name, arguments),
-            timeout=_PREFLIGHT_TIMEOUT_S,
-            operation_name=f"preflight:{name}",
-        )
-        if outcome.error is not None:
-            details = {"traceback": outcome.traceback} if outcome.traceback else None
-            raise ToolError(
-                GUI_DISPATCH_FAILED,
-                f"preflight for '{name}' failed: {outcome.error}",
-                details,
+        with self._direct_gui_scope(f"preflight:{name}") as rejection:
+            if rejection is not None:
+                raise ToolError(GUI_DISPATCH_FAILED, rejection.error)
+            outcome = gui_dispatch.dispatch_to_gui(
+                lambda: preflight(self, name, arguments),
+                timeout=_PREFLIGHT_TIMEOUT_S,
+                operation_name=f"preflight:{name}",
             )
-        target = outcome.value
-        if target is not None and not isinstance(target, dict):
-            raise ToolError(
-                GUI_DISPATCH_FAILED,
-                f"preflight for '{name}' returned an invalid target",
-            )
-        return target
+            if outcome.error is not None:
+                details = {"traceback": outcome.traceback} if outcome.traceback else None
+                raise ToolError(
+                    GUI_DISPATCH_FAILED,
+                    f"preflight for '{name}' failed: {outcome.error}",
+                    details,
+                )
+            target = outcome.value
+            if target is not None and not isinstance(target, dict):
+                raise ToolError(
+                    GUI_DISPATCH_FAILED,
+                    f"preflight for '{name}' returned an invalid target",
+                )
+            return target
 
     # -- operation registry ------------------------------------------------
 
@@ -1383,6 +1396,13 @@ class Server:
         deadline_s: float,
         cancel_event: threading.Event | None = None,
     ) -> _Operation:
+        with self._state_lock:
+            if self._bound and self._state != "running":
+                raise ToolError(
+                    SERVER_BUSY,
+                    "MCP server is stopping; retry after it returns to running",
+                    {"reason": "server_not_running", "state": self._state},
+                )
         with self._ops_lock:
             if len(self._ops) >= MAX_OPERATIONS:
                 raise ToolError(
@@ -1415,6 +1435,25 @@ class Server:
             self._ops.pop(op_id, None)
             empty = not self._ops
         if empty:
+            self._maybe_finish_draining()
+
+    @contextmanager
+    def _direct_gui_scope(self, operation_name: str):
+        """Retain ownership until a direct GUI caller fully unwinds."""
+
+        with self._state_lock:
+            if self._bound and self._state != "running":
+                yield gui_dispatch.Outcome(
+                    error=f"'{operation_name}' was not started: MCP server is {self._state}"
+                )
+                return
+        with self._direct_gui_lock:
+            self._direct_gui_jobs += 1
+        try:
+            yield None
+        finally:
+            with self._direct_gui_lock:
+                self._direct_gui_jobs -= 1
             self._maybe_finish_draining()
 
     def _operation_checkpoint(self, op_id: str) -> dict | None:
@@ -1464,13 +1503,18 @@ class Server:
             draining = self._state == "draining"
         if not draining:
             return
-        if self.pending_operation_count() != 0 or gui_dispatch.pending_count() != 0:
+        if (
+            self.pending_operation_count() != 0
+            or gui_dispatch.pending_count() != 0
+            or self._direct_gui_jobs != 0
+        ):
             return
         with self._state_lock:
             if (
                 self._state == "draining"
                 and self.pending_operation_count() == 0
                 and gui_dispatch.pending_count() == 0
+                and self._direct_gui_jobs == 0
             ):
                 self._state = "stopped"
                 finish = True
@@ -1496,13 +1540,17 @@ class Server:
         """True while any operation still awaits a late finalizer."""
 
         with self._ops_lock:
-            return bool(self._ops)
+            operations = bool(self._ops)
+        with self._direct_gui_lock:
+            return operations or self._direct_gui_jobs != 0
 
     def pending_operation_count(self) -> int:
         """Number of retained operations (thread-safe read)."""
 
         with self._ops_lock:
-            return len(self._ops)
+            operations = len(self._ops)
+        with self._direct_gui_lock:
+            return operations + self._direct_gui_jobs
 
     # -- blocking execution -------------------------------------------------
 
@@ -1964,6 +2012,12 @@ class Server:
         notifications = params.get("notifications")
         if notifications is None:
             notifications = {}
+        subscription_id = validated["id"]
+        if isinstance(subscription_id, str) and len(subscription_id) > MAX_SUBSCRIPTION_ID_LENGTH:
+            raise ProtocolError(
+                INVALID_PARAMS,
+                "invalid parameters: subscription id is too long",
+            )
         if not isinstance(notifications, Mapping):
             raise ProtocolError(
                 INVALID_PARAMS,
@@ -1978,12 +2032,19 @@ class Server:
                 # stream is registered; a foreign id is indistinguishable
                 # from an unknown one.
                 self._task_store.get(task_id, principal=principal)
-        subscription = self._registry.register(
-            connection_id,
-            validated["id"],
-            notifications,
-            principal=principal,
-        )
+        with self._subscription_admission_lock:
+            if len(self._registry) >= MAX_SUBSCRIPTIONS:
+                raise ToolError(
+                    SERVER_BUSY,
+                    "Too many active subscriptions; close one and retry",
+                    {"reason": "subscription_limit", "limit": MAX_SUBSCRIPTIONS},
+                )
+            subscription = self._registry.register(
+                connection_id,
+                subscription_id,
+                notifications,
+                principal=principal,
+            )
         return StreamResponse(
             _SubscriptionStream(subscription),
             on_disconnect=subscription.close,
@@ -2013,34 +2074,39 @@ class Server:
                 f"invalid parameters: unknown resource uri: {uri}",
                 {"uri": uri},
             )
-        outcome = gui_dispatch.dispatch_to_gui(
-            self._read_documents,
-            timeout=_RESOURCE_READ_TIMEOUT_S,
-            operation_name="resources/read:freecad://documents",
-        )
-        if outcome.error is not None:
-            details = {"traceback": outcome.traceback} if outcome.traceback else None
-            raise ProtocolError(INTERNAL_ERROR, f"resource read failed: {outcome.error}", details)
-        documents = outcome.value
-        # Native ReadResourceResult: one JSON content entry whose text is
-        # the compact document listing. Live document data: ttl 0, private.
-        result = complete_result(
-            {
-                "contents": [
-                    {
-                        "uri": DOCUMENTS_RESOURCE_URI,
-                        "mimeType": "application/json",
-                        "text": json.dumps(
-                            documents,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                            allow_nan=False,
-                        ),
-                    }
-                ]
-            }
-        )
-        return _with_caching(_rpc_result(validated["id"], result), CACHE_PRIVATE)
+        with self._direct_gui_scope("resources/read:freecad://documents") as rejection:
+            if rejection is not None:
+                raise ProtocolError(INTERNAL_ERROR, rejection.error)
+            outcome = gui_dispatch.dispatch_to_gui(
+                self._read_documents,
+                timeout=_RESOURCE_READ_TIMEOUT_S,
+                operation_name="resources/read:freecad://documents",
+            )
+            if outcome.error is not None:
+                details = {"traceback": outcome.traceback} if outcome.traceback else None
+                raise ProtocolError(
+                    INTERNAL_ERROR, f"resource read failed: {outcome.error}", details
+                )
+            documents = outcome.value
+            # Native ReadResourceResult: one JSON content entry whose text is
+            # the compact document listing. Live document data: ttl 0, private.
+            result = complete_result(
+                {
+                    "contents": [
+                        {
+                            "uri": DOCUMENTS_RESOURCE_URI,
+                            "mimeType": "application/json",
+                            "text": json.dumps(
+                                documents,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                                allow_nan=False,
+                            ),
+                        }
+                    ]
+                }
+            )
+            return _with_caching(_rpc_result(validated["id"], result), CACHE_PRIVATE)
 
     @staticmethod
     def _read_documents() -> dict:
@@ -2146,6 +2212,7 @@ class Server:
             raise
         with self._state_lock:
             self._state = "running"
+            self._bound = True
 
     def _unwind(self) -> None:
         """Release every partial startup artifact; never reports running."""
@@ -2163,6 +2230,7 @@ class Server:
             pass
         with self._state_lock:
             self._state = "stopped"
+            self._bound = False
 
     def stop(self) -> dict:
         """Stop accepting work, close streams, cancel queued jobs and
@@ -2624,7 +2692,7 @@ def stop_server() -> dict:
         # Retain the drained-but-still-finishing server so its late
         # finalizers can complete; a fresh start replaces it only when it
         # has no pending operations left.
-        if not server.has_pending_operations():
+        if not server.has_pending_operations() and gui_dispatch.pending_count() == 0:
             _server = None
     return result
 

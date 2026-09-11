@@ -18,8 +18,11 @@ Pure stdlib; no FreeCAD, GUI, or socket imports.
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
+import time
+from collections import deque
 from collections.abc import Callable, Collection
 from typing import Any
 
@@ -41,6 +44,8 @@ RESOURCE_UPDATED_NOTIFICATION_METHOD = "notifications/resources/updated"
 DOCUMENTS_RESOURCE_URI = "freecad://documents"
 
 DEFAULT_QUEUE_LIMIT = 256
+DEFAULT_QUEUE_BYTES = 4 * 1024 * 1024
+TERMINAL_QUEUE_RESERVE_BYTES = 64 * 1024
 
 _FILTER_BOOLEAN_KEYS = (
     "toolsListChanged",
@@ -52,6 +57,46 @@ _FILTER_LIST_KEYS = ("resourceSubscriptions", "taskIds")
 
 class SubscriptionClosed(Exception):
     """Raised by :meth:`Subscription.receive` once the stream is exhausted."""
+
+
+class _SubscriptionQueueView:
+    """Small queue-compatible view over a subscription's atomic consumer."""
+
+    def __init__(self, subscription: Subscription) -> None:
+        self._subscription = subscription
+
+    def get(self, timeout: float | None = None) -> dict[str, Any] | None:
+        try:
+            message = self._subscription.receive(timeout=timeout)
+        except SubscriptionClosed:
+            return None
+        if message is None:
+            raise queue.Empty
+        return message
+
+    def get_nowait(self) -> dict[str, Any] | None:
+        return self.get(timeout=0)
+
+    def empty(self) -> bool:
+        with self._subscription._lock:
+            return not self._subscription._queue
+
+
+def _serialized_size_bounded(message: dict[str, Any], limit: int) -> int | None:
+    """Return compact JSON size, or ``None`` after the limit is crossed."""
+
+    try:
+        encoder = json.JSONEncoder(allow_nan=False, separators=(",", ":"))
+        total = 0
+        for piece in encoder.iterencode(message):
+            if len(piece) > limit:
+                return None
+            total += len(piece.encode("utf-8"))
+            if total > limit:
+                return None
+        return total
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -132,23 +177,33 @@ class Subscription:
         principal: str | None,
         honored: dict[str, Any],
         queue_limit: int,
+        queue_bytes: int,
     ) -> None:
         self.connection_id = connection_id
         self.subscription_id = subscription_id
         self.principal = principal
         self.honored = honored
-        self._queue: queue.Queue[Any] = queue.Queue(maxsize=queue_limit)
-        self._lock = threading.Lock()
+        self._queue: deque[Any] = deque()
+        self._queue_limit = queue_limit
+        self._queue_bytes_limit = queue_bytes
+        self._data_bytes_limit = (
+            queue_bytes - TERMINAL_QUEUE_RESERVE_BYTES
+            if queue_bytes >= TERMINAL_QUEUE_RESERVE_BYTES
+            else queue_bytes
+        )
+        self._queued_bytes = 0
+        self._lock = threading.Condition()
         self._closed = False
+        self._queue_view = _SubscriptionQueueView(self)
 
     @property
     def closed(self) -> bool:
         return self._closed
 
     @property
-    def queue(self) -> queue.Queue[Any]:
+    def queue(self) -> _SubscriptionQueueView:
         """Consumer-side queue owned by the HTTP stream writer thread."""
-        return self._queue
+        return self._queue_view
 
     def offer(self, message: dict[str, Any]) -> bool:
         """Enqueue one wire message without ever blocking.
@@ -160,11 +215,19 @@ class Subscription:
         with self._lock:
             if self._closed:
                 return False
-            try:
-                self._queue.put_nowait(message)
-            except queue.Full:
+            size = _serialized_size_bounded(message, self._data_bytes_limit)
+            if size is None:
                 self._close_locked()
                 return False
+            if size > self._data_bytes_limit or self._queued_bytes + size > self._data_bytes_limit:
+                self._close_locked()
+                return False
+            if len(self._queue) >= self._queue_limit:
+                self._close_locked()
+                return False
+            self._queue.append((message, size))
+            self._queued_bytes += size
+            self._lock.notify()
             return True
 
     def receive(self, timeout: float | None = None) -> dict[str, Any] | None:
@@ -175,15 +238,24 @@ class Subscription:
         Raises :class:`SubscriptionClosed` once closed and fully drained —
         including after the final result message was delivered.
         """
-        try:
-            item = self._queue.get(timeout=timeout)
-        except queue.Empty:
-            if self._closed:
-                raise SubscriptionClosed() from None
-            return None
-        if item is None:
-            raise SubscriptionClosed()
-        return item
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._lock:
+            while not self._queue:
+                if self._closed:
+                    raise SubscriptionClosed()
+                if deadline is None:
+                    self._lock.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._lock.wait(remaining)
+            item = self._queue.popleft()
+            if item is None:
+                raise SubscriptionClosed()
+            message, size = item
+            self._queued_bytes = max(0, self._queued_bytes - size)
+            return message
 
     def close(self, *, final: dict[str, Any] | None = None) -> bool:
         """Close the stream, optionally enqueueing a final result first.
@@ -197,21 +269,27 @@ class Subscription:
             if self._closed:
                 return False
             if final is not None:
-                try:
-                    self._queue.put_nowait(final)
-                except queue.Full:
-                    pass
+                self._offer_locked(final, terminal=True)
             self._close_locked()
             return True
 
+    def _offer_locked(self, message: dict[str, Any], *, terminal: bool = False) -> bool:
+        byte_limit = self._queue_bytes_limit if terminal else self._data_bytes_limit
+        size = _serialized_size_bounded(message, byte_limit)
+        if size is None or self._queued_bytes + size > byte_limit:
+            return False
+        if len(self._queue) >= self._queue_limit:
+            return False
+        self._queue.append((message, size))
+        self._queued_bytes += size
+        self._lock.notify()
+        return True
+
     def _close_locked(self) -> None:
         self._closed = True
-        try:
-            self._queue.put_nowait(None)
-        except queue.Full:
-            # The queue was already full at close time; the drained consumer
-            # observes ``closed`` and raises SubscriptionClosed on Empty.
-            pass
+        if len(self._queue) < self._queue_limit:
+            self._queue.append(None)
+        self._lock.notify_all()
 
 
 class SubscriptionRegistry:
@@ -222,12 +300,14 @@ class SubscriptionRegistry:
         *,
         supported_resource_uris: Collection[str] = (DOCUMENTS_RESOURCE_URI,),
         queue_limit: int = DEFAULT_QUEUE_LIMIT,
+        queue_bytes: int = DEFAULT_QUEUE_BYTES,
         support_tools_list_changed: bool = False,
         support_prompts_list_changed: bool = False,
         support_resources_list_changed: bool = False,
     ) -> None:
         self._supported_resource_uris = frozenset(supported_resource_uris)
         self._queue_limit = queue_limit
+        self._queue_bytes = queue_bytes
         self._support_tools_list_changed = support_tools_list_changed
         self._support_prompts_list_changed = support_prompts_list_changed
         self._support_resources_list_changed = support_resources_list_changed
@@ -273,6 +353,7 @@ class SubscriptionRegistry:
                 principal=principal,
                 honored=honored,
                 queue_limit=self._queue_limit,
+                queue_bytes=self._queue_bytes,
             )
             self._subscriptions[key] = subscription
             # Offer the acknowledgement while still holding the registry

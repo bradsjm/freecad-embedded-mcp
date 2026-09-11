@@ -150,6 +150,8 @@ class _Job:
 
 
 _gui_request_queue: "queue.Queue[Any]" = queue.Queue()
+_MAX_QUEUED_JOBS = 64
+_queued_jobs = 0
 _generation = 0  # bumped by initialize; guarded by _state_lock
 _processing = False  # re-entrancy guard: True while process_gui_tasks drains
 _processing_since: float = 0.0  # monotonic time when _processing became True
@@ -212,14 +214,23 @@ def _safe_set_result(future: "concurrent.futures.Future[Outcome]", outcome: Outc
         pass  # a waiter timeout already resolved it with a stuck outcome
 
 
+def _safe_console_error(message: str) -> None:
+    """Report an add-on failure without allowing host logging to raise."""
+
+    try:
+        FreeCAD.Console.PrintError(message)
+    except BaseException:
+        pass
+
+
 def _fire_on_finished(job: _Job, outcome: Outcome) -> None:
     """Invoke the terminal callback exactly once; never raise."""
     if job.on_finished is None:
         return
     try:
         job.on_finished(outcome)
-    except Exception as exc:
-        FreeCAD.Console.PrintError(
+    except BaseException as exc:
+        _safe_console_error(
             f"MCP: on_finished callback for '{job.operation}' raised "
             f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
         )
@@ -272,14 +283,23 @@ def _create_job(
         return job
 
     refused: Outcome | None = None
+    global _queued_jobs
     with _state_lock:
         if _draining:
             refused = Outcome(
                 error=f"'{job.operation}' was not started: GUI dispatcher is draining"
             )
+        elif _queued_jobs >= _MAX_QUEUED_JOBS:
+            refused = Outcome(
+                error=(
+                    f"'{job.operation}' was not started: GUI dispatcher queue "
+                    f"limit {_MAX_QUEUED_JOBS} was reached"
+                )
+            )
         else:
             _inflight[job.task_id] = job
             _jobs_by_future[job.future] = job
+            _queued_jobs += 1
     if refused is not None:
         _reject(refused)
         return job
@@ -288,6 +308,18 @@ def _create_job(
     if _waker is not None:
         _waker.wake()  # immediate wake via Qt signal (thread-safe)
     return job
+
+
+def _remove_queued_job(job: _Job) -> bool:
+    """Remove a canceled job before the GUI drain can dequeue it."""
+
+    with _gui_request_queue.mutex:
+        try:
+            _gui_request_queue.queue.remove(job)
+        except ValueError:
+            return False
+        _gui_request_queue.not_full.notify()
+        return True
 
 
 def _run_job(job: _Job) -> None:
@@ -321,8 +353,8 @@ def _execute_job(job: _Job) -> None:
     try:
         try:
             result = job.fn()
-        except Exception as exc:
-            FreeCAD.Console.PrintError(
+        except BaseException as exc:
+            _safe_console_error(
                 f"MCP: GUI task '{job.operation}' raised "
                 f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
             )
@@ -384,10 +416,13 @@ def _abandon(job: _Job, timeout: float) -> Outcome:
             settle_outcome = _queued_timeout_outcome(timeout)
     if fetch:
         return job.future.result()
+    removed = _remove_queued_job(job) if settle_outcome is not None else False
     with _state_lock:
         # The abandoned queued job is final: drop it from the inflight set
         # and the future registry like the shutdown and cancel-before-start
-        # paths, so pending_count and queued_jobs stop reporting it.
+        if removed:
+            global _queued_jobs
+            _queued_jobs = max(0, _queued_jobs - 1)
         _inflight.pop(job.task_id, None)
         _jobs_by_future.pop(job.future, None)
     _safe_set_result(job.future, settle_outcome)
@@ -449,7 +484,7 @@ def process_gui_tasks(reschedule: bool = True, *, generation: int | None = None)
     a retired generation's tick still drains (dropping retired stop
     sentinels) but never rearms, so a restart can never duplicate chains.
     """
-    global _processing, _processing_since
+    global _processing, _processing_since, _queued_jobs
     if _processing:
         return  # re-entrant call from processEvents inside a task; skip
 
@@ -486,10 +521,12 @@ def process_gui_tasks(reschedule: bool = True, *, generation: int | None = None)
                         shutdown = True
                         return
                     continue  # retired stop marker from before a restart
+                with _state_lock:
+                    _queued_jobs = max(0, _queued_jobs - 1)
                 try:
                     _run_job(item)
-                except Exception as e:
-                    FreeCAD.Console.PrintError(
+                except BaseException as e:
+                    _safe_console_error(
                         f"MCP: unhandled exception in GUI job dispatch: "
                         f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                     )
@@ -680,7 +717,7 @@ def shutdown() -> dict[str, int]:
     undrained sentinel instead of stalling on it. Returns counts of
     affected jobs.
     """
-    global _draining
+    global _draining, _queued_jobs
     with _state_lock:
         if _draining:
             return {"cancelled_queued": 0, "cancel_requested": 0}
@@ -710,7 +747,10 @@ def shutdown() -> dict[str, int]:
                 error=(f"'{job.operation}' was cancelled during GUI dispatcher shutdown")
             )
         cancelled += 1
+        removed = _remove_queued_job(job)
         with _state_lock:
+            if removed:
+                _queued_jobs = max(0, _queued_jobs - 1)
             _inflight.pop(job.task_id, None)
             _jobs_by_future.pop(job.future, None)
         _safe_set_result(job.future, outcome)

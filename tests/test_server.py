@@ -470,10 +470,12 @@ def _clean_state():
     gui_dispatch._dispatch_health._timed_out = False
     gui_dispatch._dispatch_health._timeout_seconds = 0.0
     gui_dispatch._inflight.clear()
+    gui_dispatch._queued_jobs = 0
     _drain_gui_queue()
     yield
     gui_dispatch.shutdown()
     _drain_gui_queue()  # drop the sentinel shutdown just queued
+    gui_dispatch._queued_jobs = 0
     gui_dispatch.cleanup_waker()
     gui_dispatch._waker = previous_waker
     server_module._server = None

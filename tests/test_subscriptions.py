@@ -255,6 +255,13 @@ def test_queue_overflow_closes_instead_of_blocking() -> None:
     )
 
 
+def test_queue_byte_limit_closes_before_memory_growth() -> None:
+    registry = make_registry(queue_limit=256, queue_bytes=128)
+    sub = registry.register("conn-a", 1, {"taskIds": ["t1"]}, principal="alice")
+    assert sub.closed
+    assert len(registry) == 0
+
+
 # -- disconnect -----------------------------------------------------------
 
 
