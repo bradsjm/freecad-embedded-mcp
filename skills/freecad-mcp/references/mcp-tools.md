@@ -118,7 +118,7 @@ A constraint `(type, argument-count)` shape with no recorded native acceptance i
 - `pocket`: `extent` (`distance`/`through_all`/`up_to_face`), `length`, optional `face`, `symmetric`, `reversed`.
 - `hole`: `diameter`, `depth` (dimension extents), optional `depth_type` (`dimension`/`through_all`), `cut` (`none`/`counterbore`/`countersink`/`counterdrill`) with its required sub-parameters (`counterbore_diameter` + `counterbore_depth`, `countersink_diameter` + `countersink_angle`, or all four), and `thread` plus `thread_size` (verified against the live ThreadSize enumeration).
 - `gear_profile`: `teeth` (8–80), `module` (0.1–10 mm; pitch diameter capped at 200 mm), optional `pressure_angle` (14.5–25 degrees).
-- `revolve`, `groove`: `axis` (a whole-object reference naming a Body origin axis or datum line; the `{object, sketchAxis}` form is refused for these kinds), optional `angle`, `reversed`.
+- `revolve`, `groove`: `axis` (a whole-object reference naming a Body origin axis or datum line; the `{object, sketchAxis}` form is refused for these kinds), `angle` (required, 0–360 degrees), optional `reversed`.
 - `fillet`: `base` object, `subelements` (1–32 edge references), `radius`.
 - `chamfer`: `base`, `subelements`, `size`.
 - `thickness`: `base`, `subelements` (1–32 faces), `thickness`, optional `inward`.

@@ -1230,15 +1230,26 @@ def _cancelled_result(request_id: Any, version: str) -> dict:
 
 
 def _consent_denied_result(request_id: Any, version: str, reason: str) -> dict:
+    message = _CONSENT_DENY_MESSAGES.get(reason, f"consent refused: {reason}")
     return _tool_error_response(
         request_id,
         version,
         ToolError(
             CONSENT_DENIED,
-            "Consent was not granted before the deadline",
+            message,
             {"reason": reason},
         ),
     )
+
+
+# One truthful line per consent-wait end: the old fixed message claimed a
+# deadline even when the caller's response was malformed or the session
+# closed.
+_CONSENT_DENY_MESSAGES = {
+    "timeout": "Consent was not granted before the deadline",
+    "invalid consent response": "invalid consent response",
+    "session closed": "consent wait ended: the session closed",
+}
 
 
 def _classify_elicitation(response: Any) -> str:

@@ -904,14 +904,25 @@ def validate_schema(
     if branches is not None:
         if not isinstance(branches, list):  # check_schema rejects first.
             fail("anyOf must be an array")
+        branch_errors: list[str] = []
         for branch in branches:
             try:
                 validate_schema(value, branch, root, path, _depth + 1)
                 break
-            except ProtocolError:
+            except ProtocolError as exc:
+                # Keep the first-line reason per branch: a union that
+                # matches nothing otherwise reports only "does not match
+                # any anyOf branch", which never names the field the
+                # caller got wrong.
+                text = str(exc)
+                prefix = "invalid parameters: "
+                if text.startswith(prefix):
+                    text = text[len(prefix) :]
+                branch_errors.append(text)
                 continue
         else:
-            fail("does not match any anyOf branch")
+            summary = "; ".join(dict.fromkeys(branch_errors))[:400]
+            fail(f"does not match any anyOf branch: {summary}")
 
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < schema["minimum"]:

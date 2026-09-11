@@ -426,12 +426,19 @@ def _resolve_target(ctx: Any, doc: Any, selector: Any) -> tuple[Any, Mapping | N
         bounds = _bbox(subshape)
         if bounds is None:
             continue
+        # Deliberate contract: the selector box must equal the subelement's
+        # document-space bounds (within tolerance), which selects exactly
+        # one face or edge. Overlap matching would turn any enclosing box
+        # into an ambiguous multi-match.
         if all(abs(bounds[i] - box[i]) <= _BOX_TOLERANCE_MM for i in range(6)):
             matches.append((index, subshape, bounds))
     if not matches:
         raise ToolError(
             VALIDATION_FAILED,
-            f"no {role} of {obj.Name} matches the requested bounding box",
+            f"no {role} of {obj.Name} has bounds equal to the requested "
+            f"bounding box (within {_BOX_TOLERANCE_MM:g} mm); give the exact "
+            f"bounds of one {role}, or select it with a signed reference "
+            "from inspect_topology or a measure faces pass",
             {"role": role, "box": box},
         )
     if len(matches) > 1:
@@ -1430,7 +1437,9 @@ TOOL_DEFINITIONS = [
         "description": (
             "Measure geometry in document (global) coordinates between whole"
             " objects or bbox-selected faces/edges (selector boxes are"
-            " document-space mm): distance (distToShape), interference (common"
+            " document-space mm; a box selects the one face or edge whose"
+            " bounds equal it within tolerance, so take exact bounds from"
+            " inspect_topology): distance (distToShape), interference (common"
             " volume), planar section curves (z plane or normal+point in"
             " document space) or face areas with sampled normals. Semantics:"
             " distance is the raw distToShape value and a positive result"

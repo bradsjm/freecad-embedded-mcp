@@ -347,7 +347,9 @@ TOOL_DEFINITIONS = [
         "(the default) require MRTR consent first, because loading an FCStd "
         "file can execute embedded Python; a granted consent never certifies "
         "the file safe. A failed load removes only documents the failure "
-        "newly introduced, never preexisting ones.",
+        "newly introduced, never preexisting ones. A path that is already "
+        "open returns the live in-memory document without re-reading the "
+        "file, reported as alreadyOpen.",
         {
             "path": {"type": "string", "minLength": 1},
             "untrusted": {
@@ -360,8 +362,9 @@ TOOL_DEFINITIONS = [
         {
             **_DOCUMENT_COUNT_PROPERTIES,
             "path": {"type": "string", "minLength": 1},
+            "alreadyOpen": {"type": "boolean"},
         },
-        [*_DOCUMENT_COUNT_REQUIRED, "path"],
+        [*_DOCUMENT_COUNT_REQUIRED, "path", "alreadyOpen"],
     ),
     _definition(
         "save_document",
@@ -471,7 +474,12 @@ def _open_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             f"failed to open '{canonical}': {_describe(exc)}",
             details,
         ) from exc
-    return _document_payload(doc, path=doc.FileName)
+    payload = _document_payload(doc, path=doc.FileName)
+    # FreeCAD returns the already-open document for a path that is open
+    # instead of re-reading the file. Say so: the in-memory document may
+    # hold unsaved changes the caller did not expect to see.
+    payload["alreadyOpen"] = doc.Name in before
+    return payload
 
 
 def _save_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:

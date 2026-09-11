@@ -1229,6 +1229,27 @@ def _validate_constraint_add(entry: Any, what: str) -> dict:
     return checked
 
 
+def _constraint_types(sketch: Any) -> list[str | None]:
+    """Best-effort native type of every existing constraint, in index order.
+
+    An unreadable entry yields ``None`` so callers skip the check for that
+    row instead of guessing.
+    """
+
+    try:
+        constraints = list(getattr(sketch, "Constraints", ()) or ())
+    except Exception:
+        return []
+    types: list[str | None] = []
+    for constraint in constraints:
+        try:
+            value = getattr(constraint, "Type", None)
+        except Exception:
+            value = None
+        types.append(str(value) if isinstance(value, str) and value else None)
+    return types
+
+
 def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
     """Validate every operation against a simulated index state."""
 
@@ -1341,6 +1362,11 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
 
     # Datum edits apply after deletes and additions: their indexes refer to
     # the final constraint state.
+    final_types = _constraint_types(sketch)
+    deleted = set(delete_constraints)
+    survivor_types = [value for index, value in enumerate(final_types) if index not in deleted]
+    final_types = survivor_types + [entry["type"] for entry in checked_constraints]
+    datum_capable = {name for name, arities in _CONSTRAINT_DATUM_REQUIRED.items() if arities}
     checked_datums = []
     for position, entry in enumerate(set_datums):
         if not isinstance(entry, dict):
@@ -1354,6 +1380,13 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
             raise _fail(
                 f"setDatums[{position}].index {index!r} does not exist in the "
                 f"final constraint state of {final_constraint_count} constraints"
+            )
+        target_type = final_types[index] if index < len(final_types) else None
+        if target_type is not None and target_type not in datum_capable:
+            raise _fail(
+                f"setDatums[{position}].index {index} is a {target_type} "
+                "constraint; setDatum needs a datum constraint (Angle, "
+                "Distance, DistanceX, DistanceY, Radius, Diameter)"
             )
         checked_datums.append(
             {
@@ -1390,6 +1423,14 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
             raise _fail(f"constraint index {index} cannot receive both a datum and an expression")
         expression = entry.get("expression")
         if expression is not None:
+            target_type = final_types[index] if index < len(final_types) else None
+            if target_type is not None and target_type not in datum_capable:
+                raise _fail(
+                    f"setExpressions[{position}].index {index} is a "
+                    f"{target_type} constraint; only a datum constraint "
+                    "(Angle, Distance, DistanceX, DistanceY, Radius, "
+                    "Diameter) can carry a constraint expression"
+                )
             if not isinstance(expression, str) or not expression.strip():
                 raise _fail(f"setExpressions[{position}].expression must be null or non-empty")
             if len(expression) > 256:

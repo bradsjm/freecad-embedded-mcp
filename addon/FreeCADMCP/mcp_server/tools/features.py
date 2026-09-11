@@ -1022,6 +1022,16 @@ def _apply_base_list(
     from .geometry import resolve_reference_list
 
     base_obj, labels = resolve_reference_list(ctx, doc, base, list(references), role)
+    touch = getattr(base_obj, "touch", None)
+    if callable(touch):
+        # A base feature that has executed only once (its creation) carries
+        # an element map that does not survive its next re-execution: a
+        # dress-up bound to that map fails with "Invalid edge link" the
+        # first time the base is edited, whatever tool performs the edit.
+        # Force one re-execution now so the reference binds to a map that
+        # has already been regenerated.
+        touch()
+        doc.recompute()
     if not _objects._property_exists(feature, "Base"):
         raise _fail(f"feature '{getattr(feature, 'Name', '')}' exposes no Base property")
     feature.Base = (base_obj, labels)
@@ -1458,6 +1468,30 @@ def _check_angle(name: str, parameters: Mapping[str, Any], upper: float) -> None
         raise _fail(f"{name} must be a finite angle in (0, {upper:g}] degrees")
 
 
+def _has_expression(feature: Any, prop: str) -> bool:
+    """True when ``prop`` currently carries a native expression binding.
+
+    Reads the object's ``ExpressionEngine`` so the numeric write below only
+    clears a binding that actually exists.
+    """
+
+    engine = getattr(feature, "ExpressionEngine", None)
+    if not engine or isinstance(engine, (str, bytes)):
+        return False
+    try:
+        entries = list(engine)
+    except TypeError:
+        return False
+    for entry in entries:
+        if isinstance(entry, (tuple, list)):
+            path = entry[0] if entry else None
+        else:
+            path = getattr(entry, "path", None)
+        if path in (prop, f".{prop}"):
+            return True
+    return False
+
+
 def _apply_semantic_parameters(
     ctx: Any,
     doc: Any,
@@ -1530,7 +1564,14 @@ def _apply_semantic_parameters(
             )
         if isinstance(value, list):
             raise _fail(f"{name} must be a scalar or an expression object")
-        feature.setExpression(prop, None)
+        if _has_expression(feature, prop):
+            # Clear only a real binding. Calling setExpression(prop, None)
+            # on an unbound property touches the feature's expression state,
+            # and the next recompute then regenerates the feature's element
+            # map: a downstream dress-up edge reference fails to resolve
+            # ("Invalid edge link") and the whole mutation rolls back even
+            # though the property value itself is harmless.
+            feature.setExpression(prop, None)
         setattr(feature, prop, native)
         applied.append(f"{name}->{prop}={native}")
     return applied
@@ -1599,7 +1640,9 @@ def _apply_semantic_attachment(
 
     placement = FreeCAD.Placement()
     placement.Base = FreeCAD.Vector(0.0, 0.0, number)
-    feature.setExpression("AttachmentOffset.Base.z", None)
+    if _has_expression(feature, "AttachmentOffset.Base.z"):
+        # Same rule as the scalar writes: only clear a binding that exists.
+        feature.setExpression("AttachmentOffset.Base.z", None)
     feature.AttachmentOffset = placement
 
 

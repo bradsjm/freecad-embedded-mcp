@@ -1062,6 +1062,17 @@ def _convert_value(ctx: Any, doc: Any, obj: Any, prop: str, value: Any) -> Any:
         return [
             _number(entry, f"{prop}[{index}]") for index, entry in enumerate(_as_array(value, prop))
         ]
+    if isinstance(value, dict):
+        # No native property accepts a JSON object. Passing it through made
+        # FreeCAD raise a bare TypeError ("type must be 'Shape', not dict")
+        # only after the object existed, with no pointer at the property.
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"property '{prop}' of type '{ptype}' does not accept a JSON "
+            "object; mappable shapes are Placement, Vector, Link, LinkSub "
+            "and Color values",
+            {"property": prop, "propertyType": ptype},
+        )
     # Unmapped property types pass through; FreeCAD rejects mismatches and
     # the mutation gate rolls the assignment back.
     return value

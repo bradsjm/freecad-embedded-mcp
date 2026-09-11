@@ -1361,11 +1361,22 @@ class Server:
 
     def _run_preflight(self, name: str, arguments: dict) -> dict | None:
         preflight = self._preflights[name]
+
+        def guarded() -> Any:
+            try:
+                return preflight(self, name, arguments)
+            except ToolError as exc:
+                # Preserve the domain code through the dispatcher: a refused
+                # path or a missing file is PATH_NOT_ALLOWED/VALIDATION_FAILED,
+                # not a broken GUI dispatch. Same channel the tool handlers
+                # use to carry a ToolError back as the outcome value.
+                return exc
+
         with self._direct_gui_scope(f"preflight:{name}") as rejection:
             if rejection is not None:
                 raise ToolError(GUI_DISPATCH_FAILED, rejection.error)
             outcome = gui_dispatch.dispatch_to_gui(
-                lambda: preflight(self, name, arguments),
+                guarded,
                 timeout=_PREFLIGHT_TIMEOUT_S,
                 operation_name=f"preflight:{name}",
             )
@@ -1377,6 +1388,8 @@ class Server:
                     details,
                 )
             target = outcome.value
+            if isinstance(target, ToolError):
+                raise target
             if target is not None and not isinstance(target, dict):
                 raise ToolError(
                     GUI_DISPATCH_FAILED,
@@ -2518,14 +2531,19 @@ def _compact_capabilities(snapshot: Mapping[str, Any]) -> dict:
     """Summary projection of one capability snapshot.
 
     The four summary blocks plus the supported-types count (``None`` when
-    no list was probed) and the document the types came from. Never mutates
-    ``snapshot``: the cache is a shared object.
+    no list was probed, with the reason in ``supportedTypesUnavailable``)
+    and the document the types came from. Never mutates ``snapshot``: the
+    cache is a shared object.
     """
 
     compact = {key: snapshot[key] for key in _COMPACT_CAPABILITY_KEYS if key in snapshot}
     supported = snapshot.get("supportedTypes")
     compact["supportedTypesCount"] = len(supported) if isinstance(supported, list) else None
     compact["supportedTypesDocument"] = snapshot.get("supportedTypesDocument")
+    if isinstance(supported, Mapping) and "unavailable" in supported:
+        # A snapshot captured with no document open cannot carry the type
+        # list; compact must say why instead of reporting bare nulls.
+        compact["supportedTypesUnavailable"] = str(supported["unavailable"])
     return compact
 
 
@@ -2538,8 +2556,10 @@ def _discover_definition() -> dict:
             "plus GUI dispatch health reported separately without waiting for "
             "a GUI dispatch. The default compact detail returns the summary "
             "blocks plus supportedTypesCount and supportedTypesDocument; "
-            "detail 'full' returns the complete snapshot, and refresh true "
-            "recaptures it on the GUI thread first."
+            "when the snapshot was captured with no document open, both are "
+            "null and supportedTypesUnavailable carries the reason until a "
+            "call with refresh true recaptures them. detail 'full' returns "
+            "the complete snapshot."
         ),
         "inputSchema": {
             "type": "object",
