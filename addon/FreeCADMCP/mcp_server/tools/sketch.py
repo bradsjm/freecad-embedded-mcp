@@ -450,6 +450,12 @@ _INSPECT_SKETCH_OUTPUT = {
         "geometry",
         "constraints",
         "expressionBindings",
+        "geometryCount",
+        "constraintsCount",
+        "expressionBindingsCount",
+        "geometryTruncated",
+        "constraintsTruncated",
+        "expressionBindingsTruncated",
     ],
     "properties": {
         "document": {"type": "string"},
@@ -481,6 +487,12 @@ _INSPECT_SKETCH_OUTPUT = {
             },
             "maxItems": _MAX_SKETCH_ROWS,
         },
+        "geometryCount": {"type": "integer", "minimum": 0},
+        "constraintsCount": {"type": "integer", "minimum": 0},
+        "expressionBindingsCount": {"type": "integer", "minimum": 0},
+        "geometryTruncated": {"type": "boolean"},
+        "constraintsTruncated": {"type": "boolean"},
+        "expressionBindingsTruncated": {"type": "boolean"},
         "checkpoint": {
             "type": "object",
             "additionalProperties": False,
@@ -641,7 +653,10 @@ TOOL_DEFINITIONS = [
             "unsupported marker with the native type name) and constraint "
             "rows in native 0-based index order, the solver degree-of-"
             "freedom summary and the constraint expression bindings. "
-            "Unavailable native getters report null or empty fields."
+            "Unavailable native getters report null or empty fields. "
+            "geometry, constraints and expressionBindings cap at 4096 "
+            "rows; the Count fields report full totals and the Truncated "
+            "flags mark capping."
         ),
         "inputSchema": _INSPECT_SKETCH_INPUT,
         "outputSchema": _INSPECT_SKETCH_OUTPUT,
@@ -820,12 +835,12 @@ def _constraint_row(index: int, constraint: Any) -> dict:
     }
 
 
-def _expression_bindings(sketch: Any) -> list[dict]:
+def _expression_bindings_all(sketch: Any) -> list[dict]:
     bindings: list[dict] = []
     engine = getattr(sketch, "ExpressionEngine", None)
     if not isinstance(engine, (list, tuple)):
         return bindings
-    for entry in engine[:_MAX_SKETCH_ROWS]:
+    for entry in engine:
         if not isinstance(entry, (list, tuple)) or len(entry) != 2:
             continue
         path, expression = entry
@@ -834,7 +849,11 @@ def _expression_bindings(sketch: Any) -> list[dict]:
             continue
         name = text.rsplit(".", 1)[-1].strip()
         bindings.append({"constraint": name, "expression": str(expression)})
-    return bindings[:_MAX_SKETCH_ROWS]
+    return bindings
+
+
+def _expression_bindings(sketch: Any) -> list[dict]:
+    return _expression_bindings_all(sketch)[:_MAX_SKETCH_ROWS]
 
 
 def _state_names(sketch: Any) -> list[str]:
@@ -899,25 +918,25 @@ def _solver_summary(sketch: Any) -> dict:
     }
 
 
-def _geometry_rows(sketch: Any) -> list[dict]:
+def _geometry_rows(sketch: Any) -> tuple[list[dict], int]:
     try:
         geometry = list(getattr(sketch, "Geometry", ()) or ())
     except Exception:
-        return []
+        return [], 0
     return [
         _geometry_row(index, geo, sketch) for index, geo in enumerate(geometry[:_MAX_SKETCH_ROWS])
-    ]
+    ], len(geometry)
 
 
-def _constraint_rows(sketch: Any) -> list[dict]:
+def _constraint_rows(sketch: Any) -> tuple[list[dict], int]:
     try:
         constraints = list(getattr(sketch, "Constraints", ()) or ())
     except Exception:
-        return []
+        return [], 0
     return [
         _constraint_row(index, constraint)
         for index, constraint in enumerate(constraints[:_MAX_SKETCH_ROWS])
-    ]
+    ], len(constraints)
 
 
 # ---------------------------------------------------------------------------
@@ -1590,6 +1609,9 @@ def _inspect_sketch(ctx: Any, arguments: dict) -> dict:
     doc = ctx.require_document(arguments["document"])
     sketch = ctx.require_object(doc, arguments["sketch"])
     _require_sketch(sketch)
+    geometry, geometry_count = _geometry_rows(sketch)
+    constraints, constraints_count = _constraint_rows(sketch)
+    bindings_all = _expression_bindings_all(sketch)
     return {
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
@@ -1597,9 +1619,15 @@ def _inspect_sketch(ctx: Any, arguments: dict) -> dict:
         "solver": _solver_summary(sketch),
         "state": _state_names(sketch),
         "statusText": _status_text(sketch),
-        "geometry": _geometry_rows(sketch),
-        "constraints": _constraint_rows(sketch),
-        "expressionBindings": _expression_bindings(sketch),
+        "geometry": geometry,
+        "constraints": constraints,
+        "expressionBindings": bindings_all[:_MAX_SKETCH_ROWS],
+        "geometryCount": geometry_count,
+        "constraintsCount": constraints_count,
+        "expressionBindingsCount": len(bindings_all),
+        "geometryTruncated": geometry_count > _MAX_SKETCH_ROWS,
+        "constraintsTruncated": constraints_count > _MAX_SKETCH_ROWS,
+        "expressionBindingsTruncated": len(bindings_all) > _MAX_SKETCH_ROWS,
     }
 
 

@@ -138,9 +138,9 @@ Settings live in `freecad_mcp_settings.json` inside FreeCAD's user application d
 
 When `remote_enabled` is true and no token exists, the server generates and persists one before it starts. **Security warning:** The bearer token grants full local code-execution authority. The `run_script` tool executes arbitrary Python with the FreeCAD user's privileges and is deliberately not restricted by `allowed_roots`.
 
-`allowed_roots` defaults to the user's home directory. It contains document paths, export destinations, FEM working directories, and the optional `recovery_directory`; it is not a sandbox for `run_script`.
+`allowed_roots` defaults to the user's home directory. It contains document paths, export destinations, and FEM working directories; it is not a sandbox for `run_script`.
 
-Recovery copies require a `recovery_directory` that resolves to an absolute path inside an `allowed_roots` entry. The settings dialog validates this relationship before it saves the settings.
+Recovery copies require an absolute `recovery_directory`. The configured directory is allowed automatically for reads and writes, so it does not have to be listed in `allowed_roots`.
 
 ## Protocol surface
 
@@ -314,7 +314,7 @@ Structured object, parameter, sketch, and feature edits use MCP-owned transactio
 
 ### Recovery checkpoints
 
-Set `recovery_enabled` and a `recovery_directory` that resolves inside an allowed root to enable verified recovery copies. The server checks the document is idle, writes a temporary FCStd copy, reopens it, compares it with the live document, and publishes it without overwriting an existing file before an expensive feature mutation starts.
+Set `recovery_enabled` and an absolute `recovery_directory` to enable verified recovery copies. The directory is allowed automatically, so it does not have to appear in `allowed_roots`. The server checks the document is idle, writes a temporary FCStd copy, reopens it, compares it with the live document, and publishes it without overwriting an existing file before an expensive feature mutation starts.
 
 Recovery covers `create_feature` kinds `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, `pipe`, `helix`, `multi_transform`, and `scaled`. It also covers an `edit_feature` operation when the affected Body's feature chain contains an expensive feature.
 
@@ -426,7 +426,7 @@ The CI workflow runs the lock check, Ruff lint, Ruff format check, add-on compil
 | **Architecture** | The PyPI proxy package (`src/freecad_mcp`, FastMCP over stdio) and the in-FreeCAD XML-RPC server are gone. One embedded server speaks MCP over Streamable HTTP (JSON-RPC + SSE) at `http://127.0.0.1:9876/mcp`. No pip or uvx install and no client config file are needed. |
 | **Protocol** | XML-RPC with ad-hoc dictionaries became the MCP JSON-RPC wire protocol, version `2026-07-28`, with request-metadata headers, capability negotiation, and session-based support for the 2025 Streamable HTTP revisions. |
 | **Tools** | Fifteen loosely typed tools became a 26-tool registered surface validated against JSON input and output schemas, with structured error codes and paginated results. `run_script` is opt-in through the `allow_scripts` setting. `execute_code` became `run_script`; `get_view` became `capture_view`; `get_rpc_status` became `discover_capabilities`; `inspect_documents` was added for live document inventory; `create_objects` adds atomic 1–32 object creation. |
-| **Security** | The IP allow-list alone became two explicit modes: local (loopback bind, Host/Origin checks, no token) and remote (bind to all interfaces, mandatory bearer token, optional CIDR allow-list), plus `allowed_roots` path containment for file-touching tools and recovery copies. |
+| **Security** | The IP allow-list alone became two explicit modes: local (loopback bind, Host/Origin checks, no token) and remote (bind to all interfaces, mandatory bearer token, optional CIDR allow-list), plus `allowed_roots` path containment for file-touching tools and a dedicated absolute `recovery_directory` for recovery copies. |
 | **Document safety** | Unvalidated success/error dictionaries became MCP-owned transactions with prevalidation, rollback, dependent-object checks, and solid-count baselines. |
 | **Long-running work** | Blocking calls with client-side timeouts became detached tasks under the `io.modelcontextprotocol/tasks` extension, with polling and cooperative cancellation. |
 | **Consent** | Operations that touch untrusted or existing data—opening or importing files, saving over paths, exporting over existing files, and closing or reloading dirty documents—became explicit elicitation round trips instead of implicit effects. |

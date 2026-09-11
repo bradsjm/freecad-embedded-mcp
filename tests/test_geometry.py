@@ -752,6 +752,34 @@ def test_measure_section_normal_and_point_plane(part_stub, freecad_stub):
     assert result["total_length"] == 0.0
 
 
+def test_section_total_length_sums_all_edges_beyond_curve_cap(part_stub, freecad_stub):
+    compound = FakeShape(volume=0.0, solids=0)
+    compound.Edges = [
+        FakeEdge(
+            length=1.0,
+            bounds=(0.0, 0.0, 5.0, 1.0, 0.0, 5.0),
+            points=[(0.0, 0.0, 5.0), (1.0, 0.0, 5.0)],
+        )
+        for _ in range(40)
+    ]
+    compound.Wires = [SimpleNamespace()]
+    box = FakeObject("Box", FakeShape(bounds=(0.0, 0.0, 0.0, 10.0, 10.0, 10.0)))
+    box.Shape._section = compound
+    ctx = FakeCtx({"Box": box})
+    result = geometry.HANDLERS["measure"](
+        ctx,
+        {"document": "Doc", "a": "Box", "mode": "section", "plane": {"z": 5.0}},
+    )
+    assert result["total_length"] == pytest.approx(40.0)
+    assert (
+        len(result["curves"])
+        == _definition("measure")["outputSchema"]["properties"]["curves"]["maxItems"]
+    )
+    assert result["edge_count"] == 40
+    assert result["truncated"] is True
+    _assert_output_schema(result, "measure")
+
+
 # ---------------------------------------------------------------------------
 # measure: faces.
 # ---------------------------------------------------------------------------
@@ -763,6 +791,7 @@ def test_measure_faces_lists_areas_normals_and_references():
     result = geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Shell", "mode": "faces"})
     assert result["mode"] == "faces"
     assert result["truncated"] is False
+    assert result["face_count"] == 2
     assert len(result["faces"]) == 2
     first = result["faces"][0]
     assert first["index"] == 1
@@ -790,6 +819,7 @@ def test_measure_faces_truncates_and_single_face_selection():
     result = geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Shell", "mode": "faces"})
     limit = _definition("measure")["outputSchema"]["properties"]["faces"]["maxItems"]
     assert len(result["faces"]) == limit
+    assert result["face_count"] == 70
     assert result["truncated"] is True
     selected = geometry.HANDLERS["measure"](
         ctx,
@@ -804,6 +834,7 @@ def test_measure_faces_truncates_and_single_face_selection():
         },
     )
     assert len(selected["faces"]) == 1
+    assert selected["face_count"] == 1
     assert selected["faces"][0]["area"] == 3.0
     assert selected["truncated"] is False
 
@@ -963,6 +994,18 @@ def test_inspect_topology_pages_every_face_once_through_signed_cursors():
     assert seen == list(range(1, 131))
     assert len(set(seen)) == 130
     assert pages == 3
+
+
+def test_topology_limit_above_max_is_clamped():
+    ctx = _topology_doc()
+    arguments = {"document": "Doc", "object": "Shell", "role": "face", "limit": 500}
+    protocol.validate_schema(arguments, _definition("inspect_topology")["inputSchema"])
+    result = geometry.HANDLERS["inspect_topology"](ctx, arguments)
+
+    _assert_output_schema(result, "inspect_topology")
+    assert result["count"] <= 100
+    assert result["total"] == 130
+    assert result["nextCursor"] is not None
 
 
 def test_inspect_topology_face_items_carry_descriptive_data():

@@ -24,7 +24,13 @@ from ..object_validation import (
     mutation,
     shape_is_null,
 )
-from ..protocol import DOMAIN_CURSOR, VALIDATION_FAILED, ProtocolError, ToolError
+from ..protocol import (
+    DOMAIN_CURSOR,
+    VALIDATION_FAILED,
+    ProtocolError,
+    ToolError,
+    fingerprint,
+)
 
 _MAX_LIMIT = 500
 _MAX_LINKS = 64
@@ -324,6 +330,8 @@ _OBJECT_ROW = {
         "solid_count",
         "tip",
         "links",
+        "linkCount",
+        "linksTruncated",
     ],
     "properties": {
         "name": {"type": "string"},
@@ -344,6 +352,9 @@ _OBJECT_ROW = {
         "solid_count": {"type": ["integer", "null"], "minimum": 0},
         "tip": {"type": ["string", "null"]},
         "links": {"type": "array", "items": {"type": "string"}, "maxItems": 64},
+        "linkCount": {"type": "integer", "minimum": 0},
+        "linksTruncated": {"type": "boolean"},
+        "featureCount": {"type": "integer", "minimum": 0},
         "bodyTip": {"type": ["string", "null"]},
         "features": {
             "type": "array",
@@ -530,26 +541,22 @@ _INSPECT_INPUT = {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "minItems": 1,
-            "maxItems": 64,
         },
         "cursor": {"type": ["string", "null"]},
         "property_filter": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
-            "maxItems": _MAX_FILTER,
         },
         "detail": {"type": "string", "enum": ["compact", "full"], "default": "compact"},
         "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": _MAX_LIMIT,
             "default": 32,
         },
         "property_offset": {"type": "integer", "minimum": 0, "default": 0},
         "property_limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": _MAX_PROPERTY_PAGE,
             "default": 64,
         },
     },
@@ -816,14 +823,18 @@ TOOL_DEFINITIONS = [
         "name": "inspect_objects",
         "description": (
             "List a document's objects sorted by Name, or an explicit "
-            "selection of 1-64 objects resolved by name. Compact rows carry "
+            "object selection resolved by name. Compact rows carry "
             "identity (name, label, TypeId), state, bounds, shape validity, "
             "solid count, Body tip and link identities; full detail adds "
             "local and global placements, property pages and property "
             "metadata with typed unavailable markers and expressions. "
             "Pagination uses an opaque signed cursor bound to the document "
             "generation, the selection and the filters; a stale cursor is a "
-            "restart-pagination error."
+            "restart-pagination error. limit and property_limit are "
+            "requested page sizes; the server may return a smaller page — "
+            "continue with nextCursor and nextPropertyOffset. Continuation "
+            "calls must resubmit the same objects selection and "
+            "property_filter."
         ),
         "inputSchema": _INSPECT_INPUT,
         "outputSchema": _INSPECT_OUTPUT,
@@ -1505,7 +1516,7 @@ def _tip_name(obj: Any) -> str | None:
     return name or None
 
 
-def _body_history(obj: Any) -> tuple[list[dict], bool, list[dict]]:
+def _body_history(obj: Any) -> tuple[list[dict], bool, list[dict], int]:
     """Return native Body members and its six local origin references."""
 
     derived = getattr(obj, "isDerivedFrom", None)
@@ -1516,7 +1527,7 @@ def _body_history(obj: Any) -> tuple[list[dict], bool, list[dict]]:
         except Exception:
             pass
     if not is_body:
-        return [], False, []
+        return [], False, [], 0
 
     members: list[Any] = []
     for attribute in ("Group", "Model"):
@@ -1593,22 +1604,20 @@ def _body_history(obj: Any) -> tuple[list[dict], bool, list[dict]]:
                     }
                 )
                 break
-    return features[:256], truncated, origins
+    return features[:256], truncated, origins, len(features)
 
 
-def _link_names(obj: Any) -> list[str]:
+def _link_names(obj: Any) -> tuple[list[str], int]:
     try:
         out_list = list(obj.OutList)
     except Exception:
-        return []
+        return [], 0
     names: list[str] = []
     for linked in out_list:
         name = str(getattr(linked, "Name", ""))
         if name and name not in names:
             names.append(name)
-        if len(names) >= _MAX_LINKS:
-            break
-    return sorted(names)
+    return sorted(names[:_MAX_LINKS]), len(names)
 
 
 def _unavailable(kind: str) -> dict:
@@ -1844,12 +1853,16 @@ def _row(
     row["shape_valid"] = _shape_valid(shape)
     row["solid_count"] = _solid_count(shape)
     row["tip"] = _tip_name(obj)
-    row["links"] = _link_names(obj)
+    links, link_count = _link_names(obj)
+    row["links"] = links
+    row["linkCount"] = link_count
+    row["linksTruncated"] = link_count > _MAX_LINKS
     if detail == "full":
-        features, features_truncated, origins = _body_history(obj)
+        features, features_truncated, origins, feature_count = _body_history(obj)
         row["bodyTip"] = _tip_name(obj)
         row["features"] = features
         row["featuresTruncated"] = features_truncated
+        row["featureCount"] = feature_count
         row["origins"] = origins
         row["properties"] = properties
         row["propertyMetadata"] = property_metadata
@@ -1884,10 +1897,10 @@ def _cursor_payload(
         "generation": int(ctx.document_generation(doc)),
         "detail": detail,
         "limit": limit,
-        "filter": sorted(str(prop) for prop in props),
+        "filterHash": fingerprint(sorted(str(prop) for prop in props)),
         "propertyOffset": property_offset,
         "propertyLimit": property_limit,
-        "selection": sorted(selection) if selection else None,
+        "selectionHash": fingerprint(sorted(selection)) if selection else None,
         "last": last,
     }
 
@@ -1971,17 +1984,17 @@ def _open_cursor(
     for key in (
         "detail",
         "limit",
-        "filter",
+        "filterHash",
         "propertyOffset",
         "propertyLimit",
-        "selection",
+        "selectionHash",
     ):
         if payload.get(key) != expected[key]:
             raise _stale_cursor()
     last = payload.get("last")
     if not isinstance(last, str):
         raise _stale_cursor()
-    return {"last": last, "selection": payload.get("selection")}
+    return {"last": last}
 
 
 # ---------------------------------------------------------------------------
@@ -2008,10 +2021,10 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
     selection: list[str] | None = None
     requested = args.get("objects")
     if requested is not None:
-        if not isinstance(requested, list) or not (1 <= len(requested) <= 64):
+        if not isinstance(requested, list) or len(requested) < 1:
             raise ToolError(
                 VALIDATION_FAILED,
-                "objects must be an array of 1 to 64 object names",
+                "objects must be an array of one or more object names",
             )
         names = [str(name) for name in requested]
         if any(not name for name in names):
@@ -2038,10 +2051,6 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
             selection=selection,
         )
         start_after = opened["last"]
-        if selection is None and opened["selection"]:
-            cursor_selection = [str(name) for name in opened["selection"]]
-            resolved = [ctx.require_object(doc, name) for name in cursor_selection]
-            selection = sorted({str(getattr(obj, "Name", "")) for obj in resolved})
 
     if selection is not None:
         by_name = {str(getattr(obj, "Name", "")): obj for obj in getattr(doc, "Objects", ()) or ()}

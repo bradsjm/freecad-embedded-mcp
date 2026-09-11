@@ -704,10 +704,9 @@ def _measure_section(a_shape: Any, plane: Mapping[str, Any], payload: dict) -> d
         wires = list(getattr(compound, "Wires", ()) or ())
     except Exception as exc:
         raise ToolError(VALIDATION_FAILED, f"section result access failed: {exc}") from exc
-    curves = []
+    curves = [_summarize_edge(edge) for edge in edges[:_MAX_CURVES]]
     total = 0.0
-    for edge in edges[:_MAX_CURVES]:
-        curves.append(_summarize_edge(edge))
+    for edge in edges:
         length = _finite(getattr(edge, "Length", None))
         if length is not None:
             total += length
@@ -774,15 +773,18 @@ def _measure_faces(ctx: Any, doc: Any, obj: Any, selection: Mapping | None, payl
     if shape is None:
         raise ToolError(VALIDATION_FAILED, f"object {obj.Name} has no shape")
     payload["a"] = _reference_for(ctx, doc, obj, selection)
+    face_count: int
     if selection is not None:
         faces = [(selection["index"], selection["shape"])]
         truncated = False
+        face_count = 1
     else:
         try:
             all_faces = list(shape.Faces)
         except Exception:
             all_faces = []
         truncated = len(all_faces) > _MAX_FACES
+        face_count = len(all_faces)
         faces = list(enumerate(all_faces[:_MAX_FACES], 1))
     entries = []
     for index, face in faces:
@@ -793,6 +795,7 @@ def _measure_faces(ctx: Any, doc: Any, obj: Any, selection: Mapping | None, payl
         entry.update(_face_summary(face))
         entries.append(entry)
     payload["faces"] = entries
+    payload["face_count"] = face_count
     payload["truncated"] = truncated
     return payload
 
@@ -1175,7 +1178,6 @@ _INSPECT_TOPOLOGY_INPUT = {
         "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": _MAX_TOPOLOGY_PAGE,
             "default": _DEFAULT_TOPOLOGY_PAGE,
         },
     },
@@ -1425,6 +1427,7 @@ _MEASURE_OUTPUT = {
         },
         "edge_count": {"type": "integer", "minimum": 0},
         "wire_count": {"type": "integer", "minimum": 0},
+        "face_count": {"type": "integer", "minimum": 0},
         "total_length": {"type": "number"},
         "truncated": {"type": "boolean"},
         "faces": {

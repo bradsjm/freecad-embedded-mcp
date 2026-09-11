@@ -28,7 +28,7 @@ default server exposes 25. Document tools return the actual sanitized
 | `discover_capabilities` | Versions, workbenches, supported types, exporter and FEM availability, GUI dispatch health | optional `refresh` (default `false`; `true` re-captures through the GUI path) and `detail` (`compact` default or `full`); GUI-independent without `refresh` |
 | `inspect_documents` | Open-document inventory with generation, dirty/active flags, and transaction state | none |
 | `new_document` | Create an empty document | `name` |
-| `open_document` | Open an `.FCStd` from an allowed root | `path`; `untrusted` defaults true and requires consent |
+| `open_document` | Open an `.FCStd` from an allowed root or the configured recovery directory | `path`; `untrusted` defaults true and requires consent |
 | `import_model` | Import STEP or STL behind file consent | `document`, `path`, `format`; optional `name` (STL mesh feature) |
 | `save_document` | Save to the existing path, or save-as | `document`; optional `path` (consent to overwrite a different existing file) |
 | `close_document` | Close one document | `document`; consent when dirty or unsaved nonempty |
@@ -172,7 +172,7 @@ Consent-gated operations: opening an untrusted FCStd file (the default), importi
 
 ## Recovery checkpoints
 
-`recovery_enabled` plus a `recovery_directory` (inside an allowed root) turn on verified recovery copies. When enabled, an expensive feature operation automatically checkpoints before the transaction opens, and the document is checked idle first so a busy document is refused before an unstable copy is captured. A checkpoint is an FCStd copy written through the native `saveCopy` path, reopened, and compared with the live document before the mutation proceeds; the server never prunes or deletes previous checkpoints. A failed checkpoint refuses the mutation with `VALIDATION_FAILED`, `reason: checkpoint_failed`, and `nextAction: inspect_recovery_directory`, and removes only the staging file it created.
+`recovery_enabled` plus an absolute `recovery_directory` turn on verified recovery copies. The directory is allowed automatically for reads and writes and needs no `allowed_roots` entry. When enabled, an expensive feature operation automatically checkpoints before the transaction opens, and the document is checked idle first so a busy document is refused before an unstable copy is captured. A checkpoint is an FCStd copy written through the native `saveCopy` path, reopened, and compared with the live document before the mutation proceeds; the server never prunes or deletes previous checkpoints. A failed checkpoint refuses the mutation with `VALIDATION_FAILED`, `reason: checkpoint_failed`, and `nextAction: inspect_recovery_directory`, and removes only the staging file it created.
 
 Discovery reports `capabilities.recoveryEnabled` so clients can read the active policy.
 
@@ -200,7 +200,7 @@ There are exactly two modes. Local (default): the server binds `127.0.0.1`, acce
 
 The settings file is `freecad_mcp_settings.json` and accepts `port`, `token`, `auto_start`, `remote_enabled`, `allowed_ips`, `allowed_roots`, `recovery_enabled`, `recovery_directory`, and `allow_scripts`. Invalid settings fail closed. When network access is enabled without a token, settings loading generates and persists one. Changes made in MCP Settings apply on the next server start.
 
-The bearer token is full local code-execution authority: `run_script` is not restricted by `allowed_roots`. Treat the token like a shell on this machine; never log or print it. `allowed_roots` (default: the user's home directory) contains document open/save paths, export destinations, FEM working directories, and the optional recovery directory. It is path containment inside this server, not a sandbox.
+The bearer token is full local code-execution authority: `run_script` is not restricted by `allowed_roots`. Treat the token like a shell on this machine; never log or print it. `allowed_roots` (default: the user's home directory) contains document open/save paths, export destinations, and FEM working directories. A configured `recovery_directory` is allowed automatically and does not need an `allowed_roots` entry. It is path containment inside this server, not a sandbox.
 
 ## Sources
 

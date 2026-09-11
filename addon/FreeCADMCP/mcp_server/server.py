@@ -837,12 +837,24 @@ class Server:
             )
 
     def canonical_path(self, path: Any) -> str:
-        """Realpath ``path`` and require containment in an allowed root."""
+        """Realpath ``path`` and require containment in an allowed root.
+
+        The configured ``recovery_directory`` is implicitly allowed: naming
+        it once in settings is enough, so it never has to be repeated in
+        ``allowed_roots``. It widens containment only while it is an
+        absolute path to an existing directory: a relative value would
+        otherwise resolve against the process working directory, which
+        differs between the settings dialog and the FreeCAD process.
+        """
 
         if not isinstance(path, str) or not path:
             raise ToolError(VALIDATION_FAILED, "path must be a non-empty string")
         real = os.path.realpath(os.path.expanduser(path))
-        for root in self.settings.get("allowed_roots") or ():
+        roots = list(self.settings.get("allowed_roots") or ())
+        recovery_directory = os.path.expanduser(str(self.settings.get("recovery_directory") or ""))
+        if os.path.isabs(recovery_directory) and os.path.isdir(recovery_directory):
+            roots.append(recovery_directory)
+        for root in roots:
             root_real = os.path.realpath(os.path.expanduser(root))
             try:
                 if os.path.commonpath([real, root_real]) == root_real:

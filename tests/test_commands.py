@@ -525,6 +525,42 @@ def test_restart_required_distinguishes_active_vs_saved_settings():
     assert commands._restart_required(saved, _status(state="stopped")) is False
 
 
+def test_restart_required_flags_directory_change_while_recovery_disabled():
+    """The configured recovery directory widens containment even when
+    recovery is disabled, so changing it must request a restart."""
+
+    saved = {
+        "remote_enabled": False,
+        "allowed_ips": "",
+        "port": 9876,
+        "recovery_enabled": False,
+        "recovery_directory": "/old/checkpoints",
+    }
+    active = _status(
+        state="running",
+        connection={
+            "remote_enabled": False,
+            "allowed_ips": "",
+            "configured_port": 9876,
+            "recovery_enabled": False,
+            "recovery_directory": "/old/checkpoints",
+        },
+    )
+    assert commands._restart_required(saved, active) is False
+
+    moved = _status(
+        state="running",
+        connection={
+            "remote_enabled": False,
+            "allowed_ips": "",
+            "configured_port": 9876,
+            "recovery_enabled": False,
+            "recovery_directory": "/new/checkpoints",
+        },
+    )
+    assert commands._restart_required(saved, moved) is True
+
+
 # ---------------------------------------------------------------------------
 # Controller refresh.
 # ---------------------------------------------------------------------------

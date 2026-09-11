@@ -158,15 +158,10 @@ def _restart_required(saved: dict | None, status: dict) -> bool:
         or saved.get("port") != connection.get("configured_port")
         or bool(saved.get("allow_scripts", False)) != bool(connection.get("allow_scripts"))
         or recovery_enabled_saved != recovery_enabled_active
-        # The directory only reaches the running server while recovery is
-        # enabled on both sides; otherwise the toggle above already
-        # reports the change.
-        or (
-            recovery_enabled_saved
-            and recovery_enabled_active
-            and str(saved.get("recovery_directory", ""))
-            != str(connection.get("recovery_directory", ""))
-        )
+        # The configured directory widens path containment for the
+        # running server even while recovery is disabled, so any change
+        # must surface as a pending restart.
+        or str(saved.get("recovery_directory", "")) != str(connection.get("recovery_directory", ""))
     )
 
 
@@ -652,9 +647,7 @@ class MCPSettingsCommand:
         )
         recovery_enabled.setChecked(bool(settings.get("recovery_enabled", False)))
         recovery_field = QtWidgets.QLineEdit(str(settings.get("recovery_directory", "")), dialog)
-        recovery_field.setPlaceholderText(
-            _tr("Directory for recovery copies; must be inside an allowed root")
-        )
+        recovery_field.setPlaceholderText(_tr("Directory for recovery copies"))
         recovery_error = QtWidgets.QLabel(dialog)
         recovery_error.setWordWrap(True)
         recovery_error.hide()

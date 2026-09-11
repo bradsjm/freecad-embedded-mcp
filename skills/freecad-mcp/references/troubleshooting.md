@@ -6,7 +6,7 @@ Use the smallest recovery step that addresses the observed failure. Preserve use
 
 ### Connection or server is unavailable
 
-Call `discover_capabilities`. If the client cannot connect, the embedded server may not be running: start it with the **Start MCP Server** toolbar action in the MCP Addon workbench, or enable auto-start in **MCP Settings**. The default endpoint is `http://127.0.0.1:9876/mcp` (port from settings). Local mode needs no token; network-access mode requires the bearer token on every request, and `PATH_NOT_ALLOWED` on file tools means the path is outside `allowed_roots`.
+Call `discover_capabilities`. If the client cannot connect, the embedded server may not be running: start it with the **Start MCP Server** toolbar action in the MCP Addon workbench, or enable auto-start in **MCP Settings**. The default endpoint is `http://127.0.0.1:9876/mcp` (port from settings). Local mode needs no token; network-access mode requires the bearer token on every request, and `PATH_NOT_ALLOWED` on file tools means the path is outside `allowed_roots` (the configured absolute `recovery_directory` is also allowed).
 
 ### Wrong document or object
 
@@ -91,7 +91,7 @@ A tool deadline (60 s default) does not prove that the operation failed or rolle
 
 Save each validated milestone with `save_document`; do not wait until export. Preserve the last known-good source and exports during experiments. A transaction or `finally` block cannot guarantee restoration after a process crash.
 
-When `capabilities.recoveryEnabled` is true, the server also creates a verified FCStd checkpoint before expensive feature mutations. `create_feature` checkpoints `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, `pipe`, `helix`, `multi_transform`, and `scaled`; `edit_feature` checkpoints when the affected Body contains one of these types. The checkpoint directory must resolve inside an `allowed_roots` entry. A failed checkpoint refuses the mutation with `VALIDATION_FAILED`, `reason: checkpoint_failed`, and `nextAction: inspect_recovery_directory`.
+When `capabilities.recoveryEnabled` is true, the server also creates a verified FCStd checkpoint before expensive feature mutations. `create_feature` checkpoints `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, `pipe`, `helix`, `multi_transform`, and `scaled`; `edit_feature` checkpoints when the affected Body contains one of these types. The checkpoint directory is allowed automatically and needs no `allowed_roots` entry. A failed checkpoint refuses the mutation with `VALIDATION_FAILED`, `reason: checkpoint_failed`, and `nextAction: inspect_recovery_directory`.
 
 1. Create a separate validation document before parameter sweeps or expensive geometry checks.
 2. Separate each mutation, recompute, inspection, and restoration into bounded calls.

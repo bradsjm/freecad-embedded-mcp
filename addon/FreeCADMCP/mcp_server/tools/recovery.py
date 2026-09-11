@@ -187,7 +187,7 @@ def _checkpoint_file_name(document_name: str, generation: int) -> str:
 
 
 def _require_recovery_directory(ctx: Any) -> str:
-    """Validate the configured recovery directory against allowed roots."""
+    """Return the configured recovery directory, which is implicitly allowed."""
 
     settings = getattr(ctx, "settings", None) or {}
     directory = str(settings.get("recovery_directory", "") or "")
@@ -196,23 +196,21 @@ def _require_recovery_directory(ctx: Any) -> str:
             "recovery is enabled but recovery_directory is empty",
             {},
         )
-    real = os.path.realpath(os.path.expanduser(directory))
+    expanded = os.path.expanduser(directory)
+    if not os.path.isabs(expanded):
+        # A relative value would resolve against the process working
+        # directory, so it must never become a checkpoint destination.
+        raise _checkpoint_failed(
+            "recovery_directory must be an absolute path",
+            {"path": directory},
+        )
+    real = os.path.realpath(expanded)
     if not os.path.isdir(real):
         raise _checkpoint_failed(
             f"recovery_directory does not exist or is not a directory: {directory}",
             {"path": real},
         )
-    for root in settings.get("allowed_roots") or ():
-        root_real = os.path.realpath(os.path.expanduser(str(root)))
-        try:
-            if os.path.commonpath([real, root_real]) == root_real:
-                return real
-        except ValueError:
-            continue
-    raise _checkpoint_failed(
-        "recovery_directory is outside the allowed roots",
-        {"path": real},
-    )
+    return real
 
 
 def _checkpoint_failed(message: str, details: dict) -> ToolError:

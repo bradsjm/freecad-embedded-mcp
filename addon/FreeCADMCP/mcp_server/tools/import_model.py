@@ -23,7 +23,7 @@ from ..object_validation import document_bounds, mutation
 from ..protocol import VALIDATION_FAILED, ToolError, check_schema
 from .documents import _require_approved
 
-_MAX_IMPORT_OBJECTS = 4096
+_IMPORT_PREVIEW_LIMIT = 64
 
 _IMPORT_INPUT = {
     "type": "object",
@@ -80,7 +80,9 @@ _IMPORT_OUTPUT = {
         "format",
         "path",
         "units",
+        "objectCount",
         "objects",
+        "objectsTruncated",
     ],
     "properties": {
         "document": {"type": "string"},
@@ -94,8 +96,10 @@ _IMPORT_OUTPUT = {
         "objects": {
             "type": "array",
             "items": _IMPORT_OBJECT_ROW,
-            "maxItems": _MAX_IMPORT_OBJECTS,
+            "maxItems": _IMPORT_PREVIEW_LIMIT,
         },
+        "objectCount": {"type": "integer", "minimum": 0},
+        "objectsTruncated": {"type": "boolean"},
     },
 }
 
@@ -326,13 +330,16 @@ def _import_model(ctx: Any, arguments: dict) -> dict:
             raise
         expectations.update(_multi_solid_expectations(created))
 
+    rows = [_object_row(entry) for entry in created]
     return {
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
         "format": fmt,
         "path": path,
         "units": "file_defined" if fmt == "step" else "unitless_assumed_mm",
-        "objects": [_object_row(entry) for entry in created],
+        "objectCount": len(rows),
+        "objects": rows[:_IMPORT_PREVIEW_LIMIT],
+        "objectsTruncated": len(rows) > _IMPORT_PREVIEW_LIMIT,
     }
 
 

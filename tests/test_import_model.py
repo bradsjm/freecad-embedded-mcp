@@ -285,6 +285,8 @@ def test_step_import_reports_identity_difference_objects(tmp_path) -> None:
 
     assert result["format"] == "step"
     assert result["units"] == "file_defined"
+    assert result["objectCount"] == 2
+    assert result["objectsTruncated"] is False
     assert [row["name"] for row in result["objects"]] == ["Imported1", "Imported2"]
     assert all(row["geometryKind"] == "shape" for row in result["objects"])
     assert all(row["solidCount"] == 1 for row in result["objects"])
@@ -334,6 +336,35 @@ def test_step_import_failure_removes_only_new_objects(tmp_path) -> None:
     assert "corrupt step file" in excinfo.value.message
     assert doc.removed == ["Fresh"]  # never the pre-existing "Same"
     assert [obj.Name for obj in doc.Objects] == ["Same"]
+
+
+def test_step_import_manifest_is_bounded_for_many_objects(tmp_path) -> None:
+    """A 70-object import succeeds; the manifest previews 64 rows only."""
+
+    path = tmp_path / "assembly.step"
+    path.write_text("ISO-10303-21")
+
+    with load_import() as module:
+        doc = FakeDoc(str(path))
+        ctx = FakeCtx(doc)
+        ctx.approved_target = consent_target(module, ctx, str(path), "step")
+
+        def fake_insert(path: str, document: str) -> None:
+            for index in range(70):
+                doc.Objects.append(
+                    StubObject(f"Part{index:03d}", "Part::Feature", shape=StubShape())
+                )
+
+        module._import_step = fake_insert
+        result = call(module, ctx, path=str(path), format="step")
+
+    definition = next(entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "import_model")
+    assert doc.transactions[-1] == ("commit",)
+    assert result["objectCount"] == 70
+    assert len(result["objects"]) == 64
+    assert result["objectsTruncated"] is True
+    assert [row["name"] for row in result["objects"]] == [f"Part{index:03d}" for index in range(64)]
+    validate_schema(result, definition["outputSchema"])
 
 
 def test_step_import_accepts_a_multisolid_file(tmp_path) -> None:

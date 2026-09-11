@@ -1349,6 +1349,8 @@ def test_inspect_returns_sorted_compact_rows() -> None:
         "solid_count",
         "tip",
         "links",
+        "linkCount",
+        "linksTruncated",
     }
     validate_schema(result, objects_mod.TOOL_DEFINITIONS[0]["outputSchema"])
 
@@ -1363,6 +1365,8 @@ def test_full_detail_rows_add_placement_and_property_pages() -> None:
     assert set(row) - compact == {
         "tip",
         "links",
+        "linkCount",
+        "linksTruncated",
         "placement",
         "globalPlacement",
         "boundsCoordinateSystem",
@@ -1374,6 +1378,7 @@ def test_full_detail_rows_add_placement_and_property_pages() -> None:
         "bodyTip",
         "features",
         "featuresTruncated",
+        "featureCount",
         "origins",
     }
     assert row["boundsCoordinateSystem"] == "document"
@@ -1394,6 +1399,37 @@ def test_inspect_default_page_limit_is_32() -> None:
     second = objects_mod.inspect_objects(ctx, {"document": doc.Name, "cursor": first["nextCursor"]})
     assert [row["name"] for row in second["objects"]] == ["Obj032"]
     assert second["nextCursor"] is None
+
+
+def test_large_selection_pages_through_all_requested_objects() -> None:
+    doc = FakeDoc(objects=[box(f"Obj{index:03d}") for index in range(70)])
+    ctx = FakeCtx(doc)
+    selection = [f"Obj{index:03d}" for index in range(70)]
+    request = {"document": doc.Name, "objects": selection, "limit": 32}
+    validate_schema(request, objects_mod.TOOL_DEFINITIONS[0]["inputSchema"])
+
+    first = objects_mod.inspect_objects(ctx, request)
+    assert first["count"] == 32
+    assert first["nextCursor"] is not None
+
+    second = objects_mod.inspect_objects(
+        ctx,
+        {"document": doc.Name, "objects": selection, "limit": 32, "cursor": first["nextCursor"]},
+    )
+    assert second["count"] == 32
+    assert second["nextCursor"] is not None
+
+    third = objects_mod.inspect_objects(
+        ctx,
+        {"document": doc.Name, "objects": selection, "limit": 32, "cursor": second["nextCursor"]},
+    )
+    assert third["count"] == 6
+    assert third["nextCursor"] is None
+    assert third["total"] == 70
+    names = [row["name"] for row in first["objects"] + second["objects"] + third["objects"]]
+    assert len(names) == 70
+    assert len(set(names)) == 70
+    validate_schema(third, objects_mod.TOOL_DEFINITIONS[0]["outputSchema"])
 
 
 def test_inspect_pagination_walks_all_objects() -> None:
@@ -1524,6 +1560,8 @@ def test_inspect_reports_body_tip_and_links() -> None:
     row = result["objects"][0]
     assert row["tip"] == "Tip"
     assert row["links"] == ["Tip"]
+    assert row["linkCount"] == len(row["links"])
+    assert row["linksTruncated"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1698,6 +1736,49 @@ def test_overlong_list_value_is_truncated_and_named() -> None:
     assert row["truncatedProperties"] == ["History"]
 
 
+def test_large_property_filter_pages_via_property_offset() -> None:
+    names = [f"Prop{index:03d}" for index in range(97)]
+    obj = FakeObj(
+        "Paged",
+        properties=tuple(names),
+        prop_types=dict.fromkeys(names, "App::PropertyString"),
+        values={name: f"value-{index}" for index, name in enumerate(names)},
+    )
+    doc = FakeDoc(objects=[obj])
+    ctx = FakeCtx(doc)
+
+    request = {
+        "document": doc.Name,
+        "detail": "full",
+        "property_filter": names,
+        "property_limit": 130,
+    }
+    validate_schema(request, objects_mod.TOOL_DEFINITIONS[0]["inputSchema"])
+
+    first = objects_mod.inspect_objects(ctx, request)
+    row = first["objects"][0]
+    assert row["propertyCount"] == 97
+    assert list(row["properties"]) == names[:64]
+    assert row["nextPropertyOffset"] == 64
+    validate_schema(first, objects_mod.TOOL_DEFINITIONS[0]["outputSchema"])
+
+    second = objects_mod.inspect_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "detail": "full",
+            "property_filter": names,
+            "property_limit": 130,
+            "property_offset": 64,
+        },
+    )
+    row2 = second["objects"][0]
+    assert row2["propertyCount"] == 97
+    assert list(row2["properties"]) == names[64:]
+    assert row2["nextPropertyOffset"] is None
+    assert list(row["properties"]) + list(row2["properties"]) == names
+
+
 def test_missing_filtered_property_keeps_null_metadata() -> None:
     doc, ctx, _obj = _paging_doc()
     result = objects_mod.inspect_objects(
@@ -1837,22 +1918,12 @@ def test_inspect_selection_resolves_names_before_rows() -> None:
     expect_tool_error(exc_info, OBJECT_NOT_FOUND)
 
 
-def test_inspect_selection_rejects_duplicates_and_oversized_lists() -> None:
+def test_inspect_selection_rejects_duplicates() -> None:
     doc, ctx = _three_box_doc()
 
     with pytest.raises(ToolError) as duplicate:
         objects_mod.inspect_objects(ctx, {"document": doc.Name, "objects": ["A", "A"]})
     expect_tool_error(duplicate, VALIDATION_FAILED)
-
-    with pytest.raises(ToolError) as oversized:
-        objects_mod.inspect_objects(
-            ctx,
-            {
-                "document": doc.Name,
-                "objects": [f"Obj{index}" for index in range(65)],
-            },
-        )
-    expect_tool_error(oversized, VALIDATION_FAILED)
 
 
 def test_selection_cursor_paginates_the_selected_objects_only() -> None:

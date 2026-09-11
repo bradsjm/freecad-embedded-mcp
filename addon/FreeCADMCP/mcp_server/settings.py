@@ -133,16 +133,6 @@ def _normalize_settings(raw, *, generate_token):
             # relative setting against the current directory, which differs
             # between the settings dialog and the FreeCAD process.
             raise SettingsError("recovery_directory must be an absolute path.")
-        containment = False
-        for root in normalized_roots:
-            try:
-                if os.path.commonpath([expanded_directory, root]) == root:
-                    containment = True
-                    break
-            except ValueError:
-                continue
-        if not containment:
-            raise SettingsError("recovery_directory must be inside an allowed root.")
 
     allow_scripts = raw.get("allow_scripts", False)
     if not isinstance(allow_scripts, bool):

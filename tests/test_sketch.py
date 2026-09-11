@@ -421,6 +421,12 @@ def test_inspect_reports_geometry_kinds_in_native_order(sketch_module) -> None:
         "kind": "unsupported",
         "type": "UnsupportedGeometry",
     }
+    assert result["geometryCount"] == len(result["geometry"])
+    assert result["constraintsCount"] == len(result["constraints"])
+    assert result["expressionBindingsCount"] == len(result["expressionBindings"])
+    assert result["geometryTruncated"] is False
+    assert result["constraintsTruncated"] is False
+    assert result["expressionBindingsTruncated"] is False
 
 
 def test_inspect_reports_constraints_datum_and_bindings(sketch_module) -> None:
@@ -445,6 +451,12 @@ def test_inspect_reports_constraints_datum_and_bindings(sketch_module) -> None:
     assert second["name"] == "width"
     assert second["datum"] == "10.0 mm"
     assert result["expressionBindings"] == [{"constraint": "width", "expression": "BaseWidth"}]
+    assert result["geometryCount"] == len(result["geometry"])
+    assert result["constraintsCount"] == len(result["constraints"])
+    assert result["expressionBindingsCount"] == len(result["expressionBindings"])
+    assert result["geometryTruncated"] is False
+    assert result["constraintsTruncated"] is False
+    assert result["expressionBindingsTruncated"] is False
 
 
 def test_inspect_solver_summary_reads_dof_attributes(sketch_module) -> None:
