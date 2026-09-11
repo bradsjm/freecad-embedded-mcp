@@ -45,6 +45,13 @@ SEMANTIC_PROPERTIES: dict[str, dict[str, tuple[str, str]]] = {
     "hole": {
         "diameter": ("Diameter", "quantity"),
         "depth": ("Depth", "quantity"),
+        "cut": ("HoleCutType", "enum"),
+        "depth_type": ("DepthType", "enum"),
+        "counterbore_diameter": ("HoleCutDiameter", "quantity"),
+        "counterbore_depth": ("HoleCutDepth", "quantity"),
+        "countersink_diameter": ("HoleCutDiameter", "quantity"),
+        "countersink_angle": ("HoleCutCountersinkAngle", "quantity"),
+        "thread": ("ThreadType", "enum"),
     },
     "gear_profile": {
         "teeth": ("NumberOfTeeth", "integer"),
@@ -78,6 +85,39 @@ SEMANTIC_PROPERTIES: dict[str, dict[str, tuple[str, str]]] = {
         "angle": ("Angle", "quantity"),
     },
     "loft": {"ruled": ("Ruled", "flag")},
+    "helix": {
+        "helix_mode": ("Mode", "enum"),
+        "pitch": ("Pitch", "quantity"),
+        "height": ("Height", "quantity"),
+        "turns": ("Turns", "quantity"),
+        "angle": ("Angle", "quantity"),
+        "growth": ("Growth", "quantity"),
+        "left_handed": ("LeftHanded", "flag"),
+        "reversed": ("Reversed", "flag"),
+    },
+    "primitive": {
+        "length": ("Length", "quantity"),
+        "width": ("Width", "quantity"),
+        "height": ("Height", "quantity"),
+        "radius": ("Radius", "quantity"),
+        "radius1": ("Radius1", "quantity"),
+        "radius2": ("Radius2", "quantity"),
+        "radius3": ("Radius3", "quantity"),
+        "polygon": ("Polygon", "integer"),
+        "circumradius": ("Circumradius", "quantity"),
+        "x_min": ("Xmin", "quantity"),
+        "x_max": ("Xmax", "quantity"),
+        "y_min": ("Ymin", "quantity"),
+        "y_max": ("Ymax", "quantity"),
+        "z_min": ("Zmin", "quantity"),
+        "z_max": ("Zmax", "quantity"),
+        "x2_min": ("X2min", "quantity"),
+        "x2_max": ("X2max", "quantity"),
+        "z2_min": ("Z2min", "quantity"),
+        "z2_max": ("Z2max", "quantity"),
+    },
+    "subshape_binder": {"make_face": ("MakeFace", "flag")},
+    "scaled": {"factor": ("Factor", "quantity"), "count": ("Occurrences", "integer")},
 }
 
 #: Native TypeId per semantic creation kind.
@@ -98,6 +138,10 @@ KIND_TYPES = {
     "polar_pattern": "PartDesign::PolarPattern",
     "mirrored": "PartDesign::Mirrored",
     "gear_profile": "Part::Part2DObjectPython",
+    "subshape_binder": "PartDesign::SubShapeBinder",
+    "multi_transform": "PartDesign::MultiTransform",
+    "scaled": "PartDesign::Scaled",
+    "datum_point": "PartDesign::Point",
 }
 
 #: Loft and pipe choose their native TypeId from the requested mode.
@@ -110,6 +154,43 @@ MODE_KIND_TYPES = {
         "additive": "PartDesign::AdditivePipe",
         "subtractive": "PartDesign::SubtractivePipe",
     },
+    "helix": {
+        "additive": "PartDesign::AdditiveHelix",
+        "subtractive": "PartDesign::SubtractiveHelix",
+    },
+}
+
+#: The eight primitive shapes; each is created additive or subtractive, so
+#: the TypeId is looked up by the (shape, mode) pair. The legacy unqualified
+#: aliases (``PartDesign::Box`` and friends) are deliberately absent: only
+#: the recorded Additive/Subtractive types are accepted.
+PRIMITIVE_SHAPES = (
+    "box",
+    "cylinder",
+    "cone",
+    "sphere",
+    "prism",
+    "torus",
+    "ellipsoid",
+    "wedge",
+)
+PRIMITIVE_TYPES = {
+    ("box", "additive"): "PartDesign::AdditiveBox",
+    ("box", "subtractive"): "PartDesign::SubtractiveBox",
+    ("cylinder", "additive"): "PartDesign::AdditiveCylinder",
+    ("cylinder", "subtractive"): "PartDesign::SubtractiveCylinder",
+    ("cone", "additive"): "PartDesign::AdditiveCone",
+    ("cone", "subtractive"): "PartDesign::SubtractiveCone",
+    ("sphere", "additive"): "PartDesign::AdditiveSphere",
+    ("sphere", "subtractive"): "PartDesign::SubtractiveSphere",
+    ("prism", "additive"): "PartDesign::AdditivePrism",
+    ("prism", "subtractive"): "PartDesign::SubtractivePrism",
+    ("torus", "additive"): "PartDesign::AdditiveTorus",
+    ("torus", "subtractive"): "PartDesign::SubtractiveTorus",
+    ("ellipsoid", "additive"): "PartDesign::AdditiveEllipsoid",
+    ("ellipsoid", "subtractive"): "PartDesign::SubtractiveEllipsoid",
+    ("wedge", "additive"): "PartDesign::AdditiveWedge",
+    ("wedge", "subtractive"): "PartDesign::SubtractiveWedge",
 }
 
 #: Kinds whose creation attaches through a base/subelement link list.
@@ -140,9 +221,13 @@ REFERENCE_PROPERTIES = {
         "plane": ("MirrorPlane", "mirror_plane"),
         "originals": ("Originals", "originals"),
     },
+    "multi_transform": {"originals": ("Originals", "originals")},
+    "scaled": {"originals": ("Originals", "originals")},
     "loft": {"sections": ("Sections", "sections")},
     "pipe": {"spine": ("Spine", "spine")},
     "datum_line": {"axis": ("AttachmentSupport", "origin_axis")},
+    "helix": {"axis": ("ReferenceAxis", "axis")},
+    "subshape_binder": {"references": ("Support", "binder_support")},
 }
 
 #: Origin axis names per datum-line role.
@@ -151,19 +236,56 @@ ORIGIN_AXIS_NAMES = {"x": "X_Axis", "y": "Y_Axis", "z": "Z_Axis"}
 #: Upper bounds for the semantic reference lists.
 MAX_PATTERN_ORIGINALS_SEMANTIC = 8
 MAX_LOFT_SECTIONS = 7
+MAX_BINDER_REFERENCES = 16
+MAX_TRANSFORM_STEPS = 4
+MAX_HELIX_TURNS = 100.0
+MIN_PRISM_POLYGON = 3
+MAX_PRISM_POLYGON = 100
 
 #: Upper bounds per kind for the bounded reference lists.
 MAX_BASE_FACES = 512
 MAX_BASE_EDGES = 1024
 MAX_SUBELEMENTS = 32
 
-#: Native ``Type`` values per extent name, as recorded by the installed
-#: PartDesign tests: the native tests assign integers directly
-#: (``Pocket001.Type = 1`` for through-all, ``= 3`` for up-to-face, and the
-#: default ``0`` for a distance extent).
-EXTENT_NAMES = {
-    "pad": {"distance": 0, "up_to_face": 3},
-    "pocket": {"distance": 0, "through_all": 1, "up_to_face": 3},
+#: Native enumeration values per kind and semantic parameter name, as
+#: recorded by the installed PartDesign tests and the live 1.1.3
+#: enumerations: pad/pocket ``Type`` positions are assigned as integers by
+#: the native tests (``Pocket001.Type = 1`` for through-all, ``= 3`` for
+#: up-to-face, default ``0`` for a distance extent), while hole and helix
+#: strings come from the recorded live enumerations (the helix ``Mode``
+#: positions 0-3 are the recorded ``pitch-height-angle`` ... order).
+ENUM_NAMES: dict[str, dict[str, dict[str, int | str]]] = {
+    "pad": {"extent": {"distance": 0, "up_to_face": 3}},
+    "pocket": {"extent": {"distance": 0, "through_all": 1, "up_to_face": 3}},
+    "hole": {
+        "cut": {
+            "none": "None",
+            "counterbore": "Counterbore",
+            "countersink": "Countersink",
+            "counterdrill": "Counterdrill",
+        },
+        "depth_type": {"dimension": "Dimension", "through_all": "ThroughAll"},
+        "thread": {
+            "none": "None",
+            "iso_metric": "ISOMetricProfile",
+            "iso_metric_fine": "ISOMetricFineProfile",
+            "unc": "UNC",
+            "unf": "UNF",
+            "unef": "UNEF",
+            "npt": "NPT",
+            "bsp": "BSP",
+            "bsw": "BSW",
+            "bsf": "BSF",
+        },
+    },
+    "helix": {
+        "helix_mode": {
+            "pitch_height": 0,
+            "pitch_turns": 1,
+            "height_turns": 2,
+            "height_growth": 3,
+        }
+    },
 }
 
 #: Exact recorded ``SideType`` enumeration strings. The native 1.1.3 tests
@@ -202,6 +324,10 @@ EXPENSIVE_TYPES = frozenset(
         "PartDesign::SubtractiveLoft",
         "PartDesign::AdditivePipe",
         "PartDesign::SubtractivePipe",
+        "PartDesign::AdditiveHelix",
+        "PartDesign::SubtractiveHelix",
+        "PartDesign::MultiTransform",
+        "PartDesign::Scaled",
     }
 )
 
@@ -217,6 +343,9 @@ EXPENSIVE_KINDS = frozenset(
         "mirrored",
         "loft",
         "pipe",
+        "helix",
+        "multi_transform",
+        "scaled",
     }
 )
 
@@ -320,9 +449,9 @@ def native_value(kind: str, name: str, value: Any) -> tuple[str, Any] | None:
             return None
         return prop, number
     if form == "enum":
-        names = EXTENT_NAMES.get(kind, {})
+        names = ENUM_NAMES.get(kind, {}).get(name, {})
         if value not in names:
-            raise _fail(f"{kind} extent {value!r} has no native mapping")
+            raise _fail(f"{kind} {name} {value!r} has no native mapping")
         return prop, names[value]
     if form == "side":
         # Resolved against the live enumeration by the caller, which owns
@@ -352,6 +481,7 @@ def check_workload(ctx: Any, targets: list[Any]) -> None:
             "PartDesign::LinearPattern",
             "PartDesign::PolarPattern",
             "PartDesign::MultiTransform",
+            "PartDesign::Scaled",
         ):
             _check_pattern(obj)
         elif type_id == "PartDesign::Mirrored":

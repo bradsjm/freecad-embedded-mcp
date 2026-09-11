@@ -31,6 +31,13 @@ REQUIRED: tuple[str, ...] = (
     "gui.selection",
     "qt.signals",
     "fem.objects",
+    "feature.helix",
+    "feature.primitives",
+    "feature.subshape_binder",
+    "feature.multi_transform",
+    "feature.scaled",
+    "feature.datum_point",
+    "hole.thread_enums",
     "doc.lifecycle",
 )
 

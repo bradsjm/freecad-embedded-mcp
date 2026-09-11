@@ -46,9 +46,10 @@ _PROFILE_KINDS = (
     "groove",
     "loft",
     "pipe",
+    "helix",
 )
 _GEAR_PROFILE_KIND = "gear_profile"
-_SUPPORT_KINDS = ("sketch", "datum_plane")
+_SUPPORT_KINDS = ("sketch", "datum_plane", "datum_point", "primitive")
 _ORIGIN_PLANE_ROLES = {"xy": "XY_Plane", "xz": "XZ_Plane", "yz": "YZ_Plane"}
 
 #: Kinds that produce a solid Body result and must therefore become the Body
@@ -70,6 +71,10 @@ _TIP_KINDS = frozenset(
         "mirrored",
         "loft",
         "pipe",
+        "helix",
+        "primitive",
+        "multi_transform",
+        "scaled",
     }
 )
 
@@ -199,10 +204,35 @@ _SEMANTIC_PARAM_SCHEMAS = {
     "hole": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["diameter", "depth"],
+        "required": ["diameter"],
         "properties": {
             "diameter": _SCALAR_PARAM,
             "depth": _SCALAR_PARAM,
+            "depth_type": {"type": "string", "enum": ["dimension", "through_all"]},
+            "cut": {
+                "type": "string",
+                "enum": ["none", "counterbore", "countersink", "counterdrill"],
+            },
+            "counterbore_diameter": _SCALAR_PARAM,
+            "counterbore_depth": _SCALAR_PARAM,
+            "countersink_diameter": _SCALAR_PARAM,
+            "countersink_angle": _SCALAR_PARAM,
+            "thread": {
+                "type": "string",
+                "enum": [
+                    "none",
+                    "iso_metric",
+                    "iso_metric_fine",
+                    "unc",
+                    "unf",
+                    "unef",
+                    "npt",
+                    "bsp",
+                    "bsw",
+                    "bsf",
+                ],
+            },
+            "thread_size": {"type": "string", "minLength": 1, "maxLength": 16},
         },
     },
     "gear_profile": {
@@ -343,6 +373,132 @@ _SEMANTIC_PARAM_SCHEMAS = {
             "mode": {"type": "string", "enum": ["additive", "subtractive"]},
         },
     },
+    "helix": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["axis", "helix_mode", "mode"],
+        "properties": {
+            "axis": _AXIS_REF,
+            "helix_mode": {
+                "type": "string",
+                "enum": ["pitch_height", "pitch_turns", "height_turns", "height_growth"],
+            },
+            "mode": {"type": "string", "enum": ["additive", "subtractive"]},
+            "pitch": _SCALAR_PARAM,
+            "height": _SCALAR_PARAM,
+            "turns": _SCALAR_PARAM,
+            "angle": _SCALAR_PARAM,
+            "growth": _SCALAR_PARAM,
+            "left_handed": {"type": "boolean"},
+            "reversed": {"type": "boolean"},
+        },
+    },
+    "primitive": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["shape", "mode"],
+        "properties": {
+            "shape": {
+                "type": "string",
+                "enum": [
+                    "box",
+                    "cylinder",
+                    "cone",
+                    "sphere",
+                    "prism",
+                    "torus",
+                    "ellipsoid",
+                    "wedge",
+                ],
+            },
+            "mode": {"type": "string", "enum": ["additive", "subtractive"]},
+            "length": _SCALAR_PARAM,
+            "width": _SCALAR_PARAM,
+            "height": _SCALAR_PARAM,
+            "radius": _SCALAR_PARAM,
+            "radius1": _SCALAR_PARAM,
+            "radius2": _SCALAR_PARAM,
+            "radius3": _SCALAR_PARAM,
+            "circumradius": _SCALAR_PARAM,
+            "polygon": {
+                "type": "integer",
+                "minimum": _contracts.MIN_PRISM_POLYGON,
+                "maximum": _contracts.MAX_PRISM_POLYGON,
+            },
+            "x_min": _SCALAR_PARAM,
+            "x_max": _SCALAR_PARAM,
+            "y_min": _SCALAR_PARAM,
+            "y_max": _SCALAR_PARAM,
+            "z_min": _SCALAR_PARAM,
+            "z_max": _SCALAR_PARAM,
+            "x2_min": _SCALAR_PARAM,
+            "x2_max": _SCALAR_PARAM,
+            "z2_min": _SCALAR_PARAM,
+            "z2_max": _SCALAR_PARAM,
+        },
+    },
+    "subshape_binder": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["references"],
+        "properties": {
+            "references": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": _contracts.MAX_BINDER_REFERENCES,
+                "items": _objects._CANONICAL_REF,
+            },
+            "make_face": {"type": "boolean"},
+        },
+    },
+    "multi_transform": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["originals", "transformations"],
+        "properties": {
+            "originals": _NAME_LIST,
+            "transformations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": _contracts.MAX_TRANSFORM_STEPS,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["kind"],
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["mirrored", "linear", "polar"],
+                        },
+                        "plane": _MIRROR_PLANE_REF,
+                        "axis": _AXIS_REF,
+                        "length": _SCALAR_PARAM,
+                        "count": {"type": "integer", "minimum": 2, "maximum": 32},
+                        "angle": _SCALAR_PARAM,
+                    },
+                },
+            },
+        },
+    },
+    "scaled": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["originals", "factor", "count"],
+        "properties": {
+            "originals": _NAME_LIST,
+            "factor": _SCALAR_PARAM,
+            "count": {"type": "integer", "minimum": 2, "maximum": 32},
+        },
+    },
+    "datum_point": {  # identical contract to datum_plane
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["plane"],
+        "properties": {
+            "plane": {"type": "string", "enum": ["xy", "xz", "yz"]},
+            "offset": _SCALAR_PARAM,
+        },
+    },
 }
 
 _CREATE_FEATURE_INPUT = {
@@ -373,6 +529,12 @@ _CREATE_FEATURE_INPUT = {
                 "loft",
                 "pipe",
                 "gear_profile",
+                "helix",
+                "primitive",
+                "subshape_binder",
+                "multi_transform",
+                "scaled",
+                "datum_point",
             ],
         },
         "name": _objects._NAME_FIELD,
@@ -444,6 +606,31 @@ _EDIT_FEATURE_INPUT = {
                 "length": _SCALAR_PARAM,
                 "diameter": _SCALAR_PARAM,
                 "depth": _SCALAR_PARAM,
+                "depth_type": {"type": "string", "enum": ["dimension", "through_all"]},
+                "cut": {
+                    "type": "string",
+                    "enum": ["none", "counterbore", "countersink", "counterdrill"],
+                },
+                "counterbore_diameter": _SCALAR_PARAM,
+                "counterbore_depth": _SCALAR_PARAM,
+                "countersink_diameter": _SCALAR_PARAM,
+                "countersink_angle": _SCALAR_PARAM,
+                "thread": {
+                    "type": "string",
+                    "enum": [
+                        "none",
+                        "iso_metric",
+                        "iso_metric_fine",
+                        "unc",
+                        "unf",
+                        "unef",
+                        "npt",
+                        "bsp",
+                        "bsw",
+                        "bsf",
+                    ],
+                },
+                "thread_size": {"type": "string", "minLength": 1, "maxLength": 16},
                 "symmetric": {"type": "boolean"},
                 "reversed": {"type": "boolean"},
                 "teeth": {
@@ -478,7 +665,12 @@ TOOL_DEFINITIONS = [
             "(Revolution), groove, fillet, chamfer, thickness, draft, "
             "linear_pattern, polar_pattern, mirrored, loft, pipe (each "
             "additive or subtractive where the kind offers both), or the "
-            "involute gear_profile wire. The feature is created through "
+            "involute gear_profile wire. Also creates helix (additive or "
+            "subtractive, pitch/height/turns driven), the eight primitive "
+            "shapes (additive or subtractive), a same-document "
+            "subshape_binder reference holder, an atomic multi_transform "
+            "composite, scaled features, and datum points. The feature is "
+            "created through "
             "body.newObject so Body membership and Tip are native; solid "
             "kinds require a profile, and dress-ups, patterns and lofts/pipes "
             "take signed subelement, originals, axis, plane or spine "
@@ -495,7 +687,8 @@ TOOL_DEFINITIONS = [
         "name": "edit_feature",
         "description": (
             "Edit one existing scalar PartDesign feature that belongs to the "
-            "named Body: pad/pocket extent and length, hole diameter/depth, "
+            "named Body: pad/pocket extent and length, hole diameter/depth "
+            "and its cut, depth-type and thread parameters, "
             "or gear teeth/module/pressure angle. Parameters are validated "
             "against the feature before the transaction opens; numeric values "
             "are written natively and {expression} objects bind a native "
@@ -636,7 +829,10 @@ def _origin_plane(body: Any, role: str) -> Any:
     if members is None:
         raise _fail(f"body '{getattr(body, 'Name', '')}' exposes no Origin container")
     for member in members:
-        if str(getattr(member, "Name", "")) == expected:
+        if (
+            str(getattr(member, "Name", "")) == expected
+            or str(getattr(member, "Role", "")) == expected
+        ):
             return member
     raise _fail(
         f"body '{getattr(body, 'Name', '')}' has no local origin plane "
@@ -780,6 +976,30 @@ def _resolve_sections(ctx: Any, doc: Any, body: Any, profile: Any, sections: Any
     return ordered
 
 
+def _resolve_binder_references(ctx: Any, doc: Any, references: Any) -> list[tuple[Any, list[str]]]:
+    """Resolve same-document binder references onto native link pairs.
+
+    Binder references may name objects outside the target Body — that is
+    the feature's purpose — so no Body-membership check is applied here.
+    """
+
+    from . import geometry
+
+    if not isinstance(references, (list, tuple)) or not references:
+        raise _fail("references must be a nonempty list of canonical references")
+    if len(references) > _contracts.MAX_BINDER_REFERENCES:
+        raise _fail(f"at most {_contracts.MAX_BINDER_REFERENCES} references are accepted")
+    links: list[tuple[Any, list[str]]] = []
+    for position, entry in enumerate(references):
+        if not isinstance(entry, Mapping):
+            raise _fail(f"references[{position}] must be a canonical reference object")
+        obj, native = geometry.resolve_reference(ctx, doc, entry)
+        if getattr(obj, "Document", None) is not doc:
+            raise _fail("subshape_binder accepts same-document references only")
+        links.append((obj, [str(native)]))
+    return links
+
+
 def _apply_base_list(
     ctx: Any, doc: Any, feature: Any, kind: str, parameters: Mapping[str, Any]
 ) -> list[str]:
@@ -822,14 +1042,16 @@ def _apply_semantic_references(
             continue
         value = parameters[name]
         if form == "originals":
+            originals = _resolve_originals(
+                ctx, doc, body, value, _contracts.MAX_PATTERN_ORIGINALS_SEMANTIC
+            )
             setattr(
                 feature,
                 prop,
-                _resolve_originals(
-                    ctx, doc, body, value, _contracts.MAX_PATTERN_ORIGINALS_SEMANTIC
-                ),
+                originals,
             )
-            applied.append(f"{name}->{prop}")
+            suffix = f"({len(originals)})" if kind == "multi_transform" else ""
+            applied.append(f"{name}->{prop}{suffix}")
             continue
         if form == "sections":
             ordered = _resolve_sections(ctx, doc, body, getattr(feature, "Profile", None), value)
@@ -839,6 +1061,13 @@ def _apply_semantic_references(
         if form == "spine":
             setattr(feature, prop, _profile_object(ctx, doc, body, value))
             applied.append(f"{name}->{prop}")
+            continue
+        if form == "binder_support":
+            links = _resolve_binder_references(ctx, doc, value)
+            if not _objects._property_exists(feature, prop):
+                raise _fail(f"feature '{feature.Name}' exposes no {prop} property")
+            feature.Support = links
+            applied.append(f"{name}->{prop}({len(links)})")
             continue
         if form == "origin_axis":
             applied.extend(_apply_datum_line_axis(feature, body, value))
@@ -907,6 +1136,15 @@ def _preflight_semantic_references(
             "PartDesign::Plane",
         ):
             raise _fail(f"up_to_face '{face_obj.Name}' is neither a plane nor a signed face")
+    if kind == "multi_transform":
+        for position, entry in enumerate(parameters.get("transformations") or ()):
+            if not isinstance(entry, Mapping):
+                raise _fail(f"transformations[{position}] must be an object")
+            entry_kind = str(entry.get("kind", ""))
+            if entry_kind == "mirrored":
+                _resolve_plane(ctx, doc, entry.get("plane"), allow_sketch_axes=True)
+            elif entry_kind in ("linear", "polar"):
+                _resolve_axis(ctx, doc, entry.get("axis"))
     for name, (_prop, form) in _contracts.REFERENCE_PROPERTIES.get(kind, {}).items():
         if name not in parameters:
             continue
@@ -917,6 +1155,8 @@ def _preflight_semantic_references(
             _resolve_sections(ctx, doc, body, profile_obj, value)
         elif form == "spine":
             _profile_object(ctx, doc, body, value)
+        elif form == "binder_support":
+            _resolve_binder_references(ctx, doc, value)
         elif form == "origin_axis":
             _origin_axis(body, value)
         elif form == "axis":
@@ -980,6 +1220,54 @@ def _apply_attachment(feature: Any, support_obj: Any, native: str, map_mode: str
     feature.MapMode = map_mode
 
 
+#: Sub-parameters each hole cut form requires on the wire.
+_HOLE_CUT_REQUIREMENTS = {
+    "counterbore": ("counterbore_diameter", "counterbore_depth"),
+    "countersink": ("countersink_diameter", "countersink_angle"),
+    "counterdrill": (
+        "counterbore_diameter",
+        "counterbore_depth",
+        "countersink_diameter",
+        "countersink_angle",
+    ),
+}
+
+#: Helix driver pairs: one dimension and one extent driver per mode.
+_HELIX_DRIVERS = {
+    "pitch_height": ("pitch", "height"),
+    "pitch_turns": ("pitch", "turns"),
+    "height_turns": ("height", "turns"),
+    "height_growth": ("height", "growth"),
+}
+
+#: Required scalar parameters per primitive shape; the remaining native
+#: properties keep their recorded defaults.
+_PRIMITIVE_REQUIRED = {
+    "box": ("length", "width", "height"),
+    "cylinder": ("radius", "height"),
+    "cone": ("radius1", "radius2", "height"),
+    "sphere": ("radius",),
+    "prism": ("polygon", "circumradius", "height"),
+    "torus": ("radius1", "radius2"),
+    "ellipsoid": ("radius1", "radius2", "radius3"),
+    "wedge": ("x2_min", "x2_max", "z2_min", "z2_max"),
+}
+
+
+def _check_hole_cut(cut: str, parameters: Mapping[str, Any]) -> None:
+    """Require the cut form's sub-parameters and bound the countersink angle."""
+
+    required = _HOLE_CUT_REQUIREMENTS.get(cut, ())
+    missing = [name for name in required if name not in parameters]
+    if missing:
+        raise _fail(f"hole cut {cut!r} requires {', '.join(missing)}")
+    angle = parameters.get("countersink_angle")
+    if "countersink_angle" in required and not isinstance(angle, Mapping):
+        number = _contracts.finite_number(parameters.get("countersink_angle"))
+        if number is None or number <= 0 or number > 180.0:
+            raise _fail("countersink_angle must be a finite angle in (0, 180] degrees")
+
+
 def _check_semantic_parameters(kind: str, parameters: Mapping[str, Any]) -> None:
     """Handler-side kind checks that outlive the wire schema."""
 
@@ -1027,12 +1315,109 @@ def _check_semantic_parameters(kind: str, parameters: Mapping[str, Any]) -> None
                 raise _fail("length must be a positive finite number or an expression")
     if kind == "hole":
         for name in ("diameter", "depth"):
-            raw = parameters[name]
+            raw = parameters.get(name)
+            if raw is None:
+                continue
             if isinstance(raw, Mapping):
                 continue
             number = _contracts.finite_number(raw)
             if number is None or number <= 0:
                 raise _fail(f"hole {name} must be a positive finite number or an expression")
+        depth_type = parameters.get("depth_type", "dimension")
+        if depth_type == "dimension" and "depth" not in parameters:
+            raise _fail("hole requires depth for a dimension extent")
+        if depth_type == "through_all" and "depth" in parameters:
+            raise _fail("through_all ignores depth; remove the depth parameter")
+        cut = parameters.get("cut", "none")
+        _check_hole_cut(cut, parameters)
+        thread = parameters.get("thread")
+        if thread is not None and thread != "none" and "thread_size" not in parameters:
+            raise _fail(f"hole thread {thread!r} requires thread_size")
+        if "thread_size" in parameters and (thread is None or thread == "none"):
+            raise _fail("thread_size requires a thread")
+    if kind == "helix":
+        drivers = _HELIX_DRIVERS[parameters["helix_mode"]]
+        missing = [name for name in drivers if name not in parameters]
+        if missing:
+            raise _fail(f"helix_mode {parameters['helix_mode']!r} requires {', '.join(missing)}")
+        for name in ("pitch", "height", "turns", "growth"):
+            if name in parameters and name not in drivers:
+                raise _fail(f"helix_mode {parameters['helix_mode']!r} does not accept {name!r}")
+        _check_positive_scalar("pitch", parameters)
+        _check_positive_scalar("height", parameters)
+        raw_turns = parameters.get("turns")
+        if raw_turns is not None and not isinstance(raw_turns, Mapping):
+            number = _contracts.finite_number(raw_turns)
+            if number is None or number <= 0 or number > _contracts.MAX_HELIX_TURNS:
+                raise _fail(f"turns must be a finite number in (0, {_contracts.MAX_HELIX_TURNS:g}]")
+        raw_angle = parameters.get("angle")
+        if raw_angle is not None and not isinstance(raw_angle, Mapping):
+            number = _contracts.finite_number(raw_angle)
+            if number is None or number < -80.0 or number > 80.0:
+                raise _fail("angle must be a finite angle in [-80, 80] degrees")
+        raw_growth = parameters.get("growth")
+        if raw_growth is not None and not isinstance(raw_growth, Mapping):
+            number = _contracts.finite_number(raw_growth)
+            if number is None or number < 0:
+                raise _fail("growth must be a non-negative finite number")
+    if kind == "primitive":
+        shape = parameters.get("shape")
+        missing = [name for name in _PRIMITIVE_REQUIRED.get(shape, ()) if name not in parameters]
+        if missing:
+            raise _fail(f"primitive shape {shape!r} requires {', '.join(missing)}")
+        for name in ("length", "width", "height", "radius", "radius2", "radius3", "circumradius"):
+            _check_positive_scalar(name, parameters)
+        if shape != "cone":
+            _check_positive_scalar("radius1", parameters)
+        if shape == "wedge":
+            x2_min = _contracts.finite_number(parameters.get("x2_min"))
+            x2_max = _contracts.finite_number(parameters.get("x2_max"))
+            if x2_min is not None and x2_max is not None and x2_min > x2_max:
+                raise _fail("wedge requires x2_min <= x2_max")
+            z2_min = _contracts.finite_number(parameters.get("z2_min"))
+            z2_max = _contracts.finite_number(parameters.get("z2_max"))
+            if z2_min is not None and z2_max is not None and z2_min > z2_max:
+                raise _fail("wedge requires z2_min <= z2_max")
+    if kind == "multi_transform":
+        for position, entry in enumerate(parameters.get("transformations") or ()):
+            if not isinstance(entry, Mapping):
+                raise _fail(f"transformations[{position}] must be an object")
+            entry_kind = str(entry.get("kind", ""))
+            required = {
+                "mirrored": ("plane",),
+                "linear": ("axis", "length", "count"),
+                "polar": ("axis", "count"),
+            }.get(entry_kind)
+            if required is None:
+                raise _fail(
+                    f"transformations[{position}] kind {entry_kind!r} requires "
+                    "one of 'mirrored', 'linear', 'polar'"
+                )
+            missing = [name for name in required if name not in entry]
+            if missing:
+                raise _fail(
+                    f"transformations[{position}] kind {entry_kind!r} requires {', '.join(missing)}"
+                )
+            for name in ("length", "angle"):
+                if isinstance(entry.get(name), Mapping):
+                    raise _fail("transformation scalars accept numbers only")
+            if entry_kind == "linear" and not isinstance(entry.get("length"), Mapping):
+                number = _contracts.finite_number(entry.get("length"))
+                if number is None or number <= 0:
+                    raise _fail(
+                        f"transformations[{position}] length must be a positive finite number"
+                    )
+            if entry_kind == "polar":
+                raw_angle = entry.get("angle")
+                if raw_angle is not None and not isinstance(raw_angle, Mapping):
+                    number = _contracts.finite_number(raw_angle)
+                    if number is None or number <= 0 or number > 360.0:
+                        raise _fail(
+                            f"transformations[{position}] angle must be a finite "
+                            "angle in (0, 360] degrees"
+                        )
+    if kind == "scaled":
+        _check_positive_scalar("factor", parameters)
     if kind == "fillet":
         _check_positive_scalar("radius", parameters)
     if kind == "chamfer":
@@ -1194,7 +1579,8 @@ def _apply_semantic_attachment(
 
     role = str(parameters.get("plane"))
     plane = _origin_plane(body, role)
-    _apply_attachment(feature, plane, "", "FlatFace")
+    map_mode = "ObjectOrigin" if kind == "datum_point" else "FlatFace"
+    _apply_attachment(feature, plane, "", map_mode)
     offset = parameters.get("offset")
     if offset is None:
         return
@@ -1217,18 +1603,79 @@ def _apply_semantic_attachment(
     feature.AttachmentOffset = placement
 
 
-def _apply_hole_defaults(feature: Any) -> None:
-    """Pin the plain cylindrical finite-depth hole contract."""
+def _apply_hole_parameters(
+    feature: Any, parameters: Mapping[str, Any], *, pin: bool = True
+) -> list[str]:
+    """Pin the hole contract and apply the exposed cut/depth/thread forms.
 
-    for prop, value in (
-        ("ThreadType", 0),
-        ("HoleCutType", 0),
-        ("DepthType", 0),
-        ("DrillPoint", 0),
-        ("Tapered", False),
-    ):
+    The tool does not expose every native hole field, so unexposed fields
+    are pinned to the recorded defaults. ``ThreadType``, ``HoleCutType``
+    and ``DepthType`` are pinned only when the caller did not supply the
+    corresponding semantic parameter, so a caller value always wins.
+    ``ThreadSize`` is verified against the live enumeration after
+    ``ThreadType`` is set, because the native build populates the size
+    list only then.
+    """
+
+    cut = parameters.get("cut")
+    depth_type = parameters.get("depth_type")
+    thread = parameters.get("thread")
+    if pin:
+        # Creation-only: pinning on an edit would reset values the request
+        # never mentioned, including an existing thread definition.
+        pinned: list[tuple[str, Any]] = [
+            ("DrillPoint", "Flat"),
+            ("Tapered", False),
+            ("ModelThread", False),
+            ("DrillForDepth", False),
+            ("UseCustomThreadClearance", False),
+            ("ThreadDirection", "Right"),
+            ("Threaded", False),
+        ]
+        if cut is None:
+            pinned.append(("HoleCutType", 0))
+        if depth_type is None:
+            pinned.append(("DepthType", 0))
+        if thread is None:
+            pinned.append(("ThreadType", 0))
+        for prop, value in pinned:
+            if _objects._property_exists(feature, prop):
+                setattr(feature, prop, value)
+    for name, semantic in (("cut", cut), ("depth_type", depth_type), ("thread", thread)):
+        if semantic is None:
+            continue
+        prop, native = _contracts.native_value("hole", name, semantic)
         if _objects._property_exists(feature, prop):
-            setattr(feature, prop, value)
+            setattr(feature, prop, native)
+    thread_active = thread is not None and thread != "none"
+    if not pin and thread is None and "thread_size" in parameters:
+        current_thread = getattr(feature, "ThreadType", None)
+        thread_active = current_thread not in (None, "", 0, "0", "None")
+    if not thread_active:
+        return []
+    if thread is not None and _objects._property_exists(feature, "Threaded"):
+        feature.Threaded = True
+    thread_size = parameters.get("thread_size")
+    if thread_size is None:
+        return []
+    getter = getattr(feature, "getEnumerationsOfProperty", None)
+    entries: list[str] = []
+    if callable(getter):
+        try:
+            entries = [str(entry) for entry in (getter("ThreadSize") or ())]
+        except Exception:
+            entries = []
+    if not entries or entries == ["---"]:
+        raise _fail("thread sizes cannot be verified on this build")
+    if thread_size not in entries:
+        raise _fail(
+            f"thread size {thread_size!r} is not in the live ThreadSize enumeration",
+            {"valid": entries[:10], "validCount": len(entries)},
+        )
+    if _objects._property_exists(feature, "ThreadSize"):
+        feature.ThreadSize = thread_size
+        return [f"thread_size->ThreadSize={thread_size}"]
+    return []
 
 
 def _apply_gear_flags(feature: Any) -> None:
@@ -1367,6 +1814,54 @@ def _checkpoint_if_expensive(ctx: Any, doc: Any, label: str, expensive: bool) ->
     ctx.checkpoint_before_mutation(doc, label)
 
 
+def _create_multi_transform(
+    ctx: Any,
+    doc: Any,
+    body: Any,
+    requested_name: str,
+    parameters: Mapping[str, Any],
+    created: list[Any],
+    expectations: dict[str, dict],
+) -> Any:
+    """Create the parent composite and its child transformations in order.
+
+    Children carry no Originals — the parent drives them, as recorded by
+    the native MultiTransform test. The parent is appended to ``created``
+    first, so the Tip assertion and the returned object identity name the
+    composite rather than a child.
+    """
+
+    transformation_types = {
+        "mirrored": "PartDesign::Mirrored",
+        "linear": "PartDesign::LinearPattern",
+        "polar": "PartDesign::PolarPattern",
+    }
+    children: list[Any] = []
+    for index, entry in enumerate(parameters["transformations"]):
+        entry_kind = str(entry["kind"])
+        child = body.newObject(transformation_types[entry_kind], f"{requested_name}Tf{index}")
+        if entry_kind == "mirrored":
+            obj, subs = _resolve_plane(ctx, doc, entry["plane"], allow_sketch_axes=True)
+            child.MirrorPlane = (obj, subs)
+        elif entry_kind == "linear":
+            obj, subs = _resolve_axis(ctx, doc, entry["axis"])
+            child.Direction = (obj, subs)
+            child.Length = float(entry["length"])
+            child.Occurrences = int(entry["count"])
+        else:
+            obj, subs = _resolve_axis(ctx, doc, entry["axis"])
+            child.Axis = (obj, subs)
+            child.Occurrences = int(entry["count"])
+            child.Angle = float(entry.get("angle", 360.0))
+        children.append(child)
+    feature = body.newObject("PartDesign::MultiTransform", requested_name)
+    feature.Transformations = children
+    created.append(feature)
+    created.extend(children)
+    expectations.setdefault(str(feature.Name), {})
+    return feature
+
+
 def _create_feature(ctx: Any, arguments: dict) -> dict:
     doc = ctx.require_document(arguments["document"])
     body = ctx.require_object(doc, str(arguments["body"]))
@@ -1398,6 +1893,15 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
                 "core datum-plane creation is unavailable: the document does "
                 "not support PartDesign::Plane; no generic substitute is "
                 "created"
+            )
+    elif kind == "primitive":
+        shape = str(parameters.get("shape", ""))
+        mode = str(parameters.get("mode", ""))
+        type_id = _contracts.PRIMITIVE_TYPES.get((shape, mode))
+        if type_id is None:
+            raise _fail(
+                f"primitive requires a known shape/mode pair; got {shape!r}/{mode!r}",
+                {"knownShapes": list(_contracts.PRIMITIVE_SHAPES)},
             )
     elif kind in _contracts.MODE_KIND_TYPES:
         mode = str(parameters.get("mode", ""))
@@ -1485,6 +1989,13 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
             feature = _create_gear_profile(ctx, doc, body, requested_name)
             created.append(feature)
             expectations.setdefault(str(feature.Name), {})
+        elif kind == "multi_transform":
+            feature = _create_multi_transform(
+                ctx, doc, body, requested_name, parameters, created, expectations
+            )
+            applied_semantic.extend(
+                f"transformations[{index}]->{child.Name}" for index, child in enumerate(created[1:])
+            )
         else:
             feature = body.newObject(type_id, requested_name)
             created.append(feature)
@@ -1500,14 +2011,17 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
             prepared = _objects._prepare_properties(ctx, doc, feature, remaining)
             _objects._apply_prepared(feature, prepared)
         if parameters:
-            if kind in _SUPPORT_KINDS:
+            # datum_point states its plane on the wire; the primitive plane
+            # is optional, so its absence skips the attachment entirely.
+            if kind in _SUPPORT_KINDS and "plane" in parameters:
                 _apply_semantic_attachment(ctx, doc, body, feature, kind, parameters)
+                applied_semantic.append("plane->AttachmentSupport")
                 offset = parameters.get("offset")
                 if offset is not None:
                     applied_semantic.append("offset->AttachmentOffset")
-            else:
+            if kind not in ("sketch", "datum_plane", "datum_point"):
                 if kind == "hole":
-                    _apply_hole_defaults(feature)
+                    applied_semantic.extend(_apply_hole_parameters(feature, parameters))
                 applied_semantic.extend(
                     _apply_semantic_references(ctx, doc, body, feature, kind, parameters)
                 )
@@ -1520,7 +2034,7 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
                     # standard precision, and neither flag is exposed.
                     _apply_gear_flags(feature)
         elif kind == "hole":
-            _apply_hole_defaults(feature)
+            _apply_hole_parameters(feature, {})
         elif kind == _GEAR_PROFILE_KIND:
             _apply_gear_flags(feature)
         if kind in _TIP_KINDS:
@@ -1600,6 +2114,33 @@ _POSITIVE_EDIT_PARAMS = {
 }
 
 
+def _check_edit_hole_parameters(feature: Any, parameters: Mapping[str, Any]) -> None:
+    """Hole combination rules an edit request must satisfy by itself.
+
+    Unlike a creation, an edit starts from the feature's current values, so
+    the dimension-extent depth rule is create-only. What an edit must
+    still state coherently is every form it changes: a cut form carries
+    its sub-parameters, a thread change carries its size, and a size
+    without a thread companion is refused when the feature does not
+    thread yet.
+    """
+
+    if parameters.get("depth_type") == "through_all" and "depth" in parameters:
+        raise _fail("through_all ignores depth; remove the depth parameter")
+    cut = parameters.get("cut")
+    if cut is not None:
+        _check_hole_cut(cut, parameters)
+    thread = parameters.get("thread")
+    if thread is not None and thread != "none" and "thread_size" not in parameters:
+        raise _fail(f"hole thread {thread!r} requires thread_size")
+    if "thread_size" in parameters and thread == "none":
+        raise _fail("thread_size requires a thread")
+    if "thread_size" in parameters and thread is None:
+        current = str(getattr(feature, "ThreadType", "None") or "None")
+        if current in ("", "None"):
+            raise _fail("thread_size requires a thread")
+
+
 def _check_edit_scalar_ranges(kind: str, feature: Any, parameters: Mapping[str, Any]) -> None:
     """Reject a non-positive final scalar before the transaction opens."""
 
@@ -1636,10 +2177,17 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
         raise _fail(f"edit_feature does not accept parameters: {', '.join(unknown)}")
     if kind == _GEAR_PROFILE_KIND:
         _check_edit_gear_bounds(feature, parameters)
+    if kind == "hole":
+        _check_edit_hole_parameters(feature, parameters)
     _check_edit_scalar_ranges(kind, feature, parameters)
 
     numeric: list[tuple[str, Any]] = []
     for name, raw in parameters.items():
+        if kind == "hole" and name == "thread_size":
+            if not _objects._property_exists(feature, "ThreadSize"):
+                raise _fail(f"feature '{feature.Name}' exposes no 'ThreadSize' parameter")
+            numeric.append((name, raw))
+            continue
         mapping = _contracts.native_value(kind, name, raw if not isinstance(raw, Mapping) else 0)
         if mapping is None:
             raise _fail(f"feature '{feature.Name}' has no native mapping for '{name}'")
@@ -1652,7 +2200,13 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
     if not numeric and not any(isinstance(v, Mapping) for v in parameters.values()):
         raise _fail("at least one numeric parameter value is required")
     before = {
-        name: getattr(feature, _contracts.SEMANTIC_PROPERTIES[kind][name][0], None)
+        name: getattr(
+            feature,
+            "ThreadSize"
+            if kind == "hole" and name == "thread_size"
+            else _contracts.SEMANTIC_PROPERTIES[kind][name][0],
+            None,
+        )
         for name, _ in numeric
     }
     before_report = geometry_report(feature)
@@ -1689,12 +2243,18 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
         check_workload=_contracts.check_workload,
         validate_after_recompute=_check_final_values,
     ) as applied:
+        if kind == "hole":
+            applied.extend(_apply_hole_parameters(feature, parameters, pin=False))
         _apply_semantic_parameters(ctx, doc, body, feature, kind, parameters)
 
     report = outcome["reports"][str(feature.Name)]
     rows = []
     for name, _ in numeric:
-        prop = _contracts.SEMANTIC_PROPERTIES[kind][name][0]
+        prop = (
+            "ThreadSize"
+            if kind == "hole" and name == "thread_size"
+            else _contracts.SEMANTIC_PROPERTIES[kind][name][0]
+        )
         before_value = _objects._jsonify(before[name])
         after_value = _objects._jsonify(getattr(feature, prop, None))
         if before_value != after_value:

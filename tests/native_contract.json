@@ -1,5 +1,5 @@
 {
-  "captured": "2026-09-10T14:09:20.487+00:00",
+  "captured": "2026-09-11T13:41:27.519+00:00",
   "freecad": "1.1.3",
   "probes": {
     "attachment.properties": {
@@ -427,12 +427,159 @@
         "file_name": "/Users/jonathan/Documents/3D Printing/FreeCAD/freecad-embedded-mcp/.native-contract/tmp/lifecycle.FCStd",
         "label": "lifecycle",
         "name": "lifecycle",
-        "object_count": 1
+        "object_count": 174
       },
       "reopened_isTouched": false,
       "saved_path_exists": true,
       "undo_mode": "1",
       "undo_mode_present": true
+    },
+    "feature.datum_point": {
+      "datumPoint": {
+        "attachmentOffsetBase": "Vector (0.0, 0.0, 0.0)",
+        "state": [
+          "Up-to-date"
+        ],
+        "tipAdvance": false
+      },
+      "outcome": "ok"
+    },
+    "feature.helix": {
+      "additive": {
+        "modeEnumerations": [
+          "pitch-height-angle",
+          "pitch-turns-angle",
+          "height-turns-angle",
+          "height-turns-growth"
+        ],
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "78.9568797071783"
+      },
+      "outcome": "ok",
+      "subtractive": {
+        "state": [
+          "Up-to-date"
+        ],
+        "valid": true,
+        "volume": "764.8227832226153"
+      }
+    },
+    "feature.multi_transform": {
+      "multiTransform": {
+        "state": [
+          "Up-to-date"
+        ],
+        "tipName": "MtPad",
+        "valid": true,
+        "volume": "19999.999999999996"
+      },
+      "outcome": "ok"
+    },
+    "feature.primitives": {
+      "box.additive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "1330.9999999999998"
+      },
+      "box.subtractive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "331.00000000000006"
+      },
+      "cone.additive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "167.55160819145567"
+      },
+      "cone.subtractive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "73.30382858376183"
+      },
+      "cylinder.additive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "3801.3271108436497"
+      },
+      "cylinder.subtractive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "659.7344572538573"
+      },
+      "ellipsoid.additive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "133.9826640573845"
+      },
+      "ellipsoid.subtractive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "77.45872765817543"
+      },
+      "outcome": "ok",
+      "prism.additive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "415.69219381653056"
+      },
+      "prism.subtractive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "181.86533479473212"
+      },
+      "sphere.additive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "904.7786842338604"
+      },
+      "sphere.subtractive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "381.17990863556145"
+      },
+      "torus.additive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "3158.2734083485943"
+      },
+      "torus.subtractive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "1381.74461615251"
+      },
+      "wedge.additive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "500.0"
+      },
+      "wedge.subtractive": {
+        "tipAdvance": true,
+        "valid": true,
+        "volume": "139.99999999999994"
+      }
+    },
+    "feature.scaled": {
+      "outcome": "ok",
+      "scaled": {
+        "state": [
+          "Up-to-date"
+        ],
+        "tipName": "ScaledPad",
+        "valid": true,
+        "volume": "7999.999999999998"
+      }
+    },
+    "feature.subshape_binder": {
+      "binder": {
+        "state": [
+          "Up-to-date"
+        ],
+        "tipAdvance": false,
+        "valid": true,
+        "volume": "0.0"
+      },
+      "outcome": "ok"
     },
     "fem.objects": {
       "factories": [
@@ -709,6 +856,90 @@
         "file_exists": true
       },
       "sendMsgToActiveView": "None"
+    },
+    "hole.thread_enums": {
+      "enumerations": {
+        "DepthType": [
+          "Dimension",
+          "ThroughAll"
+        ],
+        "DrillPoint": [
+          "Flat",
+          "Angled"
+        ],
+        "HoleCutType": [
+          "None",
+          "Counterbore",
+          "Countersink",
+          "Counterdrill"
+        ],
+        "ThreadSize": [
+          "---"
+        ],
+        "ThreadType": [
+          "None",
+          "ISOMetricProfile",
+          "ISOMetricFineProfile",
+          "UNC",
+          "UNF",
+          "UNEF",
+          "NPT",
+          "BSP",
+          "BSW",
+          "BSF",
+          "ISOTyre"
+        ]
+      },
+      "firstSizeAssign": {
+        "ok": true,
+        "size": "M1x0.25"
+      },
+      "holeState": [
+        "Touched"
+      ],
+      "outcome": "ok",
+      "threadSizeAfter": [
+        "M1x0.25",
+        "M1.1x0.25",
+        "M1.2x0.25",
+        "M1.4x0.3",
+        "M1.6x0.35",
+        "M1.8x0.35",
+        "M2x0.4",
+        "M2.2x0.45",
+        "M2.5x0.45",
+        "M3x0.5",
+        "M3.5x0.6",
+        "M4x0.7",
+        "M4.5x0.75",
+        "M5x0.8",
+        "M6x1.0",
+        "M7x1.0",
+        "M8x1.25",
+        "M9x1.25",
+        "M10x1.5",
+        "M11x1.5",
+        "M12x1.75",
+        "M14x2.0",
+        "M16x2.0",
+        "M18x2.5",
+        "M20x2.5",
+        "M22x2.5",
+        "M24x3.0",
+        "M27x3.0",
+        "M30x3.5",
+        "M33x3.5",
+        "M36x4.0",
+        "M39x4.0",
+        "M42x4.5",
+        "M45x4.5",
+        "M48x5.0",
+        "M52x5.0",
+        "M56x5.5",
+        "M60x5.5",
+        "M64x6.0",
+        "M68x6.0"
+      ]
     },
     "mesh.pipeline": {
       "addon_kwargs": {

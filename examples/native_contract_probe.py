@@ -1104,6 +1104,326 @@ print(
 )
 """
 
+PROGRAM_FEATURE_HELIX = """
+import json as _json
+import Part
+
+doc = App.getDocument("@DOC@")
+body = doc.addObject("PartDesign::Body", "HelixBody")
+doc.recompute()
+xy_plane = next(
+    m for m in body.Origin.OriginFeatures if getattr(m, "Role", "") == "XY_Plane"
+)
+
+
+def _sketch(name, radius):
+    sketch = body.newObject("Sketcher::SketchObject", name)
+    sketch.AttachmentSupport = (xy_plane, [""])
+    sketch.MapMode = "FlatFace"
+    sketch.addGeometry(
+        Part.Circle(App.Vector(2, 0, 0), App.Vector(0, 0, 1), radius), False
+    )
+    doc.recompute()
+    return sketch
+
+
+result = {}
+profile = _sketch("HelixSketch", 1)
+helix = body.newObject("PartDesign::AdditiveHelix", "AdditiveHelix")
+helix.Profile = profile
+helix.ReferenceAxis = (profile, ["V_Axis"])
+helix.Mode = 1
+helix.Pitch = 3
+helix.Height = 9
+helix.Turns = 2
+helix.Angle = 0
+doc.recompute()
+result["additive"] = {
+    "valid": bool(helix.Shape.isValid()),
+    "volume": repr(helix.Shape.Volume),
+    "modeEnumerations": list(helix.getEnumerationsOfProperty("Mode")),
+    "tipAdvance": bool(body.Tip is helix),
+}
+stock = _sketch("HelixPadSketch", 5)
+pad = body.newObject("PartDesign::Pad", "HelixPad")
+pad.Profile = stock
+pad.Length = 10
+doc.recompute()
+groove = _sketch("HelixGrooveSketch", 1)
+subtractive = body.newObject("PartDesign::SubtractiveHelix", "SubtractiveHelix")
+subtractive.Profile = groove
+subtractive.ReferenceAxis = (groove, ["V_Axis"])
+subtractive.Mode = 1
+subtractive.Pitch = 3
+subtractive.Height = 9
+subtractive.Turns = 2
+subtractive.Angle = 0
+doc.recompute()
+result["subtractive"] = {
+    "valid": bool(subtractive.Shape.isValid()),
+    "volume": repr(subtractive.Shape.Volume),
+    "state": list(subtractive.State),
+}
+result["outcome"] = "ok"
+print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
+"""
+
+PROGRAM_FEATURE_PRIMITIVES = """
+import json as _json
+
+doc = App.getDocument("@DOC@")
+# Exact recorded dims from PartDesignTests/TestPrimitive.py: each additive
+# case is followed by its subtractive inner primitive.
+PRIMITIVE_DIMS = {
+    "box": (
+        {"Length": 11, "Width": 11, "Height": 11},
+        {"Length": 10, "Width": 10, "Height": 10},
+    ),
+    "cylinder": (
+        {"Radius": 11, "Height": 10, "Angle": 360},
+        {"Radius": 10, "Height": 10, "Angle": 360},
+    ),
+    "cone": (
+        {"Radius1": 0, "Radius2": 4, "Height": 10},
+        {"Radius1": 0, "Radius2": 3, "Height": 10},
+    ),
+    "sphere": ({"Radius": 6}, {"Radius": 5}),
+    "prism": (
+        {"Polygon": 6, "Circumradius": 4, "Height": 10},
+        {"Polygon": 6, "Circumradius": 3, "Height": 10},
+    ),
+    "torus": ({"Radius1": 10, "Radius2": 4}, {"Radius1": 10, "Radius2": 3}),
+    "ellipsoid": ({"Radius1": 2, "Radius2": 4}, {"Radius1": 1.5, "Radius2": 3}),
+    "wedge": (
+        {"X2min": 5, "X2max": 5, "Z2min": 0, "Z2max": 10},
+        {
+            "Xmin": 1,
+            "Xmax": 9,
+            "Ymax": 9,
+            "X2min": 5,
+            "X2max": 5,
+            "Z2min": 0,
+            "Z2max": 10,
+        },
+    ),
+}
+result = {}
+for shape, (additive_dims, subtractive_dims) in PRIMITIVE_DIMS.items():
+    body = doc.addObject("PartDesign::Body", "PrimBody_" + shape)
+    doc.recompute()
+    additive = body.newObject(
+        "PartDesign::Additive" + shape.capitalize(), "PrimAdd_" + shape
+    )
+    for key, value in additive_dims.items():
+        setattr(additive, key, value)
+    doc.recompute()
+    result[shape + ".additive"] = {
+        "valid": bool(additive.Shape.isValid()),
+        "volume": repr(additive.Shape.Volume),
+        "tipAdvance": bool(body.Tip is additive),
+    }
+    subtractive = body.newObject(
+        "PartDesign::Subtractive" + shape.capitalize(), "PrimSub_" + shape
+    )
+    for key, value in subtractive_dims.items():
+        setattr(subtractive, key, value)
+    doc.recompute()
+    result[shape + ".subtractive"] = {
+        "valid": bool(subtractive.Shape.isValid()),
+        "volume": repr(subtractive.Shape.Volume),
+        "tipAdvance": bool(body.Tip is subtractive),
+    }
+result["outcome"] = "ok"
+print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
+"""
+
+PROGRAM_FEATURE_SUBSHAPEBINDER = """
+import json as _json
+
+doc = App.getDocument("@DOC@")
+result = {}
+source_body = doc.addObject("PartDesign::Body", "BinderBodyA")
+doc.recompute()
+box = source_body.newObject("PartDesign::AdditiveBox", "BinderBox")
+box.Length = 10
+box.Width = 10
+box.Height = 10
+doc.recompute()
+target_body = doc.addObject("PartDesign::Body", "BinderBodyB")
+doc.recompute()
+binder = target_body.newObject("PartDesign::SubShapeBinder", "Binder")
+binder.Support = [(box, "Face1")]
+doc.recompute()
+result["binder"] = {
+    "valid": bool(binder.Shape.isValid()),
+    "volume": repr(binder.Shape.Volume),
+    "state": list(binder.State),
+    "tipAdvance": bool(target_body.Tip is binder),
+}
+result["outcome"] = "ok"
+print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
+"""
+
+PROGRAM_FEATURE_MULTITRANSFORM = """
+import json as _json
+import Part
+
+doc = App.getDocument("@DOC@")
+body = doc.addObject("PartDesign::Body", "MtBody")
+doc.recompute()
+xy_plane = next(
+    m for m in body.Origin.OriginFeatures if getattr(m, "Role", "") == "XY_Plane"
+)
+sketch = body.newObject("Sketcher::SketchObject", "MtSketch")
+sketch.AttachmentSupport = (xy_plane, [""])
+sketch.MapMode = "FlatFace"
+sketch.addGeometry(Part.LineSegment(App.Vector(0, 0, 0), App.Vector(10, 0, 0)), False)
+sketch.addGeometry(Part.LineSegment(App.Vector(10, 0, 0), App.Vector(10, 10, 0)), False)
+sketch.addGeometry(Part.LineSegment(App.Vector(10, 10, 0), App.Vector(0, 10, 0)), False)
+sketch.addGeometry(Part.LineSegment(App.Vector(0, 10, 0), App.Vector(0, 0, 0)), False)
+doc.recompute()
+pad = body.newObject("PartDesign::Pad", "MtPad")
+pad.Profile = sketch
+pad.Length = 10
+doc.recompute()
+# Children carry no Originals: the parent drives them.
+mirrored = body.newObject("PartDesign::Mirrored", "MtMirrored")
+mirrored.MirrorPlane = (sketch, ["H_Axis"])
+linear = body.newObject("PartDesign::LinearPattern", "MtLinear")
+linear.Direction = (sketch, ["H_Axis"])
+linear.Length = 20
+linear.Occurrences = 3
+polar = body.newObject("PartDesign::PolarPattern", "MtPolar")
+polar.Axis = (sketch, ["N_Axis"])
+polar.Angle = 360
+polar.Occurrences = 4
+multi = body.newObject("PartDesign::MultiTransform", "Mt")
+multi.Originals = [pad]
+multi.Transformations = [mirrored, linear, polar]
+doc.recompute()
+result = {
+    "multiTransform": {
+        "valid": bool(multi.Shape.isValid()),
+        "volume": repr(multi.Shape.Volume),
+        "state": list(multi.State),
+        "tipName": body.Tip.Name,
+    },
+    "outcome": "ok",
+}
+print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
+"""
+
+PROGRAM_FEATURE_SCALED = """
+import json as _json
+import Part
+
+doc = App.getDocument("@DOC@")
+body = doc.addObject("PartDesign::Body", "ScaledBody")
+doc.recompute()
+xy_plane = next(
+    m for m in body.Origin.OriginFeatures if getattr(m, "Role", "") == "XY_Plane"
+)
+sketch = body.newObject("Sketcher::SketchObject", "ScaledSketch")
+sketch.AttachmentSupport = (xy_plane, [""])
+sketch.MapMode = "FlatFace"
+sketch.addGeometry(Part.LineSegment(App.Vector(0, 0, 0), App.Vector(10, 0, 0)), False)
+sketch.addGeometry(Part.LineSegment(App.Vector(10, 0, 0), App.Vector(10, 10, 0)), False)
+sketch.addGeometry(Part.LineSegment(App.Vector(10, 10, 0), App.Vector(0, 10, 0)), False)
+sketch.addGeometry(Part.LineSegment(App.Vector(0, 10, 0), App.Vector(0, 0, 0)), False)
+doc.recompute()
+pad = body.newObject("PartDesign::Pad", "ScaledPad")
+pad.Profile = sketch
+pad.Length = 10
+doc.recompute()
+scaled = body.newObject("PartDesign::Scaled", "Scaled")
+scaled.Originals = [pad]
+scaled.Factor = 2
+scaled.Occurrences = 2
+doc.recompute()
+result = {
+    "scaled": {
+        "valid": bool(scaled.Shape.isValid()),
+        "volume": repr(scaled.Shape.Volume),
+        "state": list(scaled.State),
+        "tipName": body.Tip.Name,
+    },
+    "outcome": "ok",
+}
+print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
+"""
+
+PROGRAM_FEATURE_DATUMPOINT = """
+import json as _json
+
+doc = App.getDocument("@DOC@")
+body = doc.addObject("PartDesign::Body", "DatumPointBody")
+doc.recompute()
+xy_plane = next(
+    m for m in body.Origin.OriginFeatures if getattr(m, "Role", "") == "XY_Plane"
+)
+point = body.newObject("PartDesign::Point", "DatumPoint")
+point.AttachmentSupport = [(xy_plane, "")]
+point.MapMode = "ObjectOrigin"
+doc.recompute()
+result = {
+    "datumPoint": {
+        "state": list(point.State),
+        "attachmentOffsetBase": repr(point.AttachmentOffset.Base),
+        "tipAdvance": bool(body.Tip is point),
+    },
+    "outcome": "ok",
+}
+print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
+"""
+
+PROGRAM_HOLE_THREAD_ENUMS = """
+import json as _json
+import Part
+
+doc = App.getDocument("@DOC@")
+body = doc.addObject("PartDesign::Body", "HoleBody")
+doc.recompute()
+xy_plane = next(
+    m for m in body.Origin.OriginFeatures if getattr(m, "Role", "") == "XY_Plane"
+)
+stock_sketch = body.newObject("Sketcher::SketchObject", "HoleStockSketch")
+stock_sketch.AttachmentSupport = (xy_plane, [""])
+stock_sketch.MapMode = "FlatFace"
+stock_sketch.addGeometry(
+    Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 5), False
+)
+doc.recompute()
+stock = body.newObject("PartDesign::Pad", "HoleStock")
+stock.Profile = stock_sketch
+stock.Length = 10
+doc.recompute()
+hole_sketch = body.newObject("Sketcher::SketchObject", "HoleSketch")
+hole_sketch.AttachmentSupport = (xy_plane, [""])
+hole_sketch.MapMode = "FlatFace"
+hole_sketch.addGeometry(
+    Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 2), False
+)
+doc.recompute()
+hole = body.newObject("PartDesign::Hole", "Hole")
+hole.Profile = hole_sketch
+hole.DepthType = "ThroughAll"
+doc.recompute()
+result = {"enumerations": {}}
+for name in ("HoleCutType", "DepthType", "ThreadType", "DrillPoint", "ThreadSize"):
+    result["enumerations"][name] = list(hole.getEnumerationsOfProperty(name))
+hole.ThreadType = "ISOMetricProfile"
+result["threadSizeAfter"] = list(hole.getEnumerationsOfProperty("ThreadSize"))
+first_size = result["threadSizeAfter"][0]
+try:
+    hole.ThreadSize = first_size
+    result["firstSizeAssign"] = {"size": first_size, "ok": True}
+except Exception as exc:
+    result["firstSizeAssign"] = {"size": first_size, "ok": False, "error": str(exc)}
+result["holeState"] = list(hole.State)
+result["outcome"] = "ok"
+print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
+"""
+
 PROGRAM_DOC_LIFECYCLE = """
 import json as _json
 import os
@@ -1420,6 +1740,13 @@ def run_probe_sequence(runner: Runner, payloads: dict, sweep: bool) -> None:
         ("part.read", PROGRAM_PART_READ),
         ("gui.selection", PROGRAM_GUI_SELECTION),
         ("fem.objects", PROGRAM_FEM_OBJECTS),
+        ("feature.helix", PROGRAM_FEATURE_HELIX),
+        ("feature.primitives", PROGRAM_FEATURE_PRIMITIVES),
+        ("feature.subshape_binder", PROGRAM_FEATURE_SUBSHAPEBINDER),
+        ("feature.multi_transform", PROGRAM_FEATURE_MULTITRANSFORM),
+        ("feature.scaled", PROGRAM_FEATURE_SCALED),
+        ("feature.datum_point", PROGRAM_FEATURE_DATUMPOINT),
+        ("hole.thread_enums", PROGRAM_HOLE_THREAD_ENUMS),
     ]
     for name, program in script_probes:
         payload, _crashed = runner.script_step(name, program)

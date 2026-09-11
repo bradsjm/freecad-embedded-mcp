@@ -10,7 +10,7 @@ A PartDesign Body represents one component and contains cumulative features. Sha
 2. Create the sketch and its attachment with `create_feature` (`kind: "sketch"`, a `support`, and an explicit `MapMode`).
 3. Constrain a closed profile with `edit_sketch`. See [Sketcher profiles](sketcher.md).
 4. Pad or revolve it into a base with `create_feature` (`kind: "pad"` and `profile`, or `kind: "revolve"` with an axis). `create_feature` acts on an empty Body.
-5. Add pockets, holes, additive/subtractive features, patterns, and dress-ups with `create_feature`.
+5. Add pockets, holes, additive/subtractive features, patterns, dress-ups, primitives, helix sweeps, binders, and transforms with `create_feature`.
 6. Keep fillets/chamfers/thickness late where possible.
 7. Inspect the Body `Tip` after each feature.
 

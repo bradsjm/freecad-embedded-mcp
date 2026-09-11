@@ -33,8 +33,14 @@ class StubVector:
         self.x, self.y, self.z = float(x), float(y), float(z)
 
 
+class StubPlacement:
+    def __init__(self) -> None:
+        self.Base = StubVector()
+
+
 _STUB_FREECAD = types.ModuleType("FreeCAD")
 _STUB_FREECAD.Vector = StubVector
+_STUB_FREECAD.Placement = StubPlacement
 
 
 @contextmanager
@@ -135,6 +141,7 @@ class FakeFeature:
         *,
         properties: tuple[str, ...] = (),
         shape: Any = None,
+        enumerations: dict[str, list[str]] | None = None,
     ) -> None:
         object.__setattr__(self, "Name", name)
         object.__setattr__(self, "Label", name)
@@ -142,6 +149,7 @@ class FakeFeature:
         object.__setattr__(self, "State", [])
         object.__setattr__(self, "InList", [])
         object.__setattr__(self, "PropertiesList", list(properties))
+        object.__setattr__(self, "_enumerations", enumerations or {})
         object.__setattr__(self, "_shape", shape)
         object.__setattr__(self, "_values", {})
         object.__setattr__(self, "history", [])
@@ -159,12 +167,15 @@ class FakeFeature:
     def getTypeIdOfProperty(self, prop: str) -> str:
         return "App::PropertyLink"
 
+    def getEnumerationsOfProperty(self, prop: str) -> list[str]:
+        return list(object.__getattribute__(self, "_enumerations").get(prop, []))
+
     def getPropertyStatus(self, prop: str) -> list[str]:
         return []
 
     def setExpression(self, prop: str, expression: Any) -> None:
         """Fake bound-expression registry: mirrors the native setter."""
-        if prop not in object.__getattribute__(self, "PropertiesList"):
+        if prop.split(".")[0] not in object.__getattribute__(self, "PropertiesList"):
             raise AttributeError(prop)
         object.__getattribute__(self, "_values").setdefault("_expressions", {})
         object.__getattribute__(self, "_values")["_expressions"][prop] = expression
@@ -190,6 +201,8 @@ class FakeBody(FakeFeature):
         members: list[Any] | None = None,
         tip: Any = None,
         shape: Any = None,
+        origin_features: list[Any] | None = None,
+        feature_enumerations: dict[str, dict[str, list[str]]] | None = None,
     ) -> None:
         super().__init__(
             name,
@@ -199,6 +212,11 @@ class FakeBody(FakeFeature):
         )
         object.__setattr__(self, "_values", {"Group": list(members or [])})
         object.__setattr__(self, "_tip", tip)
+        object.__setattr__(self, "_feature_enumerations", feature_enumerations or {})
+        if origin_features is not None:
+            origin = FakeFeature("Origin", "App::Origin", properties=())
+            object.__setattr__(origin, "OriginFeatures", list(origin_features))
+            object.__setattr__(self, "Origin", origin)
 
     @property
     def Tip(self) -> Any:
@@ -222,12 +240,104 @@ class FakeBody(FakeFeature):
             "PartDesign::Mirrored": ("Originals", "MirrorPlane"),
             "PartDesign::Revolution": ("Profile", "ReferenceAxis", "Angle", "Reversed"),
             "PartDesign::AdditiveLoft": ("Profile", "Sections", "Ruled"),
+            "PartDesign::AdditiveHelix": (
+                "Profile",
+                "ReferenceAxis",
+                "Mode",
+                "Pitch",
+                "Height",
+                "Turns",
+                "Angle",
+                "Growth",
+                "LeftHanded",
+                "Reversed",
+            ),
+            "PartDesign::SubtractiveHelix": (
+                "Profile",
+                "ReferenceAxis",
+                "Mode",
+                "Pitch",
+                "Height",
+                "Turns",
+                "Angle",
+                "Growth",
+                "LeftHanded",
+                "Reversed",
+            ),
+            "PartDesign::AdditiveBox": ("Length", "Width", "Height"),
+            "PartDesign::SubtractiveBox": ("Length", "Width", "Height"),
+            "PartDesign::AdditiveCylinder": ("Radius", "Height", "Angle"),
+            "PartDesign::SubtractiveCylinder": ("Radius", "Height", "Angle"),
+            "PartDesign::AdditiveCone": ("Radius1", "Radius2", "Height"),
+            "PartDesign::SubtractiveCone": ("Radius1", "Radius2", "Height"),
+            "PartDesign::AdditiveSphere": ("Radius",),
+            "PartDesign::SubtractiveSphere": ("Radius",),
+            "PartDesign::AdditivePrism": ("Polygon", "Circumradius", "Height"),
+            "PartDesign::SubtractivePrism": ("Polygon", "Circumradius", "Height"),
+            "PartDesign::AdditiveTorus": ("Radius1", "Radius2"),
+            "PartDesign::SubtractiveTorus": ("Radius1", "Radius2"),
+            "PartDesign::AdditiveEllipsoid": ("Radius1", "Radius2", "Radius3"),
+            "PartDesign::SubtractiveEllipsoid": ("Radius1", "Radius2", "Radius3"),
+            "PartDesign::AdditiveWedge": (
+                "Xmin",
+                "Xmax",
+                "Ymin",
+                "Ymax",
+                "Zmin",
+                "Zmax",
+                "X2min",
+                "X2max",
+                "Z2min",
+                "Z2max",
+            ),
+            "PartDesign::SubtractiveWedge": (
+                "Xmin",
+                "Xmax",
+                "Ymin",
+                "Ymax",
+                "Zmin",
+                "Zmax",
+                "X2min",
+                "X2max",
+                "Z2min",
+                "Z2max",
+            ),
+            "PartDesign::SubShapeBinder": ("Support", "MakeFace"),
+            "PartDesign::MultiTransform": ("Originals", "Transformations"),
+            "PartDesign::Scaled": ("Originals", "Factor", "Occurrences"),
+            "PartDesign::Point": (
+                "AttachmentSupport",
+                "MapMode",
+                "AttachmentOffset",
+                "Placement",
+            ),
+            "PartDesign::Hole": (
+                "Profile",
+                "Diameter",
+                "Depth",
+                "DepthType",
+                "HoleCutType",
+                "ThreadType",
+                "Threaded",
+                "ThreadSize",
+                "DrillPoint",
+                "Tapered",
+                "ModelThread",
+                "DrillForDepth",
+                "UseCustomThreadClearance",
+                "ThreadDirection",
+                "HoleCutDiameter",
+                "HoleCutDepth",
+                "HoleCutCountersinkAngle",
+            ),
         }.get(type_id, ("Profile", "Length", "Type"))
+        enumerations = object.__getattribute__(self, "_feature_enumerations").get(type_id)
         feature = FakeFeature(
             name,
             type_id,
             properties=properties,
             shape=FakeShape() if type_id.startswith("PartDesign::") else None,
+            enumerations=enumerations,
         )
         self._values["Group"] = [*list(self._values.get("Group", [])), feature]
         if type_id in (
@@ -246,6 +356,26 @@ class FakeBody(FakeFeature):
             "PartDesign::SubtractiveLoft",
             "PartDesign::AdditivePipe",
             "PartDesign::SubtractivePipe",
+            "PartDesign::AdditiveHelix",
+            "PartDesign::SubtractiveHelix",
+            "PartDesign::AdditiveBox",
+            "PartDesign::SubtractiveBox",
+            "PartDesign::AdditiveCylinder",
+            "PartDesign::SubtractiveCylinder",
+            "PartDesign::AdditiveCone",
+            "PartDesign::SubtractiveCone",
+            "PartDesign::AdditiveSphere",
+            "PartDesign::SubtractiveSphere",
+            "PartDesign::AdditivePrism",
+            "PartDesign::SubtractivePrism",
+            "PartDesign::AdditiveTorus",
+            "PartDesign::SubtractiveTorus",
+            "PartDesign::AdditiveEllipsoid",
+            "PartDesign::SubtractiveEllipsoid",
+            "PartDesign::AdditiveWedge",
+            "PartDesign::SubtractiveWedge",
+            "PartDesign::MultiTransform",
+            "PartDesign::Scaled",
         ):
             object.__setattr__(self, "_tip", feature)
         doc = getattr(self, "_doc", None)
@@ -360,6 +490,31 @@ SUPPORTED = (
     "PartDesign::Mirrored",
     "PartDesign::AdditiveLoft",
     "Sketcher::SketchObject",
+    "PartDesign::SubtractiveLoft",
+    "PartDesign::AdditivePipe",
+    "PartDesign::SubtractivePipe",
+    "PartDesign::AdditiveHelix",
+    "PartDesign::SubtractiveHelix",
+    "PartDesign::AdditiveBox",
+    "PartDesign::SubtractiveBox",
+    "PartDesign::AdditiveCylinder",
+    "PartDesign::SubtractiveCylinder",
+    "PartDesign::AdditiveCone",
+    "PartDesign::SubtractiveCone",
+    "PartDesign::AdditiveSphere",
+    "PartDesign::SubtractiveSphere",
+    "PartDesign::AdditivePrism",
+    "PartDesign::SubtractivePrism",
+    "PartDesign::AdditiveTorus",
+    "PartDesign::SubtractiveTorus",
+    "PartDesign::AdditiveEllipsoid",
+    "PartDesign::SubtractiveEllipsoid",
+    "PartDesign::AdditiveWedge",
+    "PartDesign::SubtractiveWedge",
+    "PartDesign::SubShapeBinder",
+    "PartDesign::MultiTransform",
+    "PartDesign::Scaled",
+    "PartDesign::Point",
 )
 
 
@@ -920,3 +1075,770 @@ def test_nonpositive_dressup_scalar_is_refused_pretransaction() -> None:
 
         assert "radius must be a positive finite number" in excinfo.value.message
         assert doc.transactions == []
+
+
+# ---------------------------------------------------------------------------
+# Roadmap kinds 19-24: helix, primitive, subshape_binder, multi_transform,
+# scaled and datum_point.
+# ---------------------------------------------------------------------------
+
+
+def test_kind_enum_lists_all_24_kinds() -> None:
+    with load_features() as module:
+        definition = next(
+            entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "create_feature"
+        )
+        assert definition["inputSchema"]["properties"]["kind"]["enum"] == [
+            "datum_plane",
+            "datum_line",
+            "sketch",
+            "pad",
+            "pocket",
+            "hole",
+            "revolve",
+            "groove",
+            "fillet",
+            "chamfer",
+            "thickness",
+            "draft",
+            "linear_pattern",
+            "polar_pattern",
+            "mirrored",
+            "loft",
+            "pipe",
+            "gear_profile",
+            "helix",
+            "primitive",
+            "subshape_binder",
+            "multi_transform",
+            "scaled",
+            "datum_point",
+        ]
+
+
+def test_helix_writes_native_mode_and_advances_tip() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+        ctx = FakeCtx(doc)
+
+        result = call(
+            module,
+            ctx,
+            kind="helix",
+            name="Helix",
+            profile="Sketch",
+            parameters={
+                "axis": {"object": "Sketch", "sketchAxis": "V_Axis"},
+                "helix_mode": "pitch_turns",
+                "mode": "additive",
+                "pitch": 3,
+                "turns": 2,
+                "angle": 0,
+            },
+        )
+
+        feature = doc.getObject("Helix")
+        assert result["object"]["typeId"] == "PartDesign::AdditiveHelix"
+        assert feature.Mode == 1
+        assert feature.Pitch == 3.0
+        assert feature.Turns == 2.0
+        assert feature.Angle == 0.0
+        assert feature.ReferenceAxis == (doc.getObject("Sketch"), ["V_Axis"])
+        assert result["bodyTip"] == "Helix"
+        assert doc.transactions == [("open", "create_feature:Body"), ("commit",)]
+
+
+def test_helix_missing_driver_pair_fails_pretransaction() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="helix",
+                name="Helix",
+                profile="Sketch",
+                parameters={
+                    "axis": {"object": "Sketch", "sketchAxis": "V_Axis"},
+                    "helix_mode": "pitch_turns",
+                    "mode": "additive",
+                    "pitch": 3,
+                },
+            )
+
+        assert "helix_mode 'pitch_turns' requires turns" in excinfo.value.message
+        assert doc.transactions == []
+
+
+def test_helix_rejects_a_parameter_outside_the_driver_pair() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="helix",
+                name="Helix",
+                profile="Sketch",
+                parameters={
+                    "axis": {"object": "Sketch", "sketchAxis": "V_Axis"},
+                    "helix_mode": "pitch_turns",
+                    "mode": "additive",
+                    "pitch": 3,
+                    "turns": 2,
+                    "height": 9,
+                },
+            )
+
+        assert "helix_mode 'pitch_turns' does not accept 'height'" in excinfo.value.message
+        assert doc.transactions == []
+
+
+def test_helix_requires_mode_pretransaction() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="helix",
+                name="Helix",
+                profile="Sketch",
+                parameters={
+                    "axis": {"object": "Sketch", "sketchAxis": "V_Axis"},
+                    "helix_mode": "pitch_turns",
+                    "pitch": 3,
+                    "turns": 2,
+                },
+            )
+
+        assert "mode 'additive' or 'subtractive'" in excinfo.value.message
+        assert doc.transactions == []
+
+
+_PRIMITIVE_NATIVE_NAMES = {
+    "length": "Length",
+    "width": "Width",
+    "height": "Height",
+    "radius": "Radius",
+    "radius1": "Radius1",
+    "radius2": "Radius2",
+    "radius3": "Radius3",
+    "circumradius": "Circumradius",
+    "x2_min": "X2min",
+    "x2_max": "X2max",
+    "z2_min": "Z2min",
+    "z2_max": "Z2max",
+}
+
+_PRIMITIVE_CASES = [
+    ("box", "additive", {"length": 11, "width": 11, "height": 11}),
+    ("box", "subtractive", {"length": 10, "width": 10, "height": 10}),
+    ("cylinder", "additive", {"radius": 11, "height": 10}),
+    ("cylinder", "subtractive", {"radius": 10, "height": 10}),
+    ("cone", "additive", {"radius1": 0, "radius2": 4, "height": 10}),
+    ("cone", "subtractive", {"radius1": 0, "radius2": 3, "height": 10}),
+    ("sphere", "additive", {"radius": 6}),
+    ("sphere", "subtractive", {"radius": 5}),
+    ("prism", "additive", {"polygon": 6, "circumradius": 4, "height": 10}),
+    ("prism", "subtractive", {"polygon": 6, "circumradius": 3, "height": 10}),
+    ("torus", "additive", {"radius1": 10, "radius2": 4}),
+    ("torus", "subtractive", {"radius1": 10, "radius2": 3}),
+    ("ellipsoid", "additive", {"radius1": 2, "radius2": 4, "radius3": 4}),
+    ("ellipsoid", "subtractive", {"radius1": 1.5, "radius2": 3, "radius3": 3}),
+    ("wedge", "additive", {"x2_min": 5, "x2_max": 5, "z2_min": 0, "z2_max": 10}),
+    ("wedge", "subtractive", {"x2_min": 5, "x2_max": 5, "z2_min": 0, "z2_max": 10}),
+]
+
+
+@pytest.mark.parametrize(("shape", "mode", "dimensions"), _PRIMITIVE_CASES)
+def test_primitive_matrix_creates_and_advances_tip(
+    shape: str, mode: str, dimensions: dict[str, Any]
+) -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+        ctx = FakeCtx(doc)
+        name = f"Prim_{shape}_{mode}"
+
+        result = call(
+            module,
+            ctx,
+            kind="primitive",
+            name=name,
+            parameters={"shape": shape, "mode": mode, **dimensions},
+        )
+
+        feature = doc.getObject(name)
+        assert result["object"]["typeId"] == (
+            f"PartDesign::{mode.capitalize()}{shape.capitalize()}"
+        )
+        for semantic, value in dimensions.items():
+            if semantic == "polygon":
+                assert feature.Polygon == int(value)
+            else:
+                assert getattr(feature, _PRIMITIVE_NATIVE_NAMES[semantic]) == float(value)
+        assert result["bodyTip"] == name
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_primitive_missing_required_parameter_fails_pretransaction() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="primitive",
+                name="Prim",
+                parameters={"shape": "box", "mode": "additive", "length": 11},
+            )
+
+        assert "primitive shape 'box' requires width" in excinfo.value.message
+        assert doc.transactions == []
+
+
+def test_primitive_wedge_ordering_fails_pretransaction() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="primitive",
+                name="Prim",
+                parameters={
+                    "shape": "wedge",
+                    "mode": "additive",
+                    "x2_min": 6,
+                    "x2_max": 5,
+                    "z2_min": 0,
+                    "z2_max": 10,
+                },
+            )
+
+        assert "wedge requires x2_min <= x2_max" in excinfo.value.message
+        assert doc.transactions == []
+
+
+def test_primitive_cone_accepts_zero_first_radius() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+        ctx = FakeCtx(doc)
+
+        result = call(
+            module,
+            ctx,
+            kind="primitive",
+            name="PrimCone",
+            parameters={
+                "shape": "cone",
+                "mode": "additive",
+                "radius1": 0,
+                "radius2": 4,
+                "height": 10,
+            },
+        )
+
+        feature = doc.getObject("PrimCone")
+        assert result["object"]["typeId"] == "PartDesign::AdditiveCone"
+        assert feature.Radius1 == 0.0
+        assert feature.Radius2 == 4.0
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_subshape_binder_binds_whole_object_and_signed_face() -> None:
+    """Binder references may leave the Body: no membership check applies."""
+    with load_features() as module:
+        from mcp_server.tools import geometry
+
+        _body, doc = make_body_and_doc(shape=FakeShape())
+        plate_shape = FakeShape(faces=[object(), object(), object()])
+        plate = FakeFeature("Plate", "Part::Feature", properties=(), shape=plate_shape)
+        object.__setattr__(plate, "Document", doc)
+        doc.Objects.append(plate)
+        ctx = FakeCtx(doc)
+
+        references = [
+            {"object": "Plate", "subelement": ""},
+            geometry.make_reference(ctx, doc, plate, "face", 3),
+        ]
+
+        result = call(
+            module,
+            ctx,
+            kind="subshape_binder",
+            name="Binder",
+            parameters={"references": references, "make_face": False},
+        )
+
+        feature = doc.getObject("Binder")
+        assert result["object"]["typeId"] == "PartDesign::SubShapeBinder"
+        assert feature.Support == [(plate, [""]), (plate, ["Face3"])]
+        assert feature.MakeFace is False
+        assert "references->Support(2)" in result["applied"]
+        # The binder is deliberately not a Tip kind.
+        assert result["bodyTip"] is None
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_subshape_binder_rejects_empty_references_on_the_wire() -> None:
+    with load_features() as module:
+        definition = next(
+            entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "create_feature"
+        )
+        arguments = {
+            "document": "Doc",
+            "body": "Body",
+            "kind": "subshape_binder",
+            "name": "Binder",
+            "parameters": {"references": []},
+        }
+        with pytest.raises(protocol.ProtocolError):
+            validate_schema(arguments, definition["inputSchema"])
+
+
+def test_multi_transform_creates_parent_and_children() -> None:
+    with load_features() as module:
+        pad_shape = FakeShape()
+        sketch = FakeFeature("Sketch", "Sketcher::SketchObject", properties=())
+        pad = FakeFeature(
+            "Pad", "PartDesign::Pad", properties=("Profile", "Length"), shape=pad_shape
+        )
+        body = FakeBody(members=[sketch, pad], shape=pad_shape)
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.extend([sketch, pad])
+        ctx = FakeCtx(doc)
+
+        result = call(
+            module,
+            ctx,
+            kind="multi_transform",
+            name="MT",
+            parameters={
+                "originals": ["Pad"],
+                "transformations": [
+                    {
+                        "kind": "mirrored",
+                        "plane": {"object": "Sketch", "sketchAxis": "H_Axis"},
+                    },
+                    {
+                        "kind": "linear",
+                        "axis": {"object": "Sketch", "sketchAxis": "H_Axis"},
+                        "length": 20,
+                        "count": 3,
+                    },
+                    {
+                        "kind": "polar",
+                        "axis": {"object": "Sketch", "sketchAxis": "N_Axis"},
+                        "count": 4,
+                    },
+                ],
+            },
+        )
+
+        children = [doc.getObject("MTTf0"), doc.getObject("MTTf1"), doc.getObject("MTTf2")]
+        parent = doc.getObject("MT")
+        assert result["object"]["name"] == "MT"
+        assert result["bodyTip"] == "MT"
+        assert [child.TypeId for child in children] == [
+            "PartDesign::Mirrored",
+            "PartDesign::LinearPattern",
+            "PartDesign::PolarPattern",
+        ]
+        assert children[0].MirrorPlane == (sketch, ["H_Axis"])
+        assert children[1].Direction == (sketch, ["H_Axis"])
+        assert children[1].Length == 20.0
+        assert children[1].Occurrences == 3
+        assert children[2].Axis == (sketch, ["N_Axis"])
+        assert children[2].Occurrences == 4
+        assert children[2].Angle == 360.0
+        assert parent.Transformations == children
+        assert parent.Originals == [pad]
+        assert "transformations[0]->MTTf0" in result["applied"]
+        assert "originals->Originals(1)" in result["applied"]
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_multi_transform_mirrored_child_requires_plane_pretransaction() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="multi_transform",
+                name="MT",
+                parameters={
+                    "originals": ["Sketch"],
+                    "transformations": [{"kind": "mirrored"}],
+                },
+            )
+
+        assert "transformations[0] kind 'mirrored' requires plane" in excinfo.value.message
+        assert doc.transactions == []
+
+
+def test_multi_transform_rejects_expression_scalars_in_transformations() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="multi_transform",
+                name="MT",
+                parameters={
+                    "originals": ["Sketch"],
+                    "transformations": [
+                        {
+                            "kind": "linear",
+                            "axis": {"object": "Sketch", "sketchAxis": "H_Axis"},
+                            "length": {"expression": "Sketch.Constraints.length"},
+                            "count": 3,
+                        }
+                    ],
+                },
+            )
+
+        assert "transformation scalars accept numbers only" in excinfo.value.message
+        assert doc.transactions == []
+
+
+def test_scaled_writes_factor_and_occurrences() -> None:
+    with load_features() as module:
+        pad_shape = FakeShape()
+        pad = FakeFeature(
+            "Pad", "PartDesign::Pad", properties=("Profile", "Length"), shape=pad_shape
+        )
+        body = FakeBody(members=[pad], shape=pad_shape)
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.append(pad)
+        ctx = FakeCtx(doc)
+
+        result = call(
+            module,
+            ctx,
+            kind="scaled",
+            name="Scaled",
+            parameters={"originals": ["Pad"], "factor": 2, "count": 2},
+        )
+
+        feature = doc.getObject("Scaled")
+        assert result["object"]["typeId"] == "PartDesign::Scaled"
+        assert feature.Factor == 2.0
+        assert feature.Occurrences == 2
+        assert feature.Originals == [pad]
+        assert result["bodyTip"] == "Scaled"
+        assert "originals->Originals" in result["applied"]
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_scaled_rejects_nonpositive_factor_pretransaction() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="scaled",
+                name="Scaled",
+                parameters={"originals": ["Sketch"], "factor": 0, "count": 2},
+            )
+
+        assert "factor must be a positive finite number" in excinfo.value.message
+        assert doc.transactions == []
+
+
+def test_datum_point_attaches_to_origin_plane_with_offset() -> None:
+    with load_features() as module:
+        xy_plane = FakeFeature("XY_Plane", "App::Plane", properties=())
+        sketch = FakeFeature("Sketch", "Sketcher::SketchObject", properties=())
+        body = FakeBody(members=[sketch], shape=FakeShape(), origin_features=[xy_plane])
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.append(sketch)
+        ctx = FakeCtx(doc)
+
+        result = call(
+            module,
+            ctx,
+            kind="datum_point",
+            name="DatumPoint",
+            parameters={"plane": "xy", "offset": 5},
+        )
+
+        feature = doc.getObject("DatumPoint")
+        assert result["object"]["typeId"] == "PartDesign::Point"
+        assert feature.AttachmentSupport == [(xy_plane, "")]
+        assert feature.MapMode == "ObjectOrigin"
+        assert feature.AttachmentOffset.Base.z == 5.0
+        assert "plane->AttachmentSupport" in result["applied"]
+        assert "offset->AttachmentOffset" in result["applied"]
+        # The datum point is deliberately not a Tip kind.
+        assert result["bodyTip"] is None
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_hole_through_all_succeeds_without_depth() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+        ctx = FakeCtx(doc)
+
+        result = call(
+            module,
+            ctx,
+            kind="hole",
+            name="Hole",
+            profile="Sketch",
+            parameters={"diameter": 4, "depth_type": "through_all"},
+        )
+
+        feature = doc.getObject("Hole")
+        assert feature.DepthType == "ThroughAll"
+        assert feature.Threaded is False
+        assert feature.DrillPoint == "Flat"
+        assert result["bodyTip"] == "Hole"
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_hole_through_all_rejects_depth_pretransaction() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="hole",
+                name="Hole",
+                profile="Sketch",
+                parameters={"diameter": 4, "depth": 10, "depth_type": "through_all"},
+            )
+
+        assert "through_all ignores depth" in excinfo.value.message
+        assert doc.transactions == []
+
+
+def test_hole_counterbore_requires_its_diameter_pretransaction() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="hole",
+                name="Hole",
+                profile="Sketch",
+                parameters={
+                    "diameter": 4,
+                    "depth": 10,
+                    "cut": "counterbore",
+                    "counterbore_depth": 5,
+                },
+            )
+
+        assert "hole cut 'counterbore' requires counterbore_diameter" in excinfo.value.message
+        assert doc.transactions == []
+
+
+def test_hole_countersink_writes_native_cut_values() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+        ctx = FakeCtx(doc)
+
+        result = call(
+            module,
+            ctx,
+            kind="hole",
+            name="Hole",
+            profile="Sketch",
+            parameters={
+                "diameter": 4,
+                "depth": 10,
+                "cut": "countersink",
+                "countersink_diameter": 8,
+                "countersink_angle": 90,
+            },
+        )
+
+        feature = doc.getObject("Hole")
+        assert feature.HoleCutType == "Countersink"
+        assert feature.HoleCutDiameter == 8.0
+        assert feature.HoleCutCountersinkAngle == 90.0
+        assert any(entry == "cut->HoleCutType=Countersink" for entry in result["applied"])
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_hole_thread_size_is_verified_against_the_live_enumeration() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(
+            shape=FakeShape(),
+            feature_enumerations={"PartDesign::Hole": {"ThreadSize": ["M6", "M8"]}},
+        )
+        ctx = FakeCtx(doc)
+
+        result = call(
+            module,
+            ctx,
+            kind="hole",
+            name="Hole",
+            profile="Sketch",
+            parameters={
+                "diameter": 4,
+                "depth": 10,
+                "thread": "iso_metric",
+                "thread_size": "M6",
+            },
+        )
+
+        feature = doc.getObject("Hole")
+        assert feature.ThreadType == "ISOMetricProfile"
+        assert feature.ThreadSize == "M6"
+        assert feature.Threaded is True
+        assert "thread->ThreadType=ISOMetricProfile" in result["applied"]
+        assert "thread_size->ThreadSize=M6" in result["applied"]
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_hole_unknown_thread_size_reports_valid_entries() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(
+            shape=FakeShape(),
+            feature_enumerations={"PartDesign::Hole": {"ThreadSize": ["M6", "M8"]}},
+        )
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="hole",
+                name="Hole",
+                profile="Sketch",
+                parameters={
+                    "diameter": 4,
+                    "depth": 10,
+                    "thread": "iso_metric",
+                    "thread_size": "M99",
+                },
+            )
+
+        assert "not in the live ThreadSize enumeration" in excinfo.value.message
+        assert excinfo.value.details["valid"] == ["M6", "M8"]
+        assert excinfo.value.details["validCount"] == 2
+        assert "abort" in [transaction[0] for transaction in doc.transactions]
+
+
+def test_hole_thread_size_without_thread_fails_pretransaction() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="hole",
+                name="Hole",
+                profile="Sketch",
+                parameters={"diameter": 4, "depth": 10, "thread_size": "M6"},
+            )
+
+        assert "thread_size requires a thread" in excinfo.value.message
+        assert doc.transactions == []
+
+
+def test_edit_feature_applies_hole_cut_and_reports_rows() -> None:
+    with load_features() as module:
+        hole_shape = FakeShape()
+        hole = FakeFeature(
+            "Hole",
+            "PartDesign::Hole",
+            properties=(
+                "Diameter",
+                "Depth",
+                "DepthType",
+                "HoleCutType",
+                "HoleCutDiameter",
+                "HoleCutCountersinkAngle",
+                "ThreadType",
+                "Threaded",
+                "ThreadSize",
+            ),
+            shape=hole_shape,
+        )
+        object.__setattr__(hole, "_values", {"Diameter": 4.0, "Depth": 10.0})
+        body = FakeBody(members=[hole], shape=hole_shape)
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.append(hole)
+        ctx = FakeCtx(doc)
+
+        result = module.HANDLERS["edit_feature"](
+            ctx,
+            {
+                "document": "Doc",
+                "body": "Body",
+                "object": "Hole",
+                "parameters": {
+                    "cut": "countersink",
+                    "countersink_diameter": 8,
+                    "countersink_angle": 90,
+                },
+            },
+        )
+
+        assert hole.HoleCutType == "Countersink"
+        assert hole.HoleCutDiameter == 8.0
+        assert hole.HoleCutCountersinkAngle == 90.0
+        rows = {row["name"]: row for row in result["change"]["properties"]}
+        assert rows["cut"]["after"] == "Countersink"
+        assert rows["countersink_diameter"]["after"] == 8.0
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_edit_feature_updates_thread_size_on_existing_threaded_hole() -> None:
+    with load_features() as module:
+        hole = FakeFeature(
+            "Hole",
+            "PartDesign::Hole",
+            properties=("Diameter", "Depth", "ThreadType", "Threaded", "ThreadSize"),
+            shape=FakeShape(),
+            enumerations={"ThreadSize": ["M6", "M8"]},
+        )
+        object.__setattr__(
+            hole,
+            "_values",
+            {
+                "Diameter": 4.0,
+                "Depth": 10.0,
+                "ThreadType": "ISOMetricProfile",
+                "Threaded": True,
+                "ThreadSize": "M6",
+            },
+        )
+        body = FakeBody(members=[hole], shape=hole.Shape)
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.append(hole)
+        ctx = FakeCtx(doc)
+
+        result = module.HANDLERS["edit_feature"](
+            ctx,
+            {
+                "document": "Doc",
+                "body": "Body",
+                "object": "Hole",
+                "parameters": {"thread_size": "M8"},
+            },
+        )
+
+        assert hole.ThreadSize == "M8"
+        assert "thread_size->ThreadSize=M8" in result["applied"]
+        rows = {row["name"]: row for row in result["change"]["properties"]}
+        assert rows["thread_size"] == {"name": "thread_size", "before": "M6", "after": "M8"}
+        assert doc.transactions[-1] == ("commit",)
