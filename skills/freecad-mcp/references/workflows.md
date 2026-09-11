@@ -4,13 +4,13 @@ Use this reference to choose a stable modeling history and to recover from featu
 
 ## PartDesign workflow
 
-A PartDesign Body represents one component and contains cumulative features. A typical sequence is:
+A PartDesign Body represents one component and contains cumulative features. Shapeless and null-shape objects are valid, so the whole chain can be built with the structured tools; no `run_script` bootstrap is needed. A typical sequence is:
 
-1. Create a `PartDesign::Body` through `run_script`. No structured tool can create it, because an empty Body has a null shape.
-2. Create a sketch in the Body with `body.newObject("Sketcher::SketchObject", ...)` and attach it with `AttachmentSupport` and `MapMode`.
-3. Constrain a closed profile. Build it through `edit_sketch`, or natively in the same script. See [Sketcher profiles](sketcher.md).
-4. Pad or revolve it into a base with `body.newObject("PartDesign::Pad", ...)`. This first feature also has to be native: `create_feature` cannot act on a Body that has no solid yet.
-5. Add pockets, holes, additive/subtractive features, patterns, and dress-ups with `create_feature`, now that the Body holds a solid.
+1. Create the Body with `create_object` and type `PartDesign::Body`; it reports `solid_count: 0` until it holds a solid.
+2. Create the sketch and its attachment with `create_feature` (`kind: "sketch"`, a `support`, and an explicit `MapMode`).
+3. Constrain a closed profile with `edit_sketch`. See [Sketcher profiles](sketcher.md).
+4. Pad or revolve it into a base with `create_feature` (`kind: "pad"` and `profile`, or `kind: "revolve"` with an axis). `create_feature` acts on an empty Body.
+5. Add pockets, holes, additive/subtractive features, patterns, and dress-ups with `create_feature`.
 6. Keep fillets/chamfers/thickness late where possible.
 7. Inspect the Body `Tip` after each feature.
 

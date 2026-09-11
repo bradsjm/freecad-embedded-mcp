@@ -388,16 +388,6 @@ sys.modules["PySide.QtCore"] = _core
 sys.modules["PySide.QtGui"] = _gui
 sys.modules["PySide.QtWidgets"] = _widgets
 
-# server.py has already bound the harness's stub tool modules; drop the
-# fake tool package from sys.modules so alphabetically-later test files
-# import the real tool modules again.
-for _name in [
-    _key
-    for _key in list(sys.modules)
-    if _key == "mcp_server.tools" or _key.startswith("mcp_server.tools.")
-]:
-    del sys.modules[_name]
-
 import mcp_server.server as server_module
 from mcp_server import (
     commands,

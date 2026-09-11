@@ -670,7 +670,9 @@ class TestBuilders:
         )
         result = protocol.tool_error_result(error)
         assert result["isError"] is True
-        assert result["content"] == [{"type": "text", "text": "document not found"}]
+        assert result["content"] == [
+            {"type": "text", "text": "DOCUMENT_NOT_FOUND: document not found"}
+        ]
         assert result["structuredContent"] == {
             "error": {
                 "code": "DOCUMENT_NOT_FOUND",

@@ -507,6 +507,26 @@ def dependent_count(targets: Sequence[Any], limit: int = _MAX_DEPENDENTS) -> int
     return len(dependents)
 
 
+def _reveal(ctx: Any, doc: Any, targets: Sequence[Any]) -> None:
+    """Ask the context to frame the mutated objects in the 3D view.
+
+    Purely presentational: an unavailable GUI, a headless run or a refused
+    hook must never turn a committed mutation into a failure, and this
+    module still imports no FreeCAD or Qt.
+    """
+
+    hook = getattr(ctx, "reveal_objects", None)
+    if not callable(hook):
+        return
+    try:
+        hook(doc, list(targets))
+    except BaseException:
+        # Presentation is best effort even for a KeyboardInterrupt raised
+        # inside the hook: the mutation has already committed, so letting
+        # anything escape here would report a committed change as failed.
+        return
+
+
 @contextmanager
 def mutation(
     ctx: Any,
@@ -519,6 +539,8 @@ def mutation(
     expectations: Mapping[str, Mapping[str, Any]] | None = None,
     *,
     outcome: dict | None = None,
+    validate_after_recompute: Callable[[], None] | None = None,
+    check_workload: Callable[[Any, list[Any]], None] | None = None,
 ) -> Any:
     """Run one tool mutation inside its own FreeCAD transaction.
 
@@ -652,7 +674,15 @@ def mutation(
             # reported names were captured at entry for pre-known targets.
             target_names = pre_target_names or {str(getattr(obj, "Name", "")) for obj in targets}
 
+            if check_workload is not None:
+                check_workload(ctx, targets)
+                # Upstream edits recompute their dependents: a sketch driving
+                # an oversized pattern must be refused by the same admission,
+                # not only a direct pattern target.
+                check_workload(ctx, dependents)
             doc.recompute()
+            if validate_after_recompute is not None:
+                validate_after_recompute()
             # A removed object's Python wrapper can survive the removal with
             # a dead Name; it is no longer document content and must not be
             # validated (its Touched state would roll every deletion back).
@@ -775,6 +805,10 @@ def mutation(
                     },
                 ) from commit_exc
             _force_close_surviving_transaction(ctx, doc, label)
+            # A committed change should be visible without the user hunting
+            # for it: frame the view on what changed. This is presentation
+            # only and never fails the mutation.
+            _reveal(ctx, doc, targets)
         except BaseException as exc:
             applied.clear()
             try:

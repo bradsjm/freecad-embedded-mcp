@@ -30,7 +30,8 @@ The [Sketcher scripting](https://wiki.freecad.org/Sketcher_scripting) page defin
 - `deleteGeometry` and `deleteConstraints` run first, in descending index order. A multi-delete therefore uses pre-delete indices.
 - `addGeometry` then appends in list order. The response returns the new indices in `addedGeometry`.
 - `addConstraints` then appends in list order. The response returns the new indices in `addedConstraints`.
-- `setDatums` indices refer to the final constraint state after the deletes and the additions.
+- `setDatums` and `setExpressions` indices refer to the final constraint state after the deletes and the additions. One index cannot receive both a datum and an expression in the same batch.
+- `deleteGeometry` cannot be combined with `setDatums` or `setExpressions` in one batch: deleting geometry removes the constraints attached to it and renumbers the survivors. Delete first, then edit the surviving constraints from a fresh `inspect_sketch`.
 - A constraint that references geometry added in the same batch must use the index that the new geometry will receive. Add the geometry in one batch, read `addedGeometry`, then add the constraints in the next batch. This keeps the indices unambiguous.
 - `edit_sketch` refuses an object that is not a `Sketcher::SketchObject`, and refuses an empty batch.
 
@@ -42,6 +43,11 @@ The [Sketcher scripting](https://wiki.freecad.org/Sketcher_scripting) page defin
 | `lineSegment` | `start`, `end` | Each value is an `[x, y]` pair, in millimetres. |
 | `circle` | `center`, `radius` | `radius` must be positive. |
 | `arcOfCircle` | `center`, `radius`, `startAngle`, `endAngle` | Angles are radians, not degrees. |
+| `rectangle` | `origin`, `width`, `height` | Expands to four line segments. Width and height are positive. |
+| `polyline` | `points`, `closed` | 2–32 `[x, y]` points; `closed: true` needs 3+. No adjacent duplicate points and no repeated closing point. |
+| `regularPolygon` | `center`, `radius`, `sides` | 3–32 sides; `radius` is the circumscribed radius; optional `rotation` in degrees. |
+
+The composite kinds (`rectangle`, `polyline`, `regularPolygon`) are semantic profiles: `edit_sketch` expands them into proven `lineSegment` operations and appends the closing constraints for you — `Coincident` joints on every composite, plus `Horizontal`/`Vertical` on a rectangle. The expanded geometry consumes one geometry index per segment. In the same batch, the explicit `addConstraints` take the lower constraint indices and the auto constraints follow them. Expansion also counts against the 64-entry cap: a rectangle is 10 operations (4 geometry, 6 constraints). Read `addedGeometry` and `addedConstraints` from the response to learn the real indices.
 
 Every entry accepts `construction: true` for construction geometry. `inspect_sketch` reports the flag from the native `getConstruction(index)` call. Confirm the angle unit on the same call. Passing `startAngle: 0` and `endAngle: 180` produced a native arc that ends at 4.07 radians, which is 180 radians reduced modulo 2π.
 
@@ -75,6 +81,10 @@ Datum strings carry a unit: `"40 mm"`, `"30 mm"`, `"90 deg"`. The value lands in
 
 The server converts each datum string to a native `FreeCAD.Units.Quantity` before it calls `setDatum`. A datum that is not a valid quantity fails with `VALIDATION_FAILED` before the transaction opens.
 
+## setExpressions
+
+`setExpressions` binds a FreeCAD expression to a datum constraint: each entry is `{"index": <final constraint index>, "expression": "..."}`. The server calls `setExpression("Constraints[index]", expression)`; an `expression` of `null` clears an existing binding. Expressions are at most 256 characters. `inspect_sketch` and `edit_sketch` return the live bindings in `expressionBindings`.
+
 ## Create the sketch, then edit it
 
 Create a sketch inside a `PartDesign::Body` with `create_feature`:
@@ -90,7 +100,19 @@ Create a sketch inside a `PartDesign::Body` with `create_feature`:
 }
 ```
 
-The server applies the attachment through `AttachmentSupport` on FreeCAD 1.1.3 and requires the explicit `MapMode`. Create a standalone sketch with `create_object` and type `Sketcher::SketchObject`.
+The server applies the attachment through `AttachmentSupport` on FreeCAD 1.1.3 and requires the explicit `MapMode`. The typed-parameters route attaches the sketch to a Body origin plane without `support` or `properties`:
+
+```json
+{
+  "document": "Part",
+  "body": "Body",
+  "kind": "sketch",
+  "name": "Profile",
+  "parameters": {"plane": "xy"}
+}
+```
+
+`plane` and `support` are mutually exclusive attachment targets. Create a standalone sketch with `create_object` and type `Sketcher::SketchObject`.
 
 ## Sequence that works
 

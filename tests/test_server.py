@@ -12,6 +12,7 @@ No sockets: requests are driven through ``protocol.validate_request`` +
 ``Server.dispatch`` exactly as the HTTP layer does.
 """
 
+import json
 import queue
 import sys
 import threading
@@ -179,7 +180,7 @@ _GEOMETRY_TOOLS = ("validate_geometry", "measure", "inspect_topology")
 _OTHER_TOOLS = {
     "parameters": ("edit_parameters",),
     "sketch": ("inspect_sketch", "edit_sketch"),
-    "features": ("create_feature",),
+    "features": ("create_feature", "edit_feature"),
     "export": ("export",),
     "view": ("capture_view",),
     "fem": ("run_fem",),
@@ -296,6 +297,29 @@ from mcp_server import (
     protocol,
 )
 
+
+def _drop_stub_tool_modules() -> None:
+    """Remove the stub tool package from ``sys.modules`` after server import.
+
+    ``server_module`` captured the stub definitions, handlers and the
+    documents dirty rule at import time and keeps direct references to them,
+    so the stub modules are not needed in ``sys.modules`` afterwards. Leaving
+    them there shadowed the real ``mcp_server.tools.*`` for every test file
+    imported later in the same process, which made the suite pass or fail
+    depending on the file order. Removing them here lets any later import
+    load the real tool modules again, whatever the order.
+    """
+
+    for _name in [
+        _key
+        for _key in list(sys.modules)
+        if _key == "mcp_server.tools" or _key.startswith("mcp_server.tools.")
+    ]:
+        del sys.modules[_name]
+
+
+_drop_stub_tool_modules()
+
 # ---------------------------------------------------------------------------
 # Helpers.
 # ---------------------------------------------------------------------------
@@ -339,6 +363,9 @@ def make_server(clock=None) -> "server_module.Server":
             "auto_start": False,
             "allowed_ips": "127.0.0.1",
             "allowed_roots": ["/tmp/fc-test"],
+            "allow_scripts": True,
+            "recovery_enabled": False,
+            "recovery_directory": "",
         },
         signer=protocol.ConsentSigner(ttl_s=60.0),
         task_store=tasks_module.TaskStore(),
@@ -462,19 +489,152 @@ def _reset_dispatcher_for_tests() -> ThreadedWaker:
 # ---------------------------------------------------------------------------
 
 
-def test_tools_list_returns_exactly_24_in_plan_order():
+def test_tools_list_returns_exactly_25_in_plan_order():
     server = make_server()
     response = dispatch(server, "tools/list")
     result = response["result"]
     names = [tool["name"] for tool in result["tools"]]
     assert names == list(server_module.PLAN_TOOL_ORDER)
-    assert len(names) == 24
+    assert len(names) == 25
     assert names[0] == "discover_capabilities"
     assert names[1] == "inspect_documents"
     assert result["resultType"] == "complete"
     assert result["_meta"][META_SERVER_INFO] == protocol.SERVER_INFO
-    assert result["ttlMs"] == 3_600_000
-    assert result["cacheScope"] == "public"
+    # The exposed surface follows the active settings, so it is never
+    # publicly cacheable.
+    assert result["ttlMs"] == 0
+    assert result["cacheScope"] == "private"
+
+
+def test_reveal_applies_the_capture_orientation_and_restores_state():
+    """A reveal uses the same perspective as capture_view and never raises."""
+    server = make_server()
+    events: list[tuple[str, object]] = []
+
+    class FakeView:
+        def viewIsometric(self) -> None:
+            events.append(("orientation", "viewIsometric"))
+
+    class FakeGuiDocument:
+        ActiveView = FakeView()
+
+    class FakeSelection:
+        def __init__(self) -> None:
+            self.entries: list[str] = []
+
+        def getSelectionEx(self):
+            return []
+
+        def clearSelection(self) -> None:
+            events.append(("clear", None))
+
+        def addSelection(self, obj, *subelements) -> None:
+            self.entries.append(str(getattr(obj, "Name", obj)))
+
+    class FakeGui:
+        Selection = FakeSelection()
+        ActiveDocument = types.SimpleNamespace(Name="Doc")
+
+        @staticmethod
+        def getDocument(name):
+            return FakeGuiDocument() if name == "Doc" else None
+
+        @staticmethod
+        def setActiveDocument(name):
+            events.append(("activeDocument", name))
+
+        @staticmethod
+        def SendMsgToActiveView(command):
+            events.append(("view", command))
+
+    fake_gui = FakeGui()
+    previous_gui = sys.modules.get("FreeCADGui")
+    # ``from .tools import view`` resolves the package attribute before the
+    # module entry, so both are patched; missing either one would silently
+    # leave the real module in place and make this test order-dependent.
+    import mcp_server.tools as tools_pkg
+
+    previous_view = sys.modules.get("mcp_server.tools.view")
+    previous_view_attr = getattr(tools_pkg, "view", None)
+    view_stub = types.ModuleType("mcp_server.tools.view")
+    view_stub._VIEW_METHODS = {"Isometric": "viewIsometric"}
+    view_stub._disable_navigation_animations = lambda: events.append(("animations", "off"))
+    view_stub._restore_navigation_animations = lambda state: events.append(("animations", "on"))
+    sys.modules["mcp_server.tools.view"] = view_stub
+    tools_pkg.view = view_stub
+    sys.modules["FreeCADGui"] = fake_gui
+    try:
+        op = server_module._Operation(
+            op_id="op",
+            name="edit_object",
+            kind="blocking",
+            task_id=None,
+            principal=None,
+            deadline_mono=0.0,
+            deadline_s=60.0,
+        )
+        ctx = server_module._OpContext(server, operation=op, approved_target=None)
+        target = types.SimpleNamespace(Name="Body")
+
+        ctx.reveal_objects(types.SimpleNamespace(Name="Doc"), [target])
+    finally:
+        if previous_gui is None:
+            sys.modules.pop("FreeCADGui", None)
+        else:
+            sys.modules["FreeCADGui"] = previous_gui
+        if previous_view is None:
+            sys.modules.pop("mcp_server.tools.view", None)
+        else:
+            sys.modules["mcp_server.tools.view"] = previous_view
+        if previous_view_attr is None:
+            if getattr(tools_pkg, "view", None) is view_stub:
+                del tools_pkg.view
+        else:
+            tools_pkg.view = previous_view_attr
+
+    assert ("orientation", "viewIsometric") in events
+    assert ("view", "ViewSelection") in events
+    assert ("animations", "off") in events
+    assert ("animations", "on") in events
+    assert fake_gui.Selection.entries == ["Body"]
+
+
+def test_reveal_never_raises_when_the_gui_is_unavailable():
+    server = make_server()
+    op = server_module._Operation(
+        op_id="op",
+        name="edit_object",
+        kind="blocking",
+        task_id=None,
+        principal=None,
+        deadline_mono=0.0,
+        deadline_s=60.0,
+    )
+    ctx = server_module._OpContext(server, operation=op, approved_target=None)
+
+    # No such document: the reveal is a no-op rather than a mutation failure.
+    ctx.reveal_objects(types.SimpleNamespace(Name="Missing"), [object()])
+
+
+def test_disabled_run_script_is_absent_from_every_advertised_surface():
+    """A disabled tool is invisible: no advertised text may name it."""
+    server = make_server()
+    server.settings["allow_scripts"] = False
+
+    payload = dispatch(server, "tools/list")["result"]
+    names = [tool["name"] for tool in payload["tools"]]
+    assert "run_script" not in names
+    # Nothing anywhere in the advertised definitions may mention it, so a
+    # model reading the tool list cannot learn the tool exists.
+    assert "run_script" not in json.dumps(payload)
+
+    from mcp_server import legacy_protocol
+
+    assert "run_script" not in legacy_protocol._SERVER_INSTRUCTIONS
+
+    server.settings["allow_scripts"] = True
+    enabled = dispatch(server, "tools/list")["result"]
+    assert "run_script" in [tool["name"] for tool in enabled["tools"]]
 
 
 def test_discovery_is_gui_independent_and_complete():
@@ -493,7 +653,11 @@ def test_discovery_is_gui_independent_and_complete():
     result = response["result"]
     assert result["supportedVersions"] == ["2026-07-28"]
     # Default discover returns the latest successful immutable cache.
-    assert result["capabilities"] == {"freecad": {"version": [1, 1, 3]}}
+    assert result["capabilities"] == {
+        "freecad": {"version": [1, 1, 3]},
+        "scriptingEnabled": True,
+        "recoveryEnabled": False,
+    }
     assert result["supportedTypesDocument"] is None
     assert result["refreshError"] is None
     assert "gui" not in result
@@ -530,6 +694,8 @@ def test_discover_capabilities_tool_never_touches_the_gui():
         "freecad": {"version": [1, 1, 3]},
         "supportedTypesCount": None,
         "supportedTypesDocument": None,
+        "scriptingEnabled": True,
+        "recoveryEnabled": False,
     }
     assert set(result["structuredContent"]["gui"]) == {
         "state",
@@ -1935,7 +2101,10 @@ def test_discover_refresh_requires_known_document():
     assert result["refreshError"]["code"] == "DOCUMENT_NOT_FOUND"
     assert result["refreshError"]["message"] == "no such document: Missing"
     # A failed refresh leaves the cache untouched.
-    assert result["capabilities"] == {}
+    assert result["capabilities"] == {
+        "scriptingEnabled": True,
+        "recoveryEnabled": False,
+    }
     assert result["supportedTypesDocument"] is None
     assert "gui" in result
 
@@ -2019,6 +2188,8 @@ def test_discover_capabilities_compact_default_omits_heavy_arrays():
         "fem",
         "supportedTypesCount",
         "supportedTypesDocument",
+        "scriptingEnabled",
+        "recoveryEnabled",
     }
     assert capabilities["freecad"] == {"version": [1, 1, 3]}
     assert capabilities["exporters"] == {"part": True}
@@ -2041,7 +2212,11 @@ def test_discover_capabilities_full_detail_returns_complete_snapshot():
         {"name": "discover_capabilities", "arguments": {"detail": "full"}},
         rpc_id=22,
     )["result"]["structuredContent"]["capabilities"]
-    assert capabilities == snapshot
+    assert capabilities == {
+        **snapshot,
+        "scriptingEnabled": True,
+        "recoveryEnabled": False,
+    }
     assert capabilities["workbenches"] == {"Part": {}, "Mesh": {}}
     assert capabilities["supportedTypes"] == ["Mesh::Mesh", "Part::Feature"]
     assert capabilities["paths"] == {"home": "/fc"}

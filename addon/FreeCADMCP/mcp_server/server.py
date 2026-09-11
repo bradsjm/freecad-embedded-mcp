@@ -159,7 +159,7 @@ from mcp_server.tools.view import (
 #: Tool errors are complete ``isError`` results, never JSON-RPC errors.
 SERVER_BUSY = "SERVER_BUSY"
 
-#: The 24 registered tools, in the exact plan section 5 order.
+#: The 25 registered tools, in the exact plan section 5 order.
 PLAN_TOOL_ORDER = (
     "discover_capabilities",
     "inspect_documents",
@@ -181,14 +181,59 @@ PLAN_TOOL_ORDER = (
     "inspect_sketch",
     "edit_sketch",
     "create_feature",
+    "edit_feature",
     "export",
     "capture_view",
     "run_fem",
     "run_script",
 )
 
+_READ_ONLY_TOOLS = frozenset(
+    {
+        "discover_capabilities",
+        "inspect_documents",
+        "inspect_objects",
+        "inspect_topology",
+        "validate_geometry",
+        "measure",
+    }
+)
+_IDEMPOTENT_TOOLS = _READ_ONLY_TOOLS | {"inspect_sketch", "capture_view"}
+_OPEN_WORLD_TOOLS = frozenset(
+    {
+        "open_document",
+        "import_model",
+        "save_document",
+        "reload_document",
+        "close_document",
+        "export",
+        "run_fem",
+        "run_script",
+    }
+)
+
+
+def _tool_annotations(name: str) -> dict[str, bool]:
+    """Return the fixed advisory policy for one registered tool."""
+
+    if name not in PLAN_TOOL_ORDER:
+        raise RuntimeError(f"tool {name} has no annotation policy")
+    read_only = name in _READ_ONLY_TOOLS
+    return {
+        "readOnlyHint": read_only,
+        "destructiveHint": not read_only,
+        "idempotentHint": name in _IDEMPOTENT_TOOLS,
+        "openWorldHint": name in _OPEN_WORLD_TOOLS,
+    }
+
+
 #: One operation cap across blocking calls and tasks (plan section 4).
 MAX_OPERATIONS = 32
+
+#: Orientation applied when a committed mutation reveals its targets. This is
+#: the same Isometric perspective ``capture_view`` documents as its first
+#: named view, so a reveal and a capture show the model the same way.
+_REVEAL_ORIENTATION = "Isometric"
 
 #: Ordinary GUI deadline; export/measure get 600 s; script/FEM use their
 #: ``timeout_s`` argument clamped to 1..3600 (plan section 6).
@@ -376,6 +421,10 @@ class _Operation:
     #: Dispatcher handle for submitted work (task path): lets the
     #: deadline sweep mark a detached job timed out without a waiter.
     future: concurrent.futures.Future | None = None
+    #: Verified recovery receipt once this operation published a checkpoint.
+    #: Kept on the operation, not the context, so timeout and infrastructure
+    #: error paths can still report the copy that was created.
+    checkpoint: dict | None = None
 
 
 class _OpContext:
@@ -420,6 +469,136 @@ class _OpContext:
         """
 
         self.operation.deadline_mono = float("inf")
+
+    def checkpoint_before_mutation(self, doc: Any, label: str) -> dict:
+        """Create and verify one recovery copy when recovery is enabled."""
+
+        if not bool(self.settings.get("recovery_enabled", False)):
+            return {}
+        from .tools.recovery import checkpoint_before_mutation
+
+        receipt = checkpoint_before_mutation(self, doc, label)
+        self.operation.checkpoint = receipt
+        return receipt
+
+    def reveal_objects(self, doc: Any, targets: list[Any]) -> None:
+        """Frame the 3D view on the objects a mutation just changed.
+
+        The user should see a change without hunting for it. The view is
+        switched to the same orientation ``capture_view`` uses by default
+        (Isometric) and then framed on the changed objects, so a reveal and a
+        capture show the same perspective. As with capture, navigation
+        animations are disabled around the orientation change: an animated
+        camera would otherwise still be mid-flight when the framing runs.
+
+        The mutation's own document is activated first, so a mutation on a
+        background document frames that document instead of the visible one,
+        and the caller's selection and active document are restored
+        afterwards. Never raises: a headless run, an unloaded GUI module or a
+        third-party view that rejects the call must not fail the mutation
+        that already committed.
+        """
+
+        live = [obj for obj in targets if obj is not None]
+        if not live:
+            return
+        try:
+            import FreeCADGui
+
+            from .tools import view as view_tools
+
+            document_name = str(getattr(doc, "Name", ""))
+            if not document_name:
+                return
+            previous_document = FreeCADGui.ActiveDocument
+            previous_name = str(getattr(previous_document, "Name", "")) or None
+            gui_document = FreeCADGui.getDocument(document_name)
+            if gui_document is None:
+                return
+            view = getattr(gui_document, "ActiveView", None)
+            if view is None:
+                return
+
+            # ``clearSelection`` is global, so selections in every open
+            # document are snapshotted and restored, not just the active one.
+            previous_selections: list[tuple[str, list[Any]]] = []
+            for other_name in FreeCAD.listDocuments():
+                other_gui = FreeCADGui.getDocument(other_name)
+                if other_gui is None:
+                    continue
+                try:
+                    entries = list(FreeCADGui.Selection.getSelectionEx(other_name) or ())
+                except Exception:
+                    entries = []
+                if entries:
+                    previous_selections.append((other_name, entries))
+
+            if previous_name != document_name:
+                self._safe(lambda: self.App.setActiveDocument(document_name))
+                self._safe(lambda: FreeCADGui.setActiveDocument(document_name))
+
+            def _reselect(entry: Any, subelement: str | None) -> None:
+                """Re-add one snapshot entry; ``None`` restores the whole object."""
+
+                if subelement is None:
+                    FreeCADGui.Selection.addSelection(entry.Object)
+                else:
+                    FreeCADGui.Selection.addSelection(entry.Object, subelement)
+
+            animations = view_tools._disable_navigation_animations()
+            try:
+                orientation = getattr(view, view_tools._VIEW_METHODS[_REVEAL_ORIENTATION], None)
+                if callable(orientation):
+                    orientation()
+                    gui_dispatch._flush_gui_events()
+                FreeCADGui.Selection.clearSelection()
+                for obj in live:
+                    try:
+                        FreeCADGui.Selection.addSelection(obj)
+                    except Exception:
+                        continue
+                # Framing the selection both recenters the camera and zooms
+                # it to the changed geometry, so the change is visible in the
+                # standard capture perspective whatever the user had open.
+                FreeCADGui.SendMsgToActiveView("ViewSelection")
+                gui_dispatch._flush_gui_events()
+            finally:
+                self._safe(lambda: view_tools._restore_navigation_animations(animations))
+                self._safe(FreeCADGui.Selection.clearSelection)
+                for _other_name, entries in previous_selections:
+                    for entry in entries:
+                        subelements = [
+                            str(sub) for sub in (getattr(entry, "SubElementNames", None) or [])
+                        ]
+                        if not subelements:
+                            self._safe(lambda entry=entry: _reselect(entry, None))
+                            continue
+                        for subelement in subelements:
+                            self._safe(
+                                lambda entry=entry, subelement=subelement: _reselect(
+                                    entry, subelement
+                                )
+                            )
+                if previous_name is not None and previous_name != document_name:
+                    self._safe(lambda: self.App.setActiveDocument(previous_name))
+                    self._safe(lambda: FreeCADGui.setActiveDocument(previous_name))
+        except Exception:
+            return
+
+    @staticmethod
+    def _safe(step: Callable[[], None]) -> None:
+        """Run one best-effort restore step; failures never skip the rest."""
+
+        try:
+            step()
+        except Exception:
+            return
+
+    @property
+    def checkpoint(self) -> dict | None:
+        """The recovery receipt of this operation, or ``None``."""
+
+        return self.operation.checkpoint
 
 
 @dataclass
@@ -525,6 +704,18 @@ class Server:
             raise RuntimeError(f"unexpected tools registered: {extra}")
         self._tool_defs = [self._definitions[name] for name in PLAN_TOOL_ORDER]
 
+    def _tool_enabled(self, name: str) -> bool:
+        """Return whether one registered tool is exposed on the wire.
+
+        Only ``run_script`` depends on a setting: full local scripting is
+        opt-in through ``allow_scripts`` (default false). Every other
+        registered tool is always enabled.
+        """
+
+        if name != "run_script":
+            return True
+        return bool(self.settings.get("allow_scripts", False))
+
     def _add_definition(self, definition: Any, handlers: Any, preflight: Any) -> None:
         name, description, input_schema, output_schema = _unpack_definition(definition)
         if name in self._definitions:
@@ -538,6 +729,7 @@ class Server:
             "description": description,
             "inputSchema": dict(input_schema),
             "outputSchema": dict(output_schema),
+            "annotations": _tool_annotations(name),
         }
         self._handlers[name] = self._resolve_handler(name, handlers)
         if preflight is not None:
@@ -603,10 +795,22 @@ class Server:
     def require_object(self, doc: Any, name: str) -> Any:
         obj = doc.getObject(name)
         if obj is None:
+            try:
+                from .tools.objects import _suggestions
+
+                candidates = [str(entry.Name) for entry in (doc.Objects or ())]
+                suggestions = _suggestions(name, candidates)
+            except Exception:
+                suggestions = []
             raise ToolError(
                 OBJECT_NOT_FOUND,
                 f"no such object: {name}",
-                {"document": doc.Name, "object": name},
+                {
+                    "document": doc.Name,
+                    "object": name,
+                    "suggestions": suggestions,
+                    "nextAction": "inspect_objects",
+                },
             )
         return obj
 
@@ -805,6 +1009,8 @@ class Server:
         capabilities = {
             key: value for key, value in snapshot.items() if key != "supportedTypesDocument"
         }
+        capabilities["scriptingEnabled"] = bool(self.settings.get("allow_scripts", False))
+        capabilities["recoveryEnabled"] = bool(self.settings.get("recovery_enabled", False))
         return {
             "supportedVersions": [SUPPORTED_PROTOCOL_VERSION],
             "capabilities": capabilities,
@@ -880,8 +1086,11 @@ class Server:
         return copy.deepcopy(snapshot) if snapshot else {}
 
     def _dispatch_tools_list(self, validated: dict) -> dict:
-        payload = {"tools": [dict(d) for d in self._tool_defs]}
-        return _with_caching(_rpc_result(validated["id"], complete_result(payload)), CACHE_PUBLIC)
+        payload = {"tools": [dict(d) for d in self._tool_defs if self._tool_enabled(d["name"])]}
+        # The exposed surface depends on the active settings, so the list is
+        # never publicly cacheable: a cached full list would outlive a
+        # restart that disables scripting.
+        return _with_caching(_rpc_result(validated["id"], complete_result(payload)), CACHE_PRIVATE)
 
     def _tool_discover_capabilities(self, ctx: Any, arguments: dict) -> dict:
         """The private snapshot tool: no nested GUI dispatch, ever.
@@ -905,6 +1114,10 @@ class Server:
             projection = capabilities
         else:
             projection = _compact_capabilities(capabilities)
+        # Settings-derived flags are part of every discovery projection, not
+        # of the cached static snapshot they are merged into.
+        projection["scriptingEnabled"] = bool(self.settings.get("allow_scripts", False))
+        projection["recoveryEnabled"] = bool(self.settings.get("recovery_enabled", False))
         return {
             "capabilities": projection,
             "gui": _gui_health_snapshot(),
@@ -961,6 +1174,11 @@ class Server:
     ) -> dict | StreamResponse:
         params = validated["params"]
         name = params.get("name")
+        if isinstance(name, str) and name in self._definitions and not self._tool_enabled(name):
+            # A disabled tool is not part of the surface: reject it before
+            # argument-shape validation, schema checks, consent, operation
+            # allocation or GUI dispatch.
+            raise ProtocolError(METHOD_NOT_FOUND, f"unknown tool: {name}")
         arguments = params.get("arguments")
         if arguments is None:
             arguments = {}
@@ -971,6 +1189,8 @@ class Server:
             )
         definition = self._definitions.get(name)
         if definition is None or name not in self._handlers:
+            raise ProtocolError(METHOD_NOT_FOUND, f"unknown tool: {name}")
+        if not self._tool_enabled(name):
             raise ProtocolError(METHOD_NOT_FOUND, f"unknown tool: {name}")
         validate_schema(arguments, definition["inputSchema"])
 
@@ -1197,6 +1417,13 @@ class Server:
         if empty:
             self._maybe_finish_draining()
 
+    def _operation_checkpoint(self, op_id: str) -> dict | None:
+        """Receipt of one registered operation, or ``None``."""
+
+        with self._ops_lock:
+            op = self._ops.get(op_id)
+        return dict(op.checkpoint) if op is not None and op.checkpoint else None
+
     def _release_operation_on_outcome(self, op: _Operation, outcome: Any) -> None:
         """Drop the operation at TRUE completion, flattening async futures.
 
@@ -1317,8 +1544,15 @@ class Server:
 
         def runner() -> Any:
             try:
-                return handler(op_ctx, arguments)
+                result = handler(op_ctx, arguments)
+                if isinstance(result, dict) and op_ctx.checkpoint:
+                    result["checkpoint"] = dict(op_ctx.checkpoint)
+                return result
             except ToolError as exc:
+                if op_ctx.checkpoint and not isinstance(exc.details, str):
+                    merged = dict(exc.details or {})
+                    merged.setdefault("checkpoint", dict(op_ctx.checkpoint))
+                    exc.details = merged
                 return exc  # preserved through the dispatcher as the value
 
         events: queue.SimpleQueue = queue.SimpleQueue()
@@ -1377,6 +1611,7 @@ class Server:
             if isinstance(value, concurrent.futures.Future):
                 value = self._await_async_value(name, value, op)
             if isinstance(value, ToolError):
+                self._merge_receipt(value, op.checkpoint)
                 return tool_error_result(value)
             return self._validated_tool_result(name, value)
         error = outcome.error
@@ -1389,7 +1624,23 @@ class Server:
         else:
             details = {"traceback": outcome.traceback} if outcome.traceback else None
             tool_exc = ToolError(GUI_DISPATCH_FAILED, error, details)
+        self._merge_receipt(tool_exc, op.checkpoint)
         return tool_error_result(tool_exc)
+
+    def _merge_receipt(self, error: ToolError, receipt: dict | None) -> None:
+        """Report a published checkpoint on a failed operation.
+
+        A verified pre-operation copy already exists; the caller needs its
+        path even though the operation failed, timed out, or was cancelled.
+        """
+
+        if not receipt:
+            return
+        if not isinstance(error.details, Mapping):
+            error.details = {}
+        merged = dict(error.details or {})
+        merged.setdefault("checkpoint", dict(receipt))
+        error.details = merged
 
     def _await_async_value(
         self, name: str, future: concurrent.futures.Future, op: _Operation
@@ -1473,8 +1724,15 @@ class Server:
 
         def runner() -> Any:
             try:
-                return handler(op_ctx, arguments)
+                result = handler(op_ctx, arguments)
+                if isinstance(result, dict) and op_ctx.checkpoint:
+                    result["checkpoint"] = dict(op_ctx.checkpoint)
+                return result
             except ToolError as exc:
+                if op_ctx.checkpoint and not isinstance(exc.details, str):
+                    merged = dict(exc.details or {})
+                    merged.setdefault("checkpoint", dict(op_ctx.checkpoint))
+                    exc.details = merged
                 return exc
 
         task_id = record.task_id
@@ -1515,6 +1773,9 @@ class Server:
             else:
                 details = {"traceback": outcome.traceback} if outcome.traceback else None
                 tool_exc = ToolError(GUI_DISPATCH_FAILED, error_text, details)
+                receipt = self._operation_checkpoint(op_id)
+                if receipt:
+                    self._merge_receipt(tool_exc, receipt)
                 self._task_store.complete(
                     task_id,
                     tool_error_result(tool_exc),
@@ -1540,6 +1801,9 @@ class Server:
         self, task_id: str, op_id: str, principal: str, name: str, value: Any
     ) -> None:
         if isinstance(value, ToolError):
+            receipt = self._operation_checkpoint(op_id)
+            if receipt:
+                self._merge_receipt(value, receipt)
             self._task_store.complete(
                 task_id,
                 tool_error_result(value),
@@ -1963,6 +2227,9 @@ class Server:
                 "remote_enabled": bool(self.settings.get("remote_enabled", False)),
                 "allowed_ips": str(self.settings.get("allowed_ips", "")),
                 "configured_port": self.settings.get("port"),
+                "allow_scripts": bool(self.settings.get("allow_scripts", False)),
+                "recovery_enabled": bool(self.settings.get("recovery_enabled", False)),
+                "recovery_directory": str(self.settings.get("recovery_directory", "")),
             },
         }
 

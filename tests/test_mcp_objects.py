@@ -1178,7 +1178,10 @@ def test_create_fem_mesh_type_is_refused_with_guidance() -> None:
         )
 
     expect_tool_error(exc_info, VALIDATION_FAILED)
-    assert "run_script" in exc_info.value.message
+    assert "FEM mesh objects are not created by create_object" in exc_info.value.message
+    # The opt-in scripting tool is never named here: a disabled tool must stay
+    # invisible, so the refusal carries no pointer to it.
+    assert "run_script" not in exc_info.value.message
     assert doc.calls == []
 
 
@@ -1289,6 +1292,10 @@ def test_full_detail_rows_add_placement_and_property_pages() -> None:
         "propertyCount",
         "nextPropertyOffset",
         "truncatedProperties",
+        "bodyTip",
+        "features",
+        "featuresTruncated",
+        "origins",
     }
     assert row["boundsCoordinateSystem"] == "document"
     assert row["properties"]["Length"] == 0

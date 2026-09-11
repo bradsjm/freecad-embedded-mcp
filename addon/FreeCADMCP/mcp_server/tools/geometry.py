@@ -48,6 +48,7 @@ _DEFAULT_TOPOLOGY_PAGE = 50
 
 _NUMERIC_SUBELEMENT = re.compile(r"(?:Face|Edge|Vertex|Wire)\d+")
 _SUBELEMENT_INDEX = re.compile(r"(Face|Edge)([1-9][0-9]*)")
+_MAX_SUBELEMENT_LIST = 32
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +288,69 @@ def resolve_reference(ctx: Any, doc: Any, reference: Any) -> tuple[Any, str]:
             {"reason": "missing_subelement"},
         )
     return obj, _subelement_label(role, index)
+
+
+def resolve_reference_list(
+    ctx: Any, doc: Any, base: Any, references: list[Mapping], role: str
+) -> tuple[Any, list[str]]:
+    """Resolve 1..N signed references onto one base object.
+
+    Every reference must name the base object and carry a signed token of
+    the requested role; duplicates are rejected. Returns the base object
+    and the native subelement labels in request order.
+    """
+
+    if not references:
+        raise ToolError(VALIDATION_FAILED, "at least one signed reference is required")
+    if len(references) > _MAX_SUBELEMENT_LIST:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"at most {_MAX_SUBELEMENT_LIST} signed references are accepted",
+        )
+    base_obj, _native_base = resolve_reference(ctx, doc, base)
+    seen: set[str] = set()
+    labels: list[str] = []
+    for position, reference in enumerate(references):
+        obj, native = resolve_reference(ctx, doc, reference)
+        if obj is not base_obj:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"reference {position} targets '{obj.Name}' but the base is '{base_obj.Name}'",
+                {"position": position},
+            )
+        if not native:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"reference {position} must carry a signed subelement token",
+                {"position": position},
+            )
+        if not native.startswith(("Face", "Edge")):
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"reference {position} must be a signed {role} token",
+                {"position": position, "native": native},
+            )
+        if role == "face" and not native.startswith("Face"):
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"reference {position} must be a signed face token",
+                {"position": position, "native": native},
+            )
+        if role == "edge" and not native.startswith("Edge"):
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"reference {position} must be a signed edge token",
+                {"position": position, "native": native},
+            )
+        if native in seen:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"reference {position} duplicates {native}",
+                {"position": position},
+            )
+        seen.add(native)
+        labels.append(native)
+    return base_obj, labels
 
 
 # ---------------------------------------------------------------------------

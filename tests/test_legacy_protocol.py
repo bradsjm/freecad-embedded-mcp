@@ -30,7 +30,6 @@ if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
 import mcp_server.legacy_protocol as legacy
-import mcp_server.server as server_module
 import mcp_server.tasks as tasks_module
 import test_server as ts
 from mcp_server import (
@@ -38,14 +37,11 @@ from mcp_server import (
     protocol,
 )
 
-# server.py has bound the stub tool modules; drop the fake package from
-# sys.modules so later test files import the real tool modules again.
-for _name in [
-    _key
-    for _key in list(sys.modules)
-    if _key == "mcp_server.tools" or _key.startswith("mcp_server.tools.")
-]:
-    del sys.modules[_name]
+# ``test_server`` installs the FreeCAD stubs and binds the stub tool modules
+# before importing the server, so the server module is taken from the harness.
+# Importing ``mcp_server.server`` directly here would need FreeCAD before the
+# stubs exist and would fail when this file runs on its own.
+server_module = ts.server_module
 
 # Shared harness aliases (single binding, single call recording).
 STUB_CALLS = ts.STUB_CALLS
@@ -383,7 +379,7 @@ def test_tools_list_returns_17_with_revision_shape(version):
     assert reply.status == 200
     result = reply.payload["result"]
     assert [t["name"] for t in result["tools"]] == list(server_module.PLAN_TOOL_ORDER)
-    assert len(result["tools"]) == 24
+    assert len(result["tools"]) == 25
     assert "resultType" not in result
     assert "ttlMs" not in result and "cacheScope" not in result
     if version == legacy.BATCH_REVISION:
@@ -741,7 +737,9 @@ def test_consent_cancelled_via_notification_never_executes():
     event = next_event(reply.stream)
     assert_consent_denied(event)
     assert event["result"]["structuredContent"]["error"]["details"]["reason"] == "cancelled"
-    assert event["result"]["content"][0]["text"] == "Operation cancelled before execution"
+    assert event["result"]["content"][0]["text"] == (
+        'CONSENT_DENIED: Operation cancelled before execution {"reason": "cancelled"}'
+    )
     assert STUB_CALLS == []
     # The unknown-id case is a harmless 202.
     assert (

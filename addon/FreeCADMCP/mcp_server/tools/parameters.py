@@ -180,6 +180,16 @@ def _definition() -> dict[str, Any]:
                     "items": {"type": "string"},
                 },
                 "applied": {"type": "array", "items": {"type": "string"}},
+                "checkpoint": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["path", "document", "generation"],
+                    "properties": {
+                        "path": {"type": "string", "minLength": 1},
+                        "document": {"type": "string", "minLength": 1},
+                        "generation": {"type": "integer", "minimum": 0},
+                    },
+                },
             },
             "required": [
                 "document",

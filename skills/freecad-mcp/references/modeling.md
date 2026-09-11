@@ -137,17 +137,9 @@ Add finishing features largest first and late in the graph. Apply fillets after 
 
 ## Start with a state snapshot
 
-Never assume names or active-document state:
+Never assume names or active-document state. Call `inspect_documents` first; it takes no arguments and reports every open document with its generation, dirty/active flags, and the active document. Then inspect the target's objects:
 
-```python
-# via run_script
-print([(d.Name, d.FileName) for d in App.listDocuments().values()])
-doc = App.ActiveDocument
-if doc:
-    print([(o.Name, o.Label, o.TypeId) for o in doc.Objects])
-```
-
-`inspect_objects(document)` covers object inspection; enumerate open documents with `App.listDocuments()` in the same script. Use the actual names returned by the tools. `Label` may be changed for display; `Name` is the stable internal reference for the current session.
+Call `inspect_objects(document)`; request `detail: "full"` when serialized properties are useful. Use the actual names returned by the tools. `Label` may be changed for display; `Name` is the stable internal reference for the current session.
 
 ## Constructing scripted shapes
 
@@ -198,7 +190,7 @@ For an attached sketch or feature, edit its attachment support/offset rather tha
 
 ## Units and names
 
-Use explicit unit strings for quantities whose property type requires them (`"5 mm"`, `"100 N"`, `"210 GPa"`); assign these through `run_script` when the mapper's plain-number mapping is not precise enough. Read one object with `inspect_objects(document, detail="full")` before editing unfamiliar properties and copy the reported property convention.
+Quantity properties reached through `create_object`, `edit_object`, and `edit_objects` take plain JSON numbers in the property's internal unit; the mapper rejects unit strings such as `"5 mm"`. Assign explicit unit strings (`"5 mm"`, `"100 N"`, `"210 GPa"`) only through `run_script`, or inside string maps such as a FEM `Material` map, whose values are strings. Read one object with `inspect_objects(document, detail="full")` before editing unfamiliar properties and copy the reported property convention.
 
 Avoid spaces and punctuation in requested internal names. Use concise ASCII names with a semantic role. A descriptive `Label` can be longer.
 

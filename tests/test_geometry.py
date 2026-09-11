@@ -1098,3 +1098,123 @@ def test_measure_rejects_reference_incompatible_with_mode():
             },
         )
     assert excinfo.value.code == protocol.VALIDATION_FAILED
+
+
+# ---------------------------------------------------------------------------
+# Bounded reference lists (dress-up bases).
+# ---------------------------------------------------------------------------
+
+
+def _face_reference(ctx, doc, obj, index):
+    return geometry.make_reference(ctx, doc, obj, "face", index)
+
+
+def _two_face_objects():
+    box = (0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
+    shape = FakeShape(faces=[FakeFace(area=1.0, bounds=box) for _ in range(3)])
+    base = FakeObject("Base", shape)
+    other = FakeObject("Other", shape)
+    ctx = FakeCtx({"Base": base, "Other": other})
+    return ctx, ctx.doc, base, other
+
+
+def _many_face_objects(count):
+    box = (0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
+    shape = FakeShape(faces=[FakeFace(area=1.0, bounds=box) for _ in range(count)])
+    base = FakeObject("Base", shape)
+    ctx = FakeCtx({"Base": base})
+    return ctx, ctx.doc, base
+
+
+def test_reference_list_accepts_same_object_faces_in_order():
+    ctx, doc, base, _other = _two_face_objects()
+
+    resolved, labels = geometry.resolve_reference_list(
+        ctx,
+        doc,
+        {"object": "Base", "subelement": ""},
+        [_face_reference(ctx, doc, base, 2), _face_reference(ctx, doc, base, 1)],
+        "face",
+    )
+
+    assert resolved is base
+    assert labels == ["Face2", "Face1"]
+
+
+def test_reference_list_rejects_a_foreign_object():
+    ctx, doc, _base, other = _two_face_objects()
+
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.resolve_reference_list(
+            ctx,
+            doc,
+            {"object": "Base", "subelement": ""},
+            [_face_reference(ctx, doc, other, 1)],
+            "face",
+        )
+
+    assert "does not" not in excinfo.value.message
+    assert "but the base is" in excinfo.value.message
+
+
+def test_reference_list_rejects_duplicates_and_wrong_role():
+    ctx, doc, base, _other = _two_face_objects()
+    duplicate = _face_reference(ctx, doc, base, 1)
+
+    with pytest.raises(protocol.ToolError) as dup:
+        geometry.resolve_reference_list(
+            ctx, doc, {"object": "Base", "subelement": ""}, [duplicate, duplicate], "face"
+        )
+    assert "duplicates" in dup.value.message
+
+    with pytest.raises(protocol.ToolError) as role:
+        geometry.resolve_reference_list(
+            ctx,
+            doc,
+            {"object": "Base", "subelement": ""},
+            [_face_reference(ctx, doc, base, 1)],
+            "edge",
+        )
+    assert "signed edge token" in role.value.message
+
+
+def test_reference_list_rejects_a_whole_object_entry():
+    ctx, doc, _base, _other = _two_face_objects()
+
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.resolve_reference_list(
+            ctx,
+            doc,
+            {"object": "Base", "subelement": ""},
+            [{"object": "Base", "subelement": ""}],
+            "face",
+        )
+
+    assert "signed subelement token" in excinfo.value.message
+
+
+def test_reference_list_enforces_the_32_item_boundary():
+    ctx, doc, base = _many_face_objects(40)
+
+    accepted = [_face_reference(ctx, doc, base, index) for index in range(1, 33)]
+    resolved, labels = geometry.resolve_reference_list(
+        ctx,
+        doc,
+        {"object": "Base", "subelement": ""},
+        accepted,
+        "face",
+    )
+    assert resolved is base
+    assert labels == [f"Face{index}" for index in range(1, 33)]
+
+    oversized = [_face_reference(ctx, doc, base, index) for index in range(1, 34)]
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.resolve_reference_list(
+            ctx,
+            doc,
+            {"object": "Base", "subelement": ""},
+            oversized,
+            "face",
+        )
+    assert excinfo.value.code == protocol.VALIDATION_FAILED
+    assert "at most 32" in excinfo.value.message

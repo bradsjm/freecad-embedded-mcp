@@ -844,6 +844,52 @@ def test_datum_edits_validate_against_the_final_constraint_state(
     assert excinfo.value.code == VALIDATION_FAILED
 
 
+def test_expression_on_the_new_datum_index_is_refused(sketch_module) -> None:
+    # The one-index rule covers datums carried by addConstraints entries,
+    # not only setDatums: the created constraint's final index cannot
+    # receive both in one batch (skills/references/sketcher.md).
+    sketch = rectangle_sketch()
+    sketch.setExpression = lambda path, expression: sketch.expression_engine.append(
+        (path, expression)
+    )
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addConstraints=[{"type": "DistanceX", "arguments": [0, 1, 3, 2], "datum": "10 mm"}],
+            setExpressions=[{"index": 0, "expression": "Width"}],
+        )
+
+    assert "cannot receive both" in excinfo.value.message
+    assert sketch.ops == []
+    assert sketch.expression_engine == []
+
+
+def test_expression_on_another_index_plans_with_a_new_datum_constraint(
+    sketch_module,
+) -> None:
+    # Exclusivity is per index: a datum-carrying addition plus an
+    # expression bound to a different constraint is one valid batch.
+    sketch = rectangle_sketch()
+    sketch.Constraints = [StubConstraint("DistanceX", 0, 1, 1)]
+    sketch.setExpression = lambda path, expression: sketch.expression_engine.append(
+        (path, expression)
+    )
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addConstraints=[{"type": "DistanceX", "arguments": [0, 1, 3, 2], "datum": "10 mm"}],
+        setExpressions=[{"index": 0, "expression": "Width"}],
+    )
+
+    assert result["addedConstraints"] == [1]
+    assert sketch.expression_engine == [("Constraints[0]", "Width")]
+
+
 def test_missing_native_method_is_rejected_before_the_transaction(
     sketch_module,
 ) -> None:

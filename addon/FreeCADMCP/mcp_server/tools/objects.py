@@ -344,6 +344,37 @@ _OBJECT_ROW = {
         "solid_count": {"type": ["integer", "null"], "minimum": 0},
         "tip": {"type": ["string", "null"]},
         "links": {"type": "array", "items": {"type": "string"}, "maxItems": 64},
+        "bodyTip": {"type": ["string", "null"]},
+        "features": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "label", "typeId", "state"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "label": {"type": "string"},
+                    "typeId": {"type": "string"},
+                    "state": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
+                },
+            },
+            "maxItems": 256,
+        },
+        "featuresTruncated": {"type": "boolean"},
+        "origins": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "typeId", "role"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "typeId": {"type": "string"},
+                    "role": {"type": "string", "enum": ["x", "y", "z", "xy", "xz", "yz"]},
+                },
+            },
+            "maxItems": 6,
+        },
         "properties": {"type": "object", "additionalProperties": _PROPERTY_VALUE},
     },
 }
@@ -448,6 +479,16 @@ _CHANGE = {
     },
 }
 
+_CHECKPOINT_RECEIPT = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["path", "document", "generation"],
+    "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "document": {"type": "string", "minLength": 1},
+        "generation": {"type": "integer", "minimum": 0},
+    },
+}
 
 _MUTATION_OUTPUT_DEFS = {
     "geometryReport": _GEOMETRY_REPORT,
@@ -675,6 +716,10 @@ _EDIT_OBJECTS_OUTPUT = {
     },
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
+
+_MUTATED_OUTPUT["properties"]["checkpoint"] = _CHECKPOINT_RECEIPT
+_DELETE_OUTPUT["properties"]["checkpoint"] = _CHECKPOINT_RECEIPT
+_EDIT_OBJECTS_OUTPUT["properties"]["checkpoint"] = _CHECKPOINT_RECEIPT
 
 TOOL_DEFINITIONS = [
     {
@@ -1066,10 +1111,7 @@ def _plan_create(ctx: Any, doc: Any, obj_type: str, properties: dict) -> tuple[A
         if spec is None:
             message = f"FEM type '{obj_type}' has no explicit creation factory in this protocol"
             if obj_type.startswith("Fem::FemMesh"):
-                message += (
-                    "; FEM mesh objects are not created by create_object, "
-                    "use run_script for meshing workflows"
-                )
+                message += "; FEM mesh objects are not created by create_object"
             raise ToolError(
                 VALIDATION_FAILED,
                 message,
@@ -1314,6 +1356,97 @@ def _tip_name(obj: Any) -> str | None:
     tip = getattr(obj, "Tip", None)
     name = str(getattr(tip, "Name", "")) if tip is not None else ""
     return name or None
+
+
+def _body_history(obj: Any) -> tuple[list[dict], bool, list[dict]]:
+    """Return native Body members and its six local origin references."""
+
+    derived = getattr(obj, "isDerivedFrom", None)
+    is_body = str(getattr(obj, "TypeId", "")) == "PartDesign::Body"
+    if callable(derived):
+        try:
+            is_body = is_body or bool(derived("PartDesign::Body"))
+        except Exception:
+            pass
+    if not is_body:
+        return [], False, []
+
+    members: list[Any] = []
+    for attribute in ("Group", "Model"):
+        candidate = getattr(obj, attribute, None)
+        if candidate is None:
+            continue
+        try:
+            members = list(candidate)
+        except Exception:
+            continue
+        if members:
+            break
+    features = []
+    for member in members:
+        if str(getattr(member, "TypeId", "")) in ("PartDesign::Origin", "App::Origin"):
+            continue
+        features.append(
+            {
+                "name": str(getattr(member, "Name", "")),
+                "label": _label(member),
+                "typeId": str(getattr(member, "TypeId", "")),
+                "state": _states(member),
+            }
+        )
+    truncated = len(features) > 256
+
+    roles = ("x", "y", "z", "xy", "xz", "yz")
+    origin = getattr(obj, "Origin", None)
+    candidates: list[Any] = []
+    if origin is not None:
+        for attribute in ("OriginFeatures", "Group", "Features"):
+            value = getattr(origin, attribute, None)
+            if value is None:
+                continue
+            try:
+                candidates.extend(list(value))
+            except Exception:
+                continue
+            if candidates:
+                break
+        for role in roles:
+            for attribute in (
+                role.upper() + "_Axis",
+                role.upper() + "_Plane",
+                role.capitalize() + "_Axis",
+                role.capitalize() + "_Plane",
+            ):
+                value = getattr(origin, attribute, None)
+                if value is not None and value not in candidates:
+                    candidates.append(value)
+    origins: list[dict] = []
+    for role in roles:
+        for candidate in candidates:
+            # Origin datums carry a stable Role separate from their unique
+            # document Name (an existing X_Axis makes the next one
+            # X_Axis001 with Role still X_Axis), so roles match on Role.
+            role_value = str(getattr(candidate, "Role", "") or "")
+            name = str(getattr(candidate, "Name", ""))
+            normalized = (role_value or name).lower().replace("_", "")
+            expected = {
+                "x": ("xaxis",),
+                "y": ("yaxis",),
+                "z": ("zaxis",),
+                "xy": ("xyplane",),
+                "xz": ("xzplane",),
+                "yz": ("yzplane",),
+            }[role]
+            if normalized in expected:
+                origins.append(
+                    {
+                        "name": name,
+                        "typeId": str(getattr(candidate, "TypeId", "")),
+                        "role": role,
+                    }
+                )
+                break
+    return features[:256], truncated, origins
 
 
 def _link_names(obj: Any) -> list[str]:
@@ -1566,6 +1699,11 @@ def _row(
     row["tip"] = _tip_name(obj)
     row["links"] = _link_names(obj)
     if detail == "full":
+        features, features_truncated, origins = _body_history(obj)
+        row["bodyTip"] = _tip_name(obj)
+        row["features"] = features
+        row["featuresTruncated"] = features_truncated
+        row["origins"] = origins
         row["properties"] = properties
         row["propertyMetadata"] = property_metadata
         row["propertyCount"] = property_count
@@ -1853,6 +1991,18 @@ def _change_summary(
     }
 
 
+def _check_workload(ctx: Any, targets: list[Any]) -> None:
+    """Apply the shared bounded feature checks to generic object edits.
+
+    Delegated lazily so this module keeps importing no FreeCAD-dependent
+    sibling at load time.
+    """
+
+    from .feature_contracts import check_workload
+
+    check_workload(ctx, targets)
+
+
 def create_object(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
     obj_type = str(args["type"])
@@ -1877,6 +2027,7 @@ def create_object(ctx: Any, args: dict) -> dict:
         expected_bounds=expected_bounds,
         bounds_tolerance=float(bounds_tolerance),
         outcome=outcome,
+        check_workload=_check_workload,
     ) as applied:
         if factory is not None:
             created.append(_call_factory(factory, doc, requested_name, factory_kwargs))
@@ -1943,6 +2094,7 @@ def edit_object(ctx: Any, args: dict) -> dict:
         expected_bounds=expected_bounds,
         bounds_tolerance=float(bounds_tolerance),
         outcome=outcome,
+        check_workload=_check_workload,
     ) as applied:
         _apply_prepared(obj, prepared)
 
@@ -2073,6 +2225,7 @@ def edit_objects(ctx: Any, args: dict) -> dict:
         targets,
         expectations=expectations,
         outcome=outcome,
+        check_workload=_check_workload,
     ) as applied:
         for obj in targets:
             _apply_prepared(obj, prepared[obj.Name])

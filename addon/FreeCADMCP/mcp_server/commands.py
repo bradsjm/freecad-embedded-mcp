@@ -150,10 +150,23 @@ def _restart_required(saved: dict | None, status: dict) -> bool:
     active = status.get("state") in ("running", "starting", "draining")
     if not active:
         return False
+    recovery_enabled_saved = bool(saved.get("recovery_enabled", False))
+    recovery_enabled_active = bool(connection.get("recovery_enabled"))
     return (
         bool(saved.get("remote_enabled", False)) != bool(connection.get("remote_enabled"))
         or str(saved.get("allowed_ips", "")) != str(connection.get("allowed_ips", ""))
         or saved.get("port") != connection.get("configured_port")
+        or bool(saved.get("allow_scripts", False)) != bool(connection.get("allow_scripts"))
+        or recovery_enabled_saved != recovery_enabled_active
+        # The directory only reaches the running server while recovery is
+        # enabled on both sides; otherwise the toggle above already
+        # reports the change.
+        or (
+            recovery_enabled_saved
+            and recovery_enabled_active
+            and str(saved.get("recovery_directory", ""))
+            != str(connection.get("recovery_directory", ""))
+        )
     )
 
 
@@ -580,8 +593,9 @@ class MCPSettingsCommand:
     def GetResources(self):
         return {
             "MenuText": "MCP Settings…",
-            "ToolTip": "Configure the MCP server port, auto-start, network access, "
-            "allowed IPs and allowed roots.",
+            "ToolTip": "Configure the MCP server port, auto-start, network "
+            "access, allowed IPs, allowed roots, recovery copies and "
+            "scripting.",
             "Pixmap": _icon_path("mcp-workbench.svg"),
         }
 
@@ -633,6 +647,23 @@ class MCPSettingsCommand:
         roots_error.setWordWrap(True)
         roots_error.hide()
 
+        recovery_enabled = QtWidgets.QCheckBox(
+            _tr("Create recovery copies before expensive features"), dialog
+        )
+        recovery_enabled.setChecked(bool(settings.get("recovery_enabled", False)))
+        recovery_field = QtWidgets.QLineEdit(str(settings.get("recovery_directory", "")), dialog)
+        recovery_field.setPlaceholderText(
+            _tr("Directory for recovery copies; must be inside an allowed root")
+        )
+        recovery_error = QtWidgets.QLabel(dialog)
+        recovery_error.setWordWrap(True)
+        recovery_error.hide()
+
+        allow_scripts = QtWidgets.QCheckBox(
+            _tr("Enable unrestricted Python (full local privileges)"), dialog
+        )
+        allow_scripts.setChecked(bool(settings.get("allow_scripts", False)))
+
         outcome = {}
 
         def _set_error(label, message: str) -> None:
@@ -642,6 +673,7 @@ class MCPSettingsCommand:
         def _save() -> None:
             _set_error(ips_error, "")
             _set_error(roots_error, "")
+            _set_error(recovery_error, "")
             valid_ips, ip_errors = validate_allowed_ips(ips_field.text().strip())
             if ip_errors:
                 _set_error(ips_error, "Allowed IPs: " + "; ".join(ip_errors))
@@ -657,6 +689,15 @@ class MCPSettingsCommand:
             saved["remote_enabled"] = network.isChecked()
             saved["allowed_ips"] = ", ".join(valid_ips)
             saved["allowed_roots"] = roots
+            saved["recovery_enabled"] = recovery_enabled.isChecked()
+            saved["recovery_directory"] = recovery_field.text().strip()
+            saved["allow_scripts"] = allow_scripts.isChecked()
+            if saved["recovery_enabled"] and not saved["recovery_directory"]:
+                _set_error(
+                    recovery_error,
+                    "Recovery: provide a directory or disable recovery copies.",
+                )
+                return
             token_generated = False
             if saved["remote_enabled"] and not saved.get("token"):
                 # save_settings rejects a missing token; generate one here
@@ -690,6 +731,10 @@ class MCPSettingsCommand:
         layout.addRow("", ips_error)
         layout.addRow(_tr("Allowed roots:"), roots_field)
         layout.addRow("", roots_error)
+        layout.addRow("", recovery_enabled)
+        layout.addRow(_tr("Recovery directory:"), recovery_field)
+        layout.addRow("", recovery_error)
+        layout.addRow("", allow_scripts)
         layout.addRow(buttons)
 
         # Keyboard tab order follows the form.
@@ -697,6 +742,9 @@ class MCPSettingsCommand:
         QtWidgets.QWidget.setTabOrder(auto_start, network)
         QtWidgets.QWidget.setTabOrder(network, ips_field)
         QtWidgets.QWidget.setTabOrder(ips_field, roots_field)
+        QtWidgets.QWidget.setTabOrder(roots_field, recovery_enabled)
+        QtWidgets.QWidget.setTabOrder(recovery_enabled, recovery_field)
+        QtWidgets.QWidget.setTabOrder(recovery_field, allow_scripts)
 
         dialog.exec()
         if "saved" not in outcome:

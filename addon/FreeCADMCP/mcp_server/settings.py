@@ -28,7 +28,17 @@ DEFAULT_ALLOWED_IPS = ""
 
 LEGACY_KEYS = frozenset({"auto_start_rpc"})
 _SETTINGS_KEYS = frozenset(
-    {"port", "token", "auto_start", "remote_enabled", "allowed_ips", "allowed_roots"}
+    {
+        "port",
+        "token",
+        "auto_start",
+        "remote_enabled",
+        "allowed_ips",
+        "allowed_roots",
+        "recovery_enabled",
+        "recovery_directory",
+        "allow_scripts",
+    }
 )
 
 
@@ -107,6 +117,37 @@ def _normalize_settings(raw, *, generate_token):
         if expanded not in normalized_roots:
             normalized_roots.append(expanded)
 
+    recovery_enabled = raw.get("recovery_enabled", False)
+    if not isinstance(recovery_enabled, bool):
+        raise SettingsError(f"Invalid recovery_enabled: {recovery_enabled!r}")
+
+    recovery_directory = raw.get("recovery_directory", "")
+    if not isinstance(recovery_directory, str):
+        raise SettingsError(f"Invalid recovery_directory: {recovery_directory!r}")
+    if recovery_enabled:
+        if not recovery_directory.strip():
+            raise SettingsError("recovery_enabled requires a non-empty recovery_directory.")
+        expanded_directory = os.path.expanduser(recovery_directory)
+        if not os.path.isabs(expanded_directory):
+            # Tested before expansion: ``abspath`` would silently resolve a
+            # relative setting against the current directory, which differs
+            # between the settings dialog and the FreeCAD process.
+            raise SettingsError("recovery_directory must be an absolute path.")
+        containment = False
+        for root in normalized_roots:
+            try:
+                if os.path.commonpath([expanded_directory, root]) == root:
+                    containment = True
+                    break
+            except ValueError:
+                continue
+        if not containment:
+            raise SettingsError("recovery_directory must be inside an allowed root.")
+
+    allow_scripts = raw.get("allow_scripts", False)
+    if not isinstance(allow_scripts, bool):
+        raise SettingsError(f"Invalid allow_scripts: {allow_scripts!r}")
+
     return {
         "port": port,
         "token": token,
@@ -114,6 +155,9 @@ def _normalize_settings(raw, *, generate_token):
         "remote_enabled": remote_enabled,
         "allowed_ips": allowed_ips.strip(),
         "allowed_roots": normalized_roots,
+        "recovery_enabled": recovery_enabled,
+        "recovery_directory": recovery_directory,
+        "allow_scripts": allow_scripts,
     }
 
 

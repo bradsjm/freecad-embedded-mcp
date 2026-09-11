@@ -28,6 +28,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable
+from itertools import pairwise
 from typing import Any
 
 from ..object_validation import mutation
@@ -189,6 +190,42 @@ _GEOMETRY_ADD_SCHEMA = {
                 "construction": _CONSTRUCTION,
             },
         },
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "origin", "width", "height"],
+            "properties": {
+                "kind": {"const": "rectangle"},
+                "origin": _XY_PAIR,
+                "width": {"type": "number", "exclusiveMinimum": 0},
+                "height": {"type": "number", "exclusiveMinimum": 0},
+                "construction": _CONSTRUCTION,
+            },
+        },
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "points", "closed"],
+            "properties": {
+                "kind": {"const": "polyline"},
+                "points": {"type": "array", "items": _XY_PAIR, "minItems": 2, "maxItems": 32},
+                "closed": {"type": "boolean"},
+                "construction": _CONSTRUCTION,
+            },
+        },
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "center", "radius", "sides"],
+            "properties": {
+                "kind": {"const": "regularPolygon"},
+                "center": _XY_PAIR,
+                "radius": {"type": "number", "exclusiveMinimum": 0},
+                "sides": {"type": "integer", "minimum": 3, "maximum": 32},
+                "rotation": {"type": "number", "default": 0},
+                "construction": _CONSTRUCTION,
+            },
+        },
     ]
 }
 
@@ -214,6 +251,16 @@ _DATUM_SET_SCHEMA = {
     "properties": {
         "index": {"type": "integer", "minimum": 0},
         "datum": {"type": "string", "minLength": 1},
+    },
+}
+
+_EXPRESSION_SET_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["index", "expression"],
+    "properties": {
+        "index": {"type": "integer", "minimum": 0},
+        "expression": {"type": ["string", "null"], "minLength": 1, "maxLength": 256},
     },
 }
 
@@ -424,6 +471,16 @@ _INSPECT_SKETCH_OUTPUT = {
             },
             "maxItems": _MAX_SKETCH_ROWS,
         },
+        "checkpoint": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["path", "document", "generation"],
+            "properties": {
+                "path": {"type": "string", "minLength": 1},
+                "document": {"type": "string", "minLength": 1},
+                "generation": {"type": "integer", "minimum": 0},
+            },
+        },
     },
 }
 
@@ -456,6 +513,11 @@ _EDIT_SKETCH_INPUT = {
             "items": _DATUM_SET_SCHEMA,
             "maxItems": _MAX_OPERATIONS,
         },
+        "setExpressions": {
+            "type": "array",
+            "items": _EXPRESSION_SET_SCHEMA,
+            "maxItems": _MAX_OPERATIONS,
+        },
         "deleteGeometry": {
             "type": "array",
             "items": {"type": "integer", "minimum": 0},
@@ -484,6 +546,7 @@ _EDIT_SKETCH_OUTPUT = {
         "deletedGeometry",
         "deletedConstraints",
         "changedDatums",
+        "expressionBindings",
     ],
     "properties": {
         "document": {"type": "string"},
@@ -516,6 +579,29 @@ _EDIT_SKETCH_OUTPUT = {
             "type": "array",
             "items": {"$ref": "#/$defs/datumRow"},
             "maxItems": _MAX_OPERATIONS,
+        },
+        "expressionBindings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["constraint", "expression"],
+                "properties": {
+                    "constraint": {"type": "string"},
+                    "expression": {"type": "string"},
+                },
+            },
+            "maxItems": _MAX_SKETCH_ROWS,
+        },
+        "checkpoint": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["path", "document", "generation"],
+            "properties": {
+                "path": {"type": "string", "minLength": 1},
+                "document": {"type": "string", "minLength": 1},
+                "generation": {"type": "integer", "minimum": 0},
+            },
         },
     },
     "$defs": {
@@ -827,6 +913,7 @@ _OPERATION_METHODS = {
     "setDatums": "setDatum",
     "deleteGeometry": "delGeometry",
     "deleteConstraints": "delConstraint",
+    "setExpressions": "setExpression",
 }
 
 
@@ -842,9 +929,83 @@ def _validate_geometry_add(entry: Any, what: str) -> dict:
     if not isinstance(entry, dict):
         raise _fail(f"{what} must be an object")
     kind = entry.get("kind")
-    if kind not in ("point", "lineSegment", "circle", "arcOfCircle"):
+    if kind not in (
+        "point",
+        "lineSegment",
+        "circle",
+        "arcOfCircle",
+        "rectangle",
+        "polyline",
+        "regularPolygon",
+    ):
         raise _fail(f"{what} has unsupported kind {kind!r}")
     checked: dict = {"kind": kind, "construction": bool(entry.get("construction"))}
+    if kind == "rectangle":
+        origin = entry.get("origin")
+        if not isinstance(origin, (list, tuple)) or len(origin) != 2:
+            raise _fail(f"{what}.origin must be an [x, y] pair")
+        values = [_finite(value) for value in origin]
+        width = _finite(entry.get("width"))
+        height = _finite(entry.get("height"))
+        if any(value is None for value in values):
+            raise _fail(f"{what}.origin must contain finite numbers")
+        if width is None or width <= 0 or height is None or height <= 0:
+            raise _fail(f"{what}.width and height must be positive finite numbers")
+        checked.update(
+            {
+                "origin": [float(value) for value in values],
+                "width": float(width),
+                "height": float(height),
+            }
+        )
+        return checked
+    if kind == "polyline":
+        points = entry.get("points")
+        if not isinstance(points, (list, tuple)) or not 2 <= len(points) <= 32:
+            raise _fail(f"{what}.points must contain 2 to 32 points")
+        converted = []
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                raise _fail(f"{what}.points must contain [x, y] pairs")
+            values = [_finite(value) for value in point]
+            if any(value is None for value in values):
+                raise _fail(f"{what}.points must contain finite numbers")
+            converted.append([float(value) for value in values])
+        if any(first == second for first, second in pairwise(converted)):
+            raise _fail(f"{what}.points must not contain adjacent duplicate points")
+        if converted[0] == converted[-1]:
+            # A repeated closing point is how a *closed* profile is signalled
+            # separately (the ``closed`` flag), so it is rejected for open
+            # profiles too rather than silently collapsing the last segment.
+            raise _fail(f"{what}.points must not repeat the first point at the end")
+        if bool(entry.get("closed")) and len(converted) < 3:
+            raise _fail(f"{what}.closed polylines require at least 3 points")
+        checked["points"] = converted
+        checked["closed"] = bool(entry.get("closed"))
+        return checked
+    if kind == "regularPolygon":
+        center = entry.get("center")
+        if not isinstance(center, (list, tuple)) or len(center) != 2:
+            raise _fail(f"{what}.center must be an [x, y] pair")
+        values = [_finite(value) for value in center]
+        radius = _finite(entry.get("radius"))
+        sides = entry.get("sides")
+        rotation = _finite(entry.get("rotation", 0.0))
+        if any(value is None for value in values) or radius is None or radius <= 0:
+            raise _fail(f"{what}.center and radius must be finite; radius must be positive")
+        if isinstance(sides, bool) or not isinstance(sides, int) or not 3 <= sides <= 32:
+            raise _fail(f"{what}.sides must be an integer from 3 through 32")
+        if rotation is None:
+            raise _fail(f"{what}.rotation must be a finite number")
+        checked.update(
+            {
+                "center": [float(value) for value in values],
+                "radius": float(radius),
+                "sides": sides,
+                "rotation": float(rotation),
+            }
+        )
+        return checked
     for field in ("x", "y"):
         if field in entry:
             value = _finite(entry[field])
@@ -873,6 +1034,97 @@ def _validate_geometry_add(entry: Any, what: str) -> dict:
                 raise _fail(f"{what}.{field} must be a finite number")
             checked[field] = value
     return checked
+
+
+def _expand_geometry_entries(
+    entries: list[dict], geometry_offset: int = 0
+) -> tuple[list[dict], list[dict]]:
+    """Expand semantic profiles into proven line-segment operations."""
+
+    def _segment(start: list[float], end: list[float], construction: bool) -> dict:
+        if not all(math.isfinite(value) for point in (start, end) for value in point):
+            raise _fail("generated profile coordinates are not finite")
+        return {
+            "kind": "lineSegment",
+            "start": start,
+            "end": end,
+            "construction": construction,
+        }
+
+    geometry: list[dict] = []
+    constraints: list[dict] = []
+
+    def coincident(first: int, second: int) -> dict:
+        return {"type": "Coincident", "arguments": [first, 2, second, 1]}
+
+    for entry in entries:
+        kind = entry["kind"]
+        if kind in ("point", "lineSegment", "circle", "arcOfCircle"):
+            geometry.append(entry)
+            continue
+        if kind == "rectangle":
+            x, y = entry["origin"]
+            width, height = entry["width"], entry["height"]
+            points = [[x, y], [x + width, y], [x + width, y + height], [x, y + height]]
+            start = geometry_offset + len(geometry)
+            geometry.extend(
+                _segment(points[index], points[(index + 1) % 4], entry["construction"])
+                for index in range(4)
+            )
+            constraints.extend(
+                coincident(start + index, start + (index + 1) % 4) for index in range(4)
+            )
+            constraints.extend(
+                {"type": "Horizontal", "arguments": [start + index]} for index in (0, 2)
+            )
+            constraints.extend(
+                {"type": "Vertical", "arguments": [start + index]} for index in (1, 3)
+            )
+            continue
+        if kind == "polyline":
+            points = entry["points"]
+            start = geometry_offset + len(geometry)
+            segment_count = len(points) if entry["closed"] else len(points) - 1
+            geometry.extend(
+                _segment(
+                    points[index],
+                    points[(index + 1) % len(points)],
+                    entry["construction"],
+                )
+                for index in range(segment_count)
+            )
+            if entry["closed"]:
+                constraints.extend(
+                    coincident(start + index, start + (index + 1) % segment_count)
+                    for index in range(segment_count)
+                )
+            continue
+        center_x, center_y = entry["center"]
+        points = [
+            [
+                center_x
+                + entry["radius"]
+                * math.cos(math.radians(entry["rotation"] + 360 * index / entry["sides"])),
+                center_y
+                + entry["radius"]
+                * math.sin(math.radians(entry["rotation"] + 360 * index / entry["sides"])),
+            ]
+            for index in range(entry["sides"])
+        ]
+        start = geometry_offset + len(geometry)
+        geometry.extend(
+            _segment(
+                points[index],
+                points[(index + 1) % entry["sides"]],
+                entry["construction"],
+            )
+            for index in range(entry["sides"])
+        )
+        constraints.extend(
+            coincident(start + index, start + (index + 1) % entry["sides"])
+            for index in range(entry["sides"])
+        )
+    return geometry, constraints
 
 
 def _validate_constraint_add(entry: Any, what: str) -> dict:
@@ -994,6 +1246,7 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
     add_geometry = arguments.get("addGeometry") or []
     add_constraints = arguments.get("addConstraints") or []
     set_datums = arguments.get("setDatums") or []
+    set_expressions = arguments.get("setExpressions") or []
 
     if not any(
         isinstance(operation, list) and operation
@@ -1003,9 +1256,20 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
             add_geometry,
             add_constraints,
             set_datums,
+            set_expressions,
         )
     ):
         raise _fail("edit_sketch requires at least one operation")
+
+    if delete_geometry and (set_datums or set_expressions):
+        # Deleting geometry removes the constraints attached to it and
+        # renumbers the survivors, so datum/expression indexes planned
+        # against the pre-deletion state cannot be simulated reliably here.
+        raise _fail(
+            "deleteGeometry cannot be combined with setDatums or "
+            "setExpressions in one batch; delete first, then edit the "
+            "surviving constraints from a fresh inspect_sketch"
+        )
 
     # Reject missing native methods before any planning error so the cause
     # names the missing capability, not a simulated index.
@@ -1037,18 +1301,46 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
                 f"sketch has {constraint_count} constraints"
             )
 
-    checked_geometry = [
+    checked_geometry_input = [
         _validate_geometry_add(entry, f"addGeometry[{position}]")
         for position, entry in enumerate(add_geometry)
     ]
+    checked_geometry, expanded_constraints = _expand_geometry_entries(
+        checked_geometry_input, geometry_count - len(delete_geometry)
+    )
     checked_constraints = [
         _validate_constraint_add(entry, f"addConstraints[{position}]")
         for position, entry in enumerate(add_constraints)
     ]
+    checked_constraints.extend(expanded_constraints)
+
+    total_operations = (
+        len(delete_geometry)
+        + len(delete_constraints)
+        + len(checked_geometry)
+        + len(checked_constraints)
+        + len(set_datums)
+        + len(set_expressions)
+    )
+    if total_operations > _MAX_OPERATIONS:
+        raise _fail(
+            f"edit_sketch expands to {total_operations} operations; the limit is {_MAX_OPERATIONS}"
+        )
+    final_geometry_count = geometry_count - len(delete_geometry) + len(checked_geometry)
+    final_constraint_count = constraint_count - len(delete_constraints) + len(checked_constraints)
+    if final_geometry_count > _MAX_SKETCH_ROWS:
+        raise _fail(
+            f"edit_sketch would create {final_geometry_count} geometry rows; "
+            f"limit is {_MAX_SKETCH_ROWS}"
+        )
+    if final_constraint_count > _MAX_SKETCH_ROWS:
+        raise _fail(
+            f"edit_sketch would create {final_constraint_count} constraint rows; "
+            f"limit is {_MAX_SKETCH_ROWS}"
+        )
 
     # Datum edits apply after deletes and additions: their indexes refer to
     # the final constraint state.
-    final_constraint_count = constraint_count - len(delete_constraints) + len(checked_constraints)
     checked_datums = []
     for position, entry in enumerate(set_datums):
         if not isinstance(entry, dict):
@@ -1070,12 +1362,50 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
             }
         )
 
+    checked_expressions = []
+    datum_indexes = {entry["index"] for entry in checked_datums}
+    # A datum-carrying addConstraints entry also occupies a final index.
+    datum_indexes.update(
+        constraint_count - len(delete_constraints) + position
+        for position, entry in enumerate(checked_constraints)
+        if entry.get("datum") is not None
+    )
+    expression_indexes: set[int] = set()
+    for position, entry in enumerate(set_expressions):
+        if not isinstance(entry, dict):
+            raise _fail(f"setExpressions[{position}] must be an object")
+        index = entry.get("index")
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < final_constraint_count
+        ):
+            raise _fail(
+                f"setExpressions[{position}].index {index!r} does not exist in the "
+                f"final constraint state of {final_constraint_count} constraints"
+            )
+        if index in expression_indexes:
+            raise _fail(f"setExpressions[{position}] duplicates constraint index {index}")
+        if index in datum_indexes:
+            raise _fail(f"constraint index {index} cannot receive both a datum and an expression")
+        expression = entry.get("expression")
+        if expression is not None:
+            if not isinstance(expression, str) or not expression.strip():
+                raise _fail(f"setExpressions[{position}].expression must be null or non-empty")
+            if len(expression) > 256:
+                raise _fail(f"setExpressions[{position}].expression must be at most 256 characters")
+        expression_indexes.add(index)
+        checked_expressions.append({"index": index, "expression": expression})
+
     return {
         "deleteGeometry": sorted((int(index) for index in delete_geometry), reverse=True),
         "deleteConstraints": sorted((int(index) for index in delete_constraints), reverse=True),
         "addGeometry": checked_geometry,
         "addConstraints": checked_constraints,
         "setDatums": checked_datums,
+        "setExpressions": checked_expressions,
+        "geometryBase": geometry_count - len(delete_geometry),
+        "constraintBase": constraint_count - len(delete_constraints),
     }
 
 
@@ -1178,7 +1508,7 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
         added_geometry: list[int] = []
         for entry in plan["addGeometry"]:
             result = sketch.addGeometry(_native_geometry(entry), entry["construction"])
-            added_geometry.append(_added_index(result, len(added_geometry)))
+            added_geometry.append(_added_index(result, plan["geometryBase"] + len(added_geometry)))
         added_constraints: list[int] = []
         for position, entry in enumerate(plan["addConstraints"]):
             import Sketcher
@@ -1192,7 +1522,12 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
             else:
                 constraint = Sketcher.Constraint(entry["type"], *entry["arguments"])
             result = sketch.addConstraint(constraint)
-            added_constraints.append(_added_index(result, len(added_constraints)))
+            added_constraints.append(
+                _added_index(
+                    result,
+                    plan["constraintBase"] + len(added_constraints),
+                )
+            )
         changed_datums = [
             {"index": entry["index"], "datum": entry["datum"]} for entry in plan["setDatums"]
         ]
@@ -1201,6 +1536,8 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
                 entry["index"],
                 _native_datum(entry["datum"], f"setDatums[{entry['index']}].datum"),
             )
+        for entry in plan["setExpressions"]:
+            sketch.setExpression(f"Constraints[{entry['index']}]", entry["expression"])
 
     return {
         "document": str(getattr(doc, "Name", "")),
@@ -1214,6 +1551,7 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
         "deletedGeometry": list(plan["deleteGeometry"]),
         "deletedConstraints": list(plan["deleteConstraints"]),
         "changedDatums": changed_datums,
+        "expressionBindings": _expression_bindings(sketch),
     }
 
 

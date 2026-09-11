@@ -236,7 +236,8 @@ For Network access, add the bearer header to the arguments. Keep the token out o
 
 ## Tools
 
-The server exposes 24 tools.
+The server registers 25 tools. `run_script` is hidden unless the
+`allow_scripts` setting is enabled, so a default server exposes 24.
 
 | Tool | Purpose |
 | --- | --- |
@@ -258,8 +259,9 @@ The server exposes 24 tools.
 | `inspect_topology` | Page through an object's faces or edges with bounds, sampled centers/normals, native type names, and signed references. |
 | `edit_parameters` | Add, rename, bind expressions on, and clear expressions from dynamic properties with full validation and rollback. |
 | `inspect_sketch` | Report sketch geometry and constraint rows in native index order with the solver degree-of-freedom summary and expression bindings. |
-| `edit_sketch` | Apply one atomic batch of sketch operations: add geometry or constraints, set datums, and delete geometry or constraints. |
-| `create_feature` | Create a datum plane, sketch, pad, pocket, or hole inside a PartDesign Body, wiring profile and support and validating the Body's final geometry. |
+| `edit_sketch` | Apply one atomic batch of sketch operations: add geometry (including `rectangle`, `polyline`, and `regularPolygon` profiles), add constraints, set datums, bind constraint expressions, and delete geometry or constraints. |
+| `create_feature` | Create one of 18 PartDesign feature kinds inside a Body — `datum_plane`, `datum_line`, `sketch`, `pad`, `pocket`, `hole`, `revolve`, `groove`, `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, `pipe`, or the involute `gear_profile` — wiring profile and support and validating the Body's final geometry. Semantic `parameters` map onto native properties; lengths are mm and angles are degrees. |
+| `edit_feature` | Edit the native parameters of one existing pad, pocket, hole, or gear feature that belongs to the named Body, returning actual before/after values and Body validation. |
 | `export` | Write STL, STEP, 3MF, or a native FCStd copy, verifying every file by reading it back. |
 | `capture_view` | Capture a PNG of a document's 3D view with an explicit orientation (Isometric, Front, Top, and more), framed on one existing object while preserving the caller's selection and active document. |
 | `run_fem` | Run a FEM analysis through the modern `Fem::SolverCalculiX` pipeline and return the loaded VTK result summary (`.vtm` and `.vtu` blocks, point/cell counts, and finite result ranges). |
@@ -299,7 +301,7 @@ At most 32 sessions are kept. New sessions are refused rather than evicting live
 
 ## Agent skill
 
-The repository ships an [agent skill](skills/freecad-mcp/SKILL.md). It teaches coding agents how to drive this server: the 24-tool contract, FreeCAD modeling patterns, geometry validation, FEM, and export. It complements the MCP connection: the agent still talks to `http://127.0.0.1:9876/mcp`, while the skill explains how to use the tools effectively.
+The repository ships an [agent skill](skills/freecad-mcp/SKILL.md). It teaches coding agents how to drive this server: the 25-tool contract, FreeCAD modeling patterns, geometry validation, FEM, and export. It complements the MCP connection: the agent still talks to `http://127.0.0.1:9876/mcp`, while the skill explains how to use the tools effectively.
 
 [`npx skills`](https://github.com/vercel-labs/skills) is the official installer for the open agent skills ecosystem. It requires Node.js and supports Claude Code, Codex, Cursor, and more than 75 other agents.
 
@@ -360,7 +362,7 @@ The project targets Python 3.11+ and has no runtime dependencies.
 | --- | --- |
 | **Architecture** | The PyPI proxy package (`src/freecad_mcp`, FastMCP over stdio) and the in-FreeCAD XML-RPC server are gone. One embedded server speaks MCP over Streamable HTTP (JSON-RPC + SSE) at `http://127.0.0.1:9876/mcp`. No pip or uvx install and no client config file are needed. |
 | **Protocol** | XML-RPC with ad-hoc dictionaries became the MCP JSON-RPC wire protocol, version `2026-07-28`, with request-metadata headers, capability negotiation, and session-based support for the 2025 Streamable HTTP revisions. |
-| **Tools** | Fifteen loosely typed tools became 24 tools validated against JSON input and output schemas, with structured error codes and paginated results. `execute_code` became `run_script`; `get_view` became `capture_view`; `get_rpc_status` became `discover_capabilities`; `inspect_documents` was added for live document inventory; `insert_part_from_library` and `get_parts_list` were dropped because the parts library is reachable through `run_script`. |
+| **Tools** | Fifteen loosely typed tools became a 25-tool registered surface validated against JSON input and output schemas, with structured error codes and paginated results. `run_script` is opt-in through the `allow_scripts` setting. `execute_code` became `run_script`; `get_view` became `capture_view`; `get_rpc_status` became `discover_capabilities`; `inspect_documents` was added for live document inventory. |
 | **Security** | The IP allow-list alone became two explicit modes: local (loopback bind, Host/Origin checks, no token) and remote (bind to all interfaces, mandatory bearer token, optional CIDR allow-list), plus `allowed_roots` path containment for file-touching tools. |
 | **Document safety** | Unvalidated success/error dictionaries became MCP-owned transactions with prevalidation, rollback, dependent-object checks, and solid-count baselines. |
 | **Long-running work** | Blocking calls with client-side timeouts became detached tasks under the `io.modelcontextprotocol/tasks` extension, with polling and cooperative cancellation. |

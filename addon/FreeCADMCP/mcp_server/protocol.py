@@ -238,10 +238,31 @@ def tool_error_result(error: ToolError) -> dict:
     """Convert a :class:`ToolError` into its complete isError tool result."""
 
     structured: dict = {"code": error.code, "message": error.message}
+    text = f"{error.code}: {error.message}"
     if error.details is not None:
         structured["details"] = error.details
+        if isinstance(error.details, Mapping):
+            essential = {
+                key: error.details[key]
+                for key in (
+                    "operationState",
+                    "nextAction",
+                    "reason",
+                    "suggestions",
+                    "rollbackStage",
+                    "checkpoint",
+                )
+                if key in error.details
+            }
+            if essential:
+                suffix = json.dumps(essential, ensure_ascii=False, allow_nan=False)
+                # Only the appended rendering is capped: the code and message
+                # are the payload's substance and are never truncated away.
+                if len(suffix) > 4096:
+                    suffix = suffix[:4096] + '"[details truncated]"'
+                text = f"{text} {suffix}"
     return tool_result(
-        [{"type": "text", "text": error.message}],
+        [{"type": "text", "text": text}],
         is_error=True,
     ) | {
         "structuredContent": {"error": structured},

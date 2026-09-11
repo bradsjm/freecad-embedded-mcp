@@ -13,7 +13,11 @@ The add-on embeds the MCP server inside FreeCAD's GUI process. There is no separ
 
 ## Tool matrix
 
-The server exposes 24 tools in a fixed order. Document tools return the actual sanitized `name`, `label`, and `objectCount`; use the returned `name` as the `document` argument in later calls.
+The server registers 25 tools in a fixed order; `run_script` appears in
+`tools/list` only when the local `allow_scripts` setting is enabled, so a
+default server exposes 24. Document tools return the actual sanitized
+`name`, `label`, and `objectCount`; use the returned `name` as the
+`document` argument in later calls.
 
 | Tool | Use | Important arguments |
 |---|---|---|
@@ -35,12 +39,21 @@ The server exposes 24 tools in a fixed order. Document tools return the actual s
 | `inspect_topology` | Page through faces or edges with signed references | `document`, `object`, `role`; optional `cursor`, `limit` (default 50, max 100) |
 | `edit_parameters` | Add/rename dynamic properties, bind expressions, clear expressions; reports `document`, `generation`, and `applied` | `document`, `object`; optional `add`, `rename`, `expressions`, `clear_expressions` |
 | `inspect_sketch` | Sketch geometry/constraint rows, solver summary, `state`, `statusText`, and `solver.solverStatus` | `document`, `sketch` |
-| `edit_sketch` | Atomic sketch batch: geometry, constraints, datums, deletes | `document`, `sketch`; optional `addGeometry`, `addConstraints`, `setDatums`, `deleteGeometry`, `deleteConstraints`, `expected_generation` |
-| `create_feature` | Datum plane, sketch, pad, pocket, or hole inside a Body | `document`, `body`, `kind`, `name`; optional `properties`, `profile`, `support`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
+| `edit_sketch` | Atomic sketch batch: geometry (including `rectangle`, `polyline`, `regularPolygon`), constraints, datums, constraint expressions, deletes | `document`, `sketch`; optional `addGeometry`, `addConstraints`, `setDatums`, `setExpressions`, `deleteGeometry`, `deleteConstraints`, `expected_generation` |
+| `create_feature` | One of 18 PartDesign feature kinds inside a Body: `datum_plane`, `datum_line`, `sketch`, `pad`, `pocket`, `hole`, `revolve`, `groove`, `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, `pipe`, `gear_profile` | `document`, `body`, `kind`, `name`; optional `parameters` (typed semantic; see its section), `properties` (raw; only the five kinds `sketch`, `pad`, `pocket`, `hole`, `datum_plane`; never combinable with `parameters`), `profile`, `support`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
+| `edit_feature` | Edit one existing scalar feature's native parameters in one transaction: pad/pocket extent, length, up-to face, symmetric, reversed; hole diameter/depth; gear teeth/module/pressure angle | `document`, `body`, `object`, `parameters`; optional `expected_generation`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
 | `export` | STL/STEP/3MF or native FCStd copy with readback verification | `document`, `objects`, `format`, `path`; optional `linear_deflection`, `angular_deflection`, `bed_align` |
-| `capture_view` | PNG of the 3D view with an explicit orientation | `document`, `focus_object`, `view_name`; optional `width`, `height` |
+| `capture_view` | PNG of the 3D view with an explicit orientation | `document`, `focus_object`, `view_name`; optional `focus_subelement` (one validated `FaceN`/`EdgeN` of the focus object), `width`, `height` |
 | `run_fem` | Modern CalculiX solve; returns a VTK result summary | `document`, `analysis`; optional `timeout_s` (default 600) |
 | `run_script` | Arbitrary Python on the GUI thread in a persistent session namespace | `code`; optional `session_id` (default `"default"`), `timeout_s` (default 90) |
+
+`run_script` is opt-in: it is registered but hidden unless
+`allow_scripts: true` is saved in `freecad_mcp_settings.json` (or the
+settings dialog checkbox is enabled) and the server is restarted. A
+disabled `run_script` answers `tools/call` with METHOD_NOT_FOUND and never
+enters schema validation, consent, or the GUI dispatch. Discovery carries
+`capabilities.scriptingEnabled` and `capabilities.recoveryEnabled` so
+clients can read the active policy without calling anything else.
 
 `discover_capabilities` with `detail: "compact"` (the default) returns `freecad`, `occ`, `exporters`, `fem`, `supportedTypesCount`, and `supportedTypesDocument`; `detail: "full"` returns the complete snapshot. `refresh: true` re-captures the snapshot through the GUI path.
 
@@ -48,7 +61,7 @@ The server exposes 24 tools in a fixed order. Document tools return the actual s
 
 The tools cover CAD-side modeling, inspection, validation, export, and FEM operations only. Report anything outside these operations as outside this skill's boundary.
 
-Valid `view_name` values are `Isometric`, `Front`, `Top`, `Right`, `Back`, `Left`, `Bottom`, `Dimetric`, and `Trimetric`. `capture_view` returns base64 PNG content. An omitted size is clamped to a 1024 px longest edge; an explicit size up to 4096 px is honored. The caller's selection and active document are preserved.
+Valid `view_name` values are `Isometric`, `Front`, `Top`, `Right`, `Back`, `Left`, `Bottom`, `Dimetric`, and `Trimetric`. `capture_view` returns base64 PNG content. An omitted size resolves from the active on-screen viewport, scaled down to a 768 px longest edge and never upscaled; an explicit size up to 4096 px is honored. Pass `focus_subelement` to frame one validated face or edge of the focus object instead of the whole object. The caller's selection (with subelements) and active document are preserved.
 
 ## Standard sequence
 
@@ -93,13 +106,36 @@ A constraint `(type, argument-count)` shape with no recorded native acceptance i
 
 ## `create_feature` details
 
-`create_feature` creates the feature through `body.newObject`, so Body membership and the Body Tip are native. The `pad`, `pocket`, and `hole` kinds require a `profile` object that already belongs to the same Body. A `support` reference requires an explicit `properties.MapMode`. The tool never invents an attachment mode.
+`create_feature` creates the feature through `body.newObject`, so Body membership and the Body Tip are native. The `pad`, `pocket`, `hole`, `revolve`, `groove`, `loft`, and `pipe` kinds require a `profile` object that already belongs to the same Body (`revolve`/`groove` add an `axis`, `loft` adds `sections`, `pipe` adds `spine`). A `support` reference requires an explicit `properties.MapMode`, which makes it a raw-properties-mode attachment: `properties` and `parameters` are mutually exclusive, so a sketch or datum plane attaches either through a semantic `plane` or through `support` plus `properties.MapMode`, never both. The tool never invents an attachment mode.
 
-Shapeless and null-shape objects are valid on FreeCAD 1.1.3: `create_object` creates `PartDesign::Body` and `Part::Feature` successfully, and the report shows `solid_count: 0` until the object holds a solid. A positive `expected_solids` on such an object fails with `has no geometry; expected_solids=N cannot be satisfied`.
+`create_feature` accepts either raw `properties` or typed semantic `parameters`, never both. Raw `properties` stay available only for the five original kinds (`sketch`, `pad`, `pocket`, `hole`, `datum_plane`); every other kind takes typed `parameters` only, and `gear_profile` accepts typed parameters only. Typed parameters map onto the native properties per kind and are closed schemas, so an incomplete request fails wire validation before a transaction opens:
+
+- `sketch`, `datum_plane`: `plane` (`xy`/`xz`/`yz`) plus optional `offset`.
+- `datum_line`: `axis` (`x`/`y`/`z`).
+- `pad`: `extent` (`distance`/`up_to_face`), `length`, optional `face`, `symmetric`, `reversed`.
+- `pocket`: `extent` (`distance`/`through_all`/`up_to_face`), `length`, optional `face`, `symmetric`, `reversed`.
+- `hole`: `diameter`, `depth`.
+- `gear_profile`: `teeth` (8–80), `module` (0.1–10 mm; pitch diameter capped at 200 mm), optional `pressure_angle` (14.5–25 degrees).
+- `revolve`, `groove`: `axis` (a whole-object reference naming a Body origin axis or datum line; the `{object, sketchAxis}` form is refused for these kinds), optional `angle`, `reversed`.
+- `fillet`: `base` object, `subelements` (1–32 edge references), `radius`.
+- `chamfer`: `base`, `subelements`, `size`.
+- `thickness`: `base`, `subelements` (1–32 faces), `thickness`, optional `inward`.
+- `draft`: `base`, `subelements` (1–32 faces), `neutral_plane`, `pull_direction` (datum line), `angle`, optional `reversed`.
+- `linear_pattern`: `originals` (1–8 names), `axis`, `count` (2–32), `length`.
+- `polar_pattern`: `originals` (1–8), `axis`, `count` (2–32), optional `angle`.
+- `mirrored`: `originals` (1–8), `plane` (object reference or `{object, sketchAxis}` with `H_Axis`/`V_Axis`).
+- `loft`: `sections` (1–7 names), `mode` (`additive`/`subtractive`), optional `ruled`.
+- `pipe`: `spine` object, `mode` (`additive`/`subtractive`).
+
+Scalar parameter values take a plain number (lengths mm, angles degrees) or an `{"expression": "..."}` object that binds a native FreeCAD expression. The kinds that produce a solid (`pad` through `pipe`) become the Body Tip; datums, sketches, and the gear wire profile deliberately do not.
+
+Shapeless and null-shape objects are valid on FreeCAD 1.1.3: `create_object` creates `PartDesign::Body` and `Part::Feature` successfully, and the report shows `solid_count: 0` until the object holds a solid. A positive `expected_solids` on such an object fails with `has no geometry; expected_solids=N cannot be satisfied`. `create_feature` acts on an empty Body without a bootstrap script.
 
 `support` is applied through the `Support` property when the target type exposes it and through `AttachmentSupport` otherwise. `MapMode` is required either way. A target that exposes neither property fails with `feature '...' exposes neither Support nor AttachmentSupport`.
 
 An enumeration property such as `PartDesign::Pocket.Type` takes the exact string (`"Length"`), never an index.
+
+With `recovery_enabled` in settings, an expensive feature operation first writes one verified recovery copy of the document into the configured `recovery_directory` (see Recovery checkpoints). An operation is expensive when `create_feature` creates one of `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, or `pipe`, or when `edit_feature` edits a Body whose feature chain contains one of those types. The feature result then carries a `checkpoint` object with `path`, `document`, and `generation`.
 
 ## `create_object` details
 
@@ -111,8 +147,6 @@ The result carries the actual internal name and a post-recompute geometry report
 
 New volumetric geometry defaults to one solid; pass `expected_solids` to require a different count. Existing valid dependent solid counts are preserved when their inputs change.
 
-Compact `inspect_objects` rows carry `name`, `label`, `typeId`, `state`, `bounds`, `shape_valid`, `solid_count`, `tip`, and `links`. `detail: "full"` adds `placement`, `globalPlacement`, and the property pages: `properties` for the requested `property_filter` (or all names), plus `propertyMetadata` (type, read-only, enumeration), `propertyCount`, `nextPropertyOffset`, and `truncatedProperties`. The row `limit` defaults to 32 (max 500). Use `property_offset` and `property_limit` (default 64) to page large property sets. Bounds are document-space millimetres. Pagination uses an opaque signed cursor bound to the document generation and filters; a stale cursor returns a restart-pagination error.
-
 `run_script` executes on the GUI thread in a namespace seeded with `FreeCAD`/`App` and `Gui`. Variables persist per `session_id` for the server's lifetime. At most 32 sessions are kept; new sessions are refused instead of evicting live state. stdout, stderr, and the traceback are captured even when the code raises. `timeout_s` is a cooperative server deadline (1–3600 s, default 90); execution cannot be preempted, and the tool result says so truthfully. The tool is refused with `SERVER_BUSY` while a FEM solve is active.
 
 Use `run_script` for operations outside the structured tools: `FreeCADGui` calls, selection, imports of formats `import_model` does not support (it covers STEP and STL behind file consent), Parts Library access, mesh routes, and specialized property assignments.
@@ -121,7 +155,17 @@ Use `run_script` for operations outside the structured tools: `FreeCADGui` calls
 
 ## Consent
 
-Consent-gated operations: opening an untrusted FCStd file (the default), saving over a different existing file, closing a dirty or unsaved nonempty document, reloading a dirty document, and overwriting an export destination. A client that declares `elicitation.form` receives an MRTR elicitation with a fixed `confirm` boolean form and must answer it; the signed consent state is a single-use nonce bound to the operation target. Declining, cancelling, or tampering aborts the operation without effect (`CONSENT_DENIED`). A client without form support proceeds without the prompt; each bypass is noted in the Report view.
+Consent-gated operations: opening an untrusted FCStd file (the default), importing an untrusted STEP/STL file, saving over a different existing file, closing a dirty or unsaved nonempty document, reloading a dirty document, and overwriting an export destination. A client that declares `elicitation.form` receives an MRTR elicitation with a fixed `confirm` boolean form and must answer it; the signed consent state is a single-use nonce bound to the operation target. Declining, cancelling, or tampering aborts the operation without effect (`CONSENT_DENIED`). A client without form support proceeds without the prompt; each bypass is noted in the Report view.
+
+## Recovery checkpoints
+
+`recovery_enabled` plus a `recovery_directory` (inside an allowed root) turn on verified recovery copies. When enabled, an expensive feature operation automatically checkpoints before the transaction opens, and the document is checked idle first so a busy document is refused before an unstable copy is captured. A checkpoint is an FCStd copy written through the native `saveCopy` path, reopened, and compared with the live document before the mutation proceeds; the server never prunes or deletes previous checkpoints. A failed checkpoint refuses the mutation with `VALIDATION_FAILED`, `reason: checkpoint_failed`, and `nextAction: inspect_recovery_directory`, and removes only the staging file it created.
+
+Discovery reports `capabilities.recoveryEnabled` so clients can read the active policy.
+
+## Caching and resources
+
+Discovery, `tools/list`, and static resource results carry released caching hints as top-level `ttlMs`/`cacheScope` fields (public results: `ttlMs: 3600000`; live document data: `ttlMs: 0`, private scope). `resources/list` exposes one document resource, `freecad://documents`, whose `resources/read` returns the live open-document inventory. `tasks/update` exists as an acknowledgement-only method; all tools elicit before task creation, so it never grants input keys.
 
 ## Long-running operations and cancellation
 

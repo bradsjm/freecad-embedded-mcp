@@ -501,6 +501,21 @@ def _verify_reopened_copy(doc: Any, reopened: Any) -> None:
 
 def _export_fcstd(ctx: Any, doc: Any, destination: str) -> dict[str, Any]:
     original_file_name = str(doc.FileName)
+    original_modified = _modified_flag(doc)
+    active_document_name = None
+    selection_captured = False
+    selected_names: list[str] = []
+    try:
+        import FreeCADGui
+
+        if FreeCAD.ActiveDocument is not None:
+            active_document_name = str(FreeCAD.ActiveDocument.Name)
+        selected_names = [
+            str(getattr(obj, "Name", "")) for obj in (FreeCADGui.Selection.getSelection() or ())
+        ]
+        selection_captured = True
+    except Exception:
+        selection_captured = False
 
     staged = _staged_path(destination, _EXTENSIONS["fcstd"])
     reopened = None
@@ -513,10 +528,13 @@ def _export_fcstd(ctx: Any, doc: Any, destination: str) -> dict[str, Any]:
                 f"FCStd export failed: {type(exc).__name__}: {exc}",
                 {"path": destination},
             ) from exc
-        if str(doc.FileName) != original_file_name:
+        # Both the save identity and the unsaved-state flag must survive the
+        # copy: either change means the source document was disturbed.
+        if str(doc.FileName) != original_file_name or _modified_flag(doc) != original_modified:
             raise ToolError(
                 "VALIDATION_FAILED",
-                "FCStd export changed the document's save identity; refusing to publish",
+                "FCStd export changed the source document's save identity or "
+                "unsaved state; refusing to publish",
                 {"path": destination},
             )
         try:
@@ -535,10 +553,16 @@ def _export_fcstd(ctx: Any, doc: Any, destination: str) -> dict[str, Any]:
             if reopened is not None:
                 try:
                     FreeCAD.closeDocument(str(reopened.Name))
-                except Exception:
-                    pass
+                except Exception as close_exc:
+                    raise ToolError(
+                        "VALIDATION_FAILED",
+                        "FCStd export verification copy could not be closed; "
+                        "it remains open in the document tree",
+                        {"path": staged},
+                    ) from close_exc
     finally:
         _remove_own_temp(staged)
+        _restore_presentation(active_document_name, selected_names if selection_captured else None)
 
     return {
         "format": "fcstd",
@@ -546,6 +570,51 @@ def _export_fcstd(ctx: Any, doc: Any, destination: str) -> dict[str, Any]:
         "objects": [],
         "objectCount": len(doc.Objects),
     }
+
+
+def _restore_presentation(
+    active_document_name: str | None, selected_names: list[str] | None
+) -> None:
+    """Restore the caller's active document and selection; never raise.
+
+    ``selected_names`` is ``None`` when the selection could not be captured,
+    in which case it is left untouched; an empty list restores an empty
+    selection.
+    """
+
+    try:
+        import FreeCADGui
+
+        if (
+            active_document_name is not None
+            and getattr(FreeCAD.ActiveDocument, "Name", None) != active_document_name
+            and active_document_name in FreeCAD.listDocuments()
+        ):
+            FreeCAD.setActiveDocument(active_document_name)
+        gui_document = (
+            FreeCADGui.getDocument(active_document_name) if active_document_name else None
+        )
+        if gui_document is None or selected_names is None:
+            return
+        if selected_names:
+            FreeCADGui.Selection.setSelection(
+                [
+                    gui_document.getObject(name)
+                    for name in selected_names
+                    if gui_document.getObject(name)
+                ]
+            )
+        else:
+            FreeCADGui.Selection.clearSelection()
+    except Exception:
+        pass
+
+
+def _modified_flag(doc: Any) -> bool | None:
+    """Conservative ``doc.Modified`` read; ``None`` when unavailable."""
+
+    value = getattr(doc, "Modified", None)
+    return value if isinstance(value, bool) else None
 
 
 # ---------------------------------------------------------------------------

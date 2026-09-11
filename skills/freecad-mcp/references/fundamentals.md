@@ -17,7 +17,7 @@ For MCP work:
 
 A document contains the objects in a scene and is what FreeCAD saves to disk. It can contain groups and objects from multiple workbenches. Documents may have multiple views and only one active document at a time.
 
-Use this pattern through `run_script` when direct Python is useful:
+When `allow_scripts` is enabled and direct Python is useful, the same state looks like this:
 
 ```python
 import FreeCAD as App
@@ -27,13 +27,13 @@ print(doc.Name, doc.FileName)
 print([(obj.Name, obj.Label, obj.TypeId) for obj in doc.Objects])
 ```
 
-Use MCP `new_document` for a simple new document. There is no list-documents tool; enumerate open documents with `App.listDocuments()` through `run_script`. Use `reload_document` only after an external process edited the associated file; it asks for consent when the document is dirty.
+Use MCP `new_document` for a simple new document. Call `inspect_documents` to list the open documents: it takes no arguments and returns one row per document with its name, label, file path, object count, generation, dirty/active flags, transaction state, and the object under GUI edit, plus the `activeDocument`. Use `reload_document` only after an external process edited the associated file; it asks for consent when the document is dirty.
 
 Object `Name` is the internal identifier used for links and MCP follow-up calls. `Label` is display text and may change. FreeCAD sanitizes and de-duplicates names; every create response returns the actual name. Never assume the requested name survived unchanged.
 
 ## Object types and properties
 
-FreeCAD modules register document object types. `discover_capabilities` reports the installation's complete `supportedTypes` list. This inspection through `run_script` remains useful during a session:
+FreeCAD modules register document object types. `discover_capabilities` reports the installation's complete `supportedTypes` list. With `allow_scripts` enabled, the same inspection through `run_script` looks like this:
 
 ```python
 print("Part::Box" in App.ActiveDocument.supportedTypes())

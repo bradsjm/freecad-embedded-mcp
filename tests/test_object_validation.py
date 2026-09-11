@@ -234,12 +234,57 @@ class FakeGateApp:
 
 
 class FakeGateCtx:
-    def __init__(self, doc: FakeGateDoc) -> None:
+    def __init__(self, doc: FakeGateDoc, reveal: Any = None) -> None:
         self.App = FakeGateApp()
         self._doc = doc
+        self.revealed: list[Any] = []
+        self.reveal_hook = reveal
 
     def check_document_idle(self, doc: FakeGateDoc) -> None:
         pass
+
+    def reveal_objects(self, doc: FakeGateDoc, targets: list[Any]) -> None:
+        if self.reveal_hook is not None:
+            self.reveal_hook(doc, targets)
+        self.revealed.append((doc, list(targets)))
+
+
+def test_committed_mutation_reveals_its_targets() -> None:
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
+    ctx = FakeGateCtx(doc)
+
+    with mutation(ctx, doc, "gate", [obj]) as applied:
+        applied.append("Box")
+
+    assert [target.Name for _doc, targets in ctx.revealed for target in targets] == ["Box"]
+
+
+def test_rolled_back_mutation_never_reveals() -> None:
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
+    ctx = FakeGateCtx(doc)
+
+    with pytest.raises(ToolError), mutation(ctx, doc, "gate", [obj]):
+        raise RuntimeError("nope")
+
+    assert ctx.revealed == []
+
+
+def test_reveal_failure_never_fails_the_mutation() -> None:
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
+
+    def explode(_doc: Any, _targets: Any) -> None:
+        raise RuntimeError("no view")
+
+    ctx = FakeGateCtx(doc, reveal=explode)
+
+    with mutation(ctx, doc, "gate", [obj]) as applied:
+        pass
+
+    # The gate reports the target even though the reveal hook raised.
+    assert applied == ["Box"]
 
 
 def run_gate(doc: FakeGateDoc, obj: FakeShapeObj, body: Any) -> None:

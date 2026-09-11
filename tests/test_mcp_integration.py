@@ -5,7 +5,7 @@ shared ``test_server`` harness); the wire is REAL: a bound
 ``McpHTTPServer`` on an OS-assigned port driven through ``http.client``.
 Covers the plan's acceptance chain — legacy initialize on every revision
 with a session header, the initialized notification, tools/list with
-exactly 24 tools, discover_capabilities and a harmless run_script as
+exactly 25 tools, discover_capabilities and a harmless run_script as
 legacy-shaped final results — plus the guarantee that modern requests
 still validate unchanged and never acquire a legacy session implicitly.
 """
@@ -26,15 +26,8 @@ if str(TESTS_DIR) not in sys.path:
 
 import test_server as ts
 
-# server.py has already bound the harness's stub tool modules; drop the
-# fake tool package so later test files import the real modules again.
-for _name in [
-    _key
-    for _key in list(sys.modules)
-    if _key == "mcp_server.tools" or _key.startswith("mcp_server.tools.")
-]:
-    del sys.modules[_name]
-
+# ``test_server`` binds the stub tool modules and then releases the stub
+# package, so these imports resolve the real modules.
 from mcp_server.http_server import McpHTTPServer
 from mcp_server.legacy_protocol import (
     LEGACY_PROTOCOL_VERSIONS,
@@ -161,7 +154,7 @@ def test_legacy_session_flow_delivers_final_results_over_sse(wired_server):
     assert initialized.status == 202
     assert initialized.read() == b""
 
-    # tools/list: exactly 24 tools, no modern envelope metadata.
+    # tools/list: exactly 25 tools, no modern envelope metadata.
     response = _post(
         http,
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
@@ -170,7 +163,7 @@ def test_legacy_session_flow_delivers_final_results_over_sse(wired_server):
     status, body, _headers = _read_json(response)
     assert status == 200
     result = body["result"]
-    assert len(result["tools"]) == 24
+    assert len(result["tools"]) == 25
     assert [tool["name"] for tool in result["tools"]] == list(ts.server_module.PLAN_TOOL_ORDER)
     assert "resultType" not in result
     assert "ttlMs" not in result
@@ -255,7 +248,7 @@ def test_modern_requests_validate_unchanged_and_skip_legacy_sessions(
     response = _post(http, message, headers)
     status, body, response_headers = _read_json(response)
     assert status == 200
-    assert len(body["result"]["tools"]) == 24
+    assert len(body["result"]["tools"]) == 25
     assert body["result"]["resultType"] == "complete"
     # A modern request never acquires a legacy session implicitly.
     assert response_headers.get("mcp-session-id") is None
