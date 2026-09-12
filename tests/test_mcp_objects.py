@@ -330,6 +330,58 @@ class FakeObj:
         self._values.pop(prop, None)
 
 
+class FakeSheet(FakeObj):
+    """Spreadsheet cell authority with the native Sheet Python API shape."""
+
+    def __init__(
+        self,
+        name: str = "Params",
+        *,
+        cells: dict[str, str] | None = None,
+        aliases: dict[str, str] | None = None,
+    ) -> None:
+        object.__setattr__(self, "_sheet_cells", dict(cells or {}))
+        object.__setattr__(self, "_aliases", dict(aliases or {}))
+        addresses = tuple(sorted(self._sheet_cells))
+        super().__init__(
+            name,
+            TypeId="Spreadsheet::Sheet",
+            properties=(*addresses, "cells"),
+            prop_types={
+                **dict.fromkeys(addresses, "App::PropertyString"),
+                "cells": "Spreadsheet::PropertySheet",
+            },
+            values={address: self._value(address) for address in addresses},
+        )
+
+    def _value(self, address: str) -> Any:
+        content = self._sheet_cells[address]
+        return 3.7 if content.startswith("=") else content
+
+    def getCellFromAlias(self, alias: str) -> str:
+        return self._aliases.get(alias, "")
+
+    def getAlias(self, address: str) -> str:
+        return next((alias for alias, cell in self._aliases.items() if cell == address), "")
+
+    def getContents(self, address: str) -> str:
+        return self._sheet_cells[address]
+
+    def get(self, address: str) -> Any:
+        return self._value(address)
+
+    def set(self, address: str, content: str) -> None:
+        self._sheet_cells[address] = content
+        self._values[address] = self._value(address)
+        self.history.append(("cell", address, content))
+
+    def getUsedCells(self) -> list[str]:
+        return sorted(self._sheet_cells)
+
+    def getUsedRange(self) -> tuple[str, str]:
+        return ("A1", "B2") if self._sheet_cells else ("", "")
+
+
 class FakeDoc:
     """Transactions snapshot/restore declared property values and membership."""
 
@@ -1384,6 +1436,193 @@ def test_full_detail_rows_add_placement_and_property_pages() -> None:
     assert row["boundsCoordinateSystem"] == "document"
     assert row["properties"]["Length"] == 0
     validate_schema(result, objects_mod.TOOL_DEFINITIONS[0]["outputSchema"])
+
+
+def test_inspect_spreadsheet_reports_formula_alias_and_value() -> None:
+    sheet = FakeSheet(
+        cells={"A1": "1.85 mm", "B28": "=A1 * 2"},
+        aliases={"SocketCenter": "A1"},
+    )
+    doc = FakeDoc(objects=[sheet])
+    result = objects_mod.inspect_objects(
+        FakeCtx(doc),
+        {"document": doc.Name, "detail": "full", "property_filter": ["B28"]},
+    )
+
+    row = result["objects"][0]
+    assert row["propertyMetadata"]["B28"]["formula"] == "=A1 * 2"
+    assert row["spreadsheet"]["usedRange"] == {"from": "A1", "to": "B2"}
+    assert row["spreadsheet"]["cells"] == [
+        {
+            "address": "A1",
+            "alias": "SocketCenter",
+            "content": "1.85 mm",
+            "contentTruncated": False,
+            "formula": None,
+            "formulaTruncated": False,
+            "value": "1.85 mm",
+            "valueTruncated": False,
+            "error": None,
+        },
+        {
+            "address": "B28",
+            "alias": None,
+            "content": "=A1 * 2",
+            "contentTruncated": False,
+            "formula": "=A1 * 2",
+            "formulaTruncated": False,
+            "value": 3.7,
+            "valueTruncated": False,
+            "error": None,
+        },
+    ]
+    validate_schema(result, _output_schema("inspect_objects"))
+
+
+def test_edit_spreadsheet_cells_uses_native_set_and_verifies_contents() -> None:
+    sheet = FakeSheet(cells={"A1": "1.85 mm"}, aliases={"SocketCenter": "A1"})
+    doc = FakeDoc(objects=[sheet])
+
+    result = objects_mod.edit_object(
+        FakeCtx(doc),
+        {
+            "document": doc.Name,
+            "object": sheet.Name,
+            "properties": {"cells": {"SocketCenter": "0.01 mm", "B2": "=A1"}},
+        },
+    )
+
+    assert sheet.getContents("A1") == "0.01 mm"
+    assert sheet.getContents("B2") == "=A1"
+    assert sheet.history[-2:] == [
+        ("cell", "A1", "0.01 mm"),
+        ("cell", "B2", "=A1"),
+    ]
+    assert result["change"]["properties"] == [
+        {"name": "cells.A1", "before": "1.85 mm", "after": "0.01 mm"},
+        {"name": "cells.B2", "before": "", "after": "=A1"},
+    ]
+    assert result["change"]["cellContentsPersisted"] is True
+    validate_schema(result, _output_schema("edit_object"))
+
+
+def test_edit_spreadsheet_cells_rejects_non_string_contents_before_transaction() -> None:
+    sheet = FakeSheet(cells={"A1": "1.85 mm"})
+    doc = FakeDoc(objects=[sheet])
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            FakeCtx(doc),
+            {
+                "document": doc.Name,
+                "object": sheet.Name,
+                "properties": {"cells": {"A1": 0.01}},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "contents must be a string" in error.message
+    assert doc.calls == []
+
+
+def test_edit_spreadsheet_rejects_direct_cell_property_writes() -> None:
+    sheet = FakeSheet(cells={"A1": "1.85 mm"})
+    doc = FakeDoc(objects=[sheet])
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            FakeCtx(doc),
+            {
+                "document": doc.Name,
+                "object": sheet.Name,
+                "properties": {"A1": "0.01 mm"},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "properties.cells" in error.message
+    assert doc.calls == []
+
+
+def test_edit_spreadsheet_accepts_native_numeric_content_normalization() -> None:
+    class CanonicalSheet(FakeSheet):
+        def set(self, address: str, content: str) -> None:
+            super().set(address, "1" if content == "001" else content)
+
+    sheet = CanonicalSheet(cells={"A1": "0"})
+    doc = FakeDoc(objects=[sheet])
+
+    result = objects_mod.edit_object(
+        FakeCtx(doc),
+        {
+            "document": doc.Name,
+            "object": sheet.Name,
+            "properties": {"cells": {"A1": "001"}},
+        },
+    )
+
+    assert sheet.getContents("A1") == "1"
+    assert result["change"]["cellContentsPersisted"] is True
+
+
+def test_edit_spreadsheet_accepts_native_string_content_normalization() -> None:
+    class StringSheet(FakeSheet):
+        def set(self, address: str, content: str) -> None:
+            super().set(address, "'" + content if not content.startswith("'") else content)
+
+    sheet = StringSheet(cells={"A1": "'old"})
+    doc = FakeDoc(objects=[sheet])
+
+    result = objects_mod.edit_object(
+        FakeCtx(doc),
+        {
+            "document": doc.Name,
+            "object": sheet.Name,
+            "properties": {"cells": {"A1": "new"}},
+        },
+    )
+
+    assert sheet.getContents("A1") == "'new"
+    assert result["change"]["cellContentsPersisted"] is True
+
+    second = objects_mod.edit_object(
+        FakeCtx(doc),
+        {
+            "document": doc.Name,
+            "object": sheet.Name,
+            "properties": {"cells": {"A1": "ERR: literal text"}},
+        },
+    )
+    assert sheet.getContents("A1") == "'ERR: literal text"
+    assert second["change"]["cellContentsPersisted"] is True
+
+
+def test_spreadsheet_content_equivalence_accepts_native_noop_normalization() -> None:
+    assert objects_mod._spreadsheet_content_equivalent("001", "1") is True
+    assert objects_mod._spreadsheet_content_equivalent("1.85 mm", "1.850 mm") is True
+    assert objects_mod._spreadsheet_content_equivalent("foo", "'foo") is True
+    assert objects_mod._spreadsheet_content_equivalent("=New", "=Old") is False
+    assert objects_mod._spreadsheet_content_equivalent("123abc", "'123abc") is True
+
+
+def test_inspect_spreadsheet_truncates_long_cell_content_and_value() -> None:
+    long_content = "x" * (objects_mod._MAX_SPREADSHEET_CONTENT + 100)
+    sheet = FakeSheet(cells={"A1": long_content})
+    doc = FakeDoc(objects=[sheet])
+
+    result = objects_mod.inspect_objects(
+        FakeCtx(doc),
+        {"document": doc.Name, "detail": "full"},
+    )
+    row = result["objects"][0]
+    cell = row["spreadsheet"]["cells"][0]
+
+    assert len(cell["content"]) == objects_mod._MAX_SPREADSHEET_CONTENT
+    assert cell["contentTruncated"] is True
+    assert len(cell["value"]) == objects_mod._MAX_SPREADSHEET_CONTENT
+    assert cell["valueTruncated"] is True
+    assert row["truncatedProperties"] == ["A1"]
+    validate_schema(result, _output_schema("inspect_objects"))
 
 
 def test_inspect_default_page_limit_is_32() -> None:

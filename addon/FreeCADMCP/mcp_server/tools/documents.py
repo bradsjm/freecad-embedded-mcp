@@ -393,11 +393,16 @@ TOOL_DEFINITIONS = [
         "close_document",
         "Close exactly one document. A dirty or unsaved nonempty document "
         "requires MRTR consent first; unsaved changes are then discarded. "
-        "Only the named document is closed.",
+        "Only the named document is closed. The result reports the path and "
+        "whether the pre-close state discarded unsaved changes.",
         {"document": _DOCUMENT_SCHEMA},
         ["document"],
-        {"document": {"type": "string", "minLength": 1}},
-        ["document"],
+        {
+            "document": {"type": "string", "minLength": 1},
+            "path": {"type": ["string", "null"]},
+            "discardedChanges": {"type": "boolean"},
+        },
+        ["document", "path", "discardedChanges"],
     ),
     _definition(
         "reload_document",
@@ -529,9 +534,11 @@ def _save_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
 def _close_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     doc = ctx.require_document(arguments["document"])
     ctx.check_document_idle(doc)
-    if _is_dirty(ctx, doc):
+    discarded_changes = _is_dirty(ctx, doc)
+    if discarded_changes:
         _require_approved(ctx, _close_preflight(ctx, arguments))
     name = str(doc.Name)
+    path = str(getattr(doc, "FileName", "")) or None
     try:
         ctx.App.closeDocument(name)
     except Exception as exc:
@@ -539,7 +546,11 @@ def _close_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             VALIDATION_FAILED,
             f"closing document '{name}' failed: {_describe(exc)}",
         ) from exc
-    return {"document": name}
+    return {
+        "document": name,
+        "path": path,
+        "discardedChanges": discarded_changes,
+    }
 
 
 def _reload_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:

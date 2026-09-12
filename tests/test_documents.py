@@ -544,7 +544,11 @@ def test_close_document_clean_closes_without_consent(tmp_path):
     clean = FakeDoc("clean", file_name=str(ctx.allowed_root / "c.FCStd"), modified=False)
     ctx.add_document(clean)
     payload = documents.HANDLERS["close_document"](ctx, {"document": "clean"})
-    assert payload == {"document": "clean"}
+    assert payload == {
+        "document": "clean",
+        "path": clean.FileName,
+        "discardedChanges": False,
+    }
     assert "clean" not in ctx.App.documents
 
 
@@ -559,7 +563,9 @@ def test_close_document_dirty_requires_consent(tmp_path):
 
     target = documents.preflight(ctx, "close_document", {"document": "dirty"})
     ctx.approved_target = target
-    documents.HANDLERS["close_document"](ctx, {"document": "dirty"})
+    payload = documents.HANDLERS["close_document"](ctx, {"document": "dirty"})
+    assert payload["path"] is None
+    assert payload["discardedChanges"] is True
     assert "dirty" not in ctx.App.documents
 
 

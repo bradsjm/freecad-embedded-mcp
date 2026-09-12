@@ -496,6 +496,8 @@ def _geometry_entry(
     volume = report["volume"]
     if expected_solids is None:
         solids_verdict = "unspecified"
+    elif solid_count is None:
+        solids_verdict = "unavailable"
     elif solid_count == expected_solids:
         solids_verdict = "match"
     else:
@@ -519,9 +521,10 @@ def _geometry_entry(
             "deviations": deviations,
         }
     valid = (
-        bool(report["object_valid"])
+        bool(report.get("ok", True))
+        and bool(report["object_valid"])
         and report["shape_valid"] is not False
-        and solids_verdict != "mismatch"
+        and solids_verdict not in ("mismatch", "unavailable")
         and volume_verdict in ("positive", "not_applicable")
         and (bounds_verdict is None or bounds_verdict["verdict"] == "match")
     )
@@ -535,6 +538,7 @@ def _geometry_entry(
         "bounds": measured,
         "max_tolerance": report["max_tolerance"],
         "diagnostics": list(report["diagnostics"]),
+        "error": report.get("error"),
         "verdicts": {
             "solids": solids_verdict,
             "volume": volume_verdict,
@@ -596,7 +600,21 @@ def _measure_interference(a_shape: Any, b_shape: Any, payload: dict) -> dict:
         common = a_shape.common(b_shape)
     except Exception as exc:
         raise ToolError(VALIDATION_FAILED, f"common computation failed: {exc}") from exc
-    volume = _finite(getattr(common, "Volume", None)) or 0.0
+    try:
+        raw_volume = getattr(common, "Volume", None)
+    except Exception as exc:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"common-volume computation returned no readable volume: {exc}",
+            {"reason": "measurement_unavailable", "measurement": "common_volume"},
+        ) from exc
+    volume = _finite(raw_volume)
+    if volume is None:
+        raise ToolError(
+            VALIDATION_FAILED,
+            "common-volume computation returned no finite volume",
+            {"reason": "measurement_unavailable", "measurement": "common_volume"},
+        )
     payload["common_volume"] = volume
     payload["overlaps"] = volume > 0.0
     return payload
@@ -1329,7 +1347,7 @@ _VALIDATE_GEOMETRY_OUTPUT = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "solids": {"enum": ["match", "mismatch", "unspecified"]},
+                "solids": {"enum": ["match", "mismatch", "unavailable", "unspecified"]},
                 "volume": {"enum": ["positive", "nonpositive", "not_applicable"]},
                 "bounds": {"$ref": "#/$defs/boundsVerdict"},
             },
@@ -1348,6 +1366,7 @@ _VALIDATE_GEOMETRY_OUTPUT = {
                 "bounds": {"$ref": "#/$defs/bounds"},
                 "max_tolerance": {"type": ["number", "null"]},
                 "diagnostics": {"type": "array", "items": {"type": "string"}},
+                "error": {"type": ["string", "null"]},
                 "verdicts": {"$ref": "#/$defs/verdicts"},
                 "valid": {"type": "boolean"},
             },
@@ -1361,6 +1380,7 @@ _VALIDATE_GEOMETRY_OUTPUT = {
                 "bounds",
                 "max_tolerance",
                 "diagnostics",
+                "error",
                 "verdicts",
                 "valid",
             ],

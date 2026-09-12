@@ -25,18 +25,18 @@ default server exposes 25. Document tools return the actual sanitized
 
 | Tool | Use | Important arguments |
 |---|---|---|
-| `discover_capabilities` | Versions, workbenches, supported types, exporter and FEM availability, GUI dispatch health | optional `refresh` (default `false`; `true` re-captures through the GUI path) and `detail` (`compact` default or `full`); GUI-independent without `refresh` |
+| `discover_capabilities` | Versions, workbenches, supported types, exporter and FEM availability, GUI dispatch health | optional `refresh` (default `false`; `true` re-captures through the GUI path) and `detail` (`compact` default or `full`); GUI-independent without `refresh`. Use `tools/list` for exact tool schemas. |
 | `inspect_documents` | Open-document inventory with generation, dirty/active flags, and transaction state | none |
 | `new_document` | Create an empty document | `name` |
 | `open_document` | Open an `.FCStd` from an allowed root or the configured recovery directory | `path`; `untrusted` defaults true and requires consent |
 | `import_model` | Import STEP or STL behind file consent | `document`, `path`, `format`; optional `name` (STL mesh feature) |
 | `save_document` | Save to the existing path, or save-as | `document`; optional `path` (consent to overwrite a different existing file) |
-| `close_document` | Close one document | `document`; consent when dirty or unsaved nonempty |
+| `close_document` | Close one document and report its prior path and discarded state | `document`; consent when dirty or unsaved nonempty |
 | `reload_document` | Close and reopen the saved file | `document`; consent to discard unsaved changes |
 | `inspect_objects` | List objects sorted by Name, or a 1–64 object selection; signed-cursor pagination | `document`; optional `objects`, `cursor`, `detail` (`compact`/`full`), `property_filter`, `limit` (default 32, max 500), `property_offset`, `property_limit` |
 | `create_object` | Create a supported Part/App type or a FEM object | `document`, `type`, `name`; optional `properties`, `expected_solids`, `expected_bounds`, `bounds_tolerance` |
 | `create_objects` | Create 1–32 independent objects atomically; returns the requested-to-actual `nameMapping` | `document`, `entries`; optional `expectations` keyed by requested name, `response_detail` |
-| `edit_object` | Assign properties with full prevalidation; returns before/after deltas | `document`, `object`, `properties`; optional `expected_solids`, `expected_bounds`, `bounds_tolerance`, `response_detail` |
+| `edit_object` | Assign properties with full prevalidation; `Spreadsheet::Sheet` cell contents use `properties.cells`; returns before/after deltas | `document`, `object`, `properties`; optional `expected_solids`, `expected_bounds`, `bounds_tolerance`, `response_detail` |
 | `edit_objects` | Edit 1–32 objects atomically | `document`, `edits`; optional `expectations` per object, `response_detail` |
 | `delete_object` | Delete one object; refuses objects with dependents | `document`, `object` |
 | `validate_geometry` | State, validity, solid count, volume, bounds, tolerance | `document`, `objects` (max 100); optional `expected_solids`, `expected_bounds`, `bounds_tolerance` |
@@ -70,9 +70,9 @@ Valid `view_name` values are `Isometric`, `Front`, `Top`, `Right`, `Back`, `Left
 
 ## Standard sequence
 
-1. Call `discover_capabilities`. Read `gui.state`, exporter/FEM availability, and the supported-type inventory; add `detail: "full"` when the complete `supportedTypes` list is needed.
+1. Call `discover_capabilities`. Read `gui.state`, exporter/FEM availability, and the supported-type inventory; add `detail: "full"` when the complete `supportedTypes` list is needed. Call `tools/list` when you need exact tool schemas.
 2. Address the target document by the `name` returned by `new_document` or `open_document`. When the name is unknown, call `inspect_documents` and read its rows before choosing the target.
-3. Call `inspect_objects(document)` and read the compact rows before editing.
+3. Call `inspect_objects(document)` and read the compact rows before editing. Use `detail: "full"` for a `Spreadsheet::Sheet` when cell contents, formulas, aliases, or evaluated values matter.
 4. Create or edit one dependency stage at a time; use `create_objects` only for independent entries, then inspect after each recompute.
 5. Run `validate_geometry` and `measure` on the final solid.
 6. Call `export`, then `capture_view` from the most informative orientation when useful.
@@ -91,11 +91,11 @@ Valid `view_name` values are `Isometric`, `Front`, `Top`, `Right`, `Back`, `Left
 
 Bounds arrays use document-space `[xmin, ymin, zmin, xmax, ymax, zmax]` order. This order applies to `bounds` and `expected_bounds`; `bounds_tolerance` is a scalar value.
 
-A failure during the transaction aborts the whole operation, recomputes the restored document, and reports rollback failure separately. Full change summaries from `create_object`, `edit_object`, and `edit_objects` report `dependentCountBefore` alongside `dependentCount`; `response_detail: "compact"` omits before-state deltas and dependent counts while retaining the post-state verdict. `create_objects` returns `nameMapping`; sibling links need a later `edit_objects` call because actual names are assigned after creation. Feature-specific assignments the mapper cannot express go through `run_script`.
+For `Spreadsheet::Sheet`, set cell contents with `properties.cells` and address or alias keys. The change summary carries `cellContentsPersisted: true` after native readback survives recompute. This flag does not save the FCStd file. Feature-specific assignments the mapper cannot express go through `run_script`.
 
 ## Inspection response
 
-Compact `inspect_objects` rows carry `name`, `label`, `typeId`, `state`, `bounds`, `shape_valid`, `solid_count`, `tip`, and `links`. `detail: "full"` adds `placement`, `globalPlacement`, and the property pages: `properties` for the requested `property_filter` (or all names), plus `propertyMetadata` (type, read-only, enumeration), `propertyCount`, `nextPropertyOffset`, and `truncatedProperties`. The row `limit` defaults to 32 (max 500). Use `property_offset` and `property_limit` (default 64) to page large property sets. Bounds are document-space millimetres. Pagination uses an opaque signed cursor bound to the document generation and filters; a stale cursor returns a restart-pagination error.
+Compact `inspect_objects` rows carry `name`, `label`, `typeId`, `state`, `bounds`, `shape_valid`, `solid_count`, `tip`, and `links`. `detail: "full"` adds `placement`, `globalPlacement`, and the property pages: `properties` for the requested `property_filter` (or all names), plus `propertyMetadata` (type, read-only, enumeration, and spreadsheet formulas), `propertyCount`, `nextPropertyOffset`, and `truncatedProperties`. A `Spreadsheet::Sheet` row also carries a bounded `spreadsheet` inventory with cell addresses, aliases, raw contents, formulas, evaluated values, and errors. Cell rows carry truncation flags, and the inventory caps the returned cell count. The row `limit` defaults to 32 (max 500). Use `property_offset` and `property_limit` (default 64) to page large property sets. Bounds are document-space millimetres. Pagination uses an opaque signed cursor bound to the document generation and filters; a stale cursor returns a restart-pagination error.
 
 Use `typeId` and internal `name` for automation. Use `label` only for human presentation.
 
@@ -109,7 +109,7 @@ A constraint `(type, argument-count)` shape with no recorded native acceptance i
 
 ## `edit_parameters` results
 
-`edit_parameters` results carry `document`, `generation`, and `applied`. Each `applied` entry is an operation label: `add:NAME`, `rename:OLD->NEW`, `expression:PROP`, or `clear:PROP`. The list ends with the mutated object's internal `Name`.
+`edit_parameters` results carry `document`, `generation`, and `applied`. Each `applied` entry is an operation label: `add:NAME`, `rename:OLD->NEW`, `expression:PROP`, or `clear:PROP`. Expression and clear targets may use native dotted paths such as `Placement.Base.y` when the root property exists. The list ends with the mutated object's internal `Name`.
 
 ## `create_feature` details
 
@@ -161,6 +161,8 @@ The result carries the actual internal name and a post-recompute geometry report
 New volumetric geometry defaults to one solid; pass `expected_solids` to require a different count. Existing valid dependent solid counts are preserved when their inputs change.
 
 `run_script` executes on the GUI thread in a namespace seeded with `FreeCAD`/`App` and `Gui`. Variables persist per `session_id` for the server's lifetime. At most 32 sessions are kept; new sessions are refused instead of evicting live state. stdout, stderr, and the traceback are captured even when the code raises. `timeout_s` is a cooperative server deadline (1–3600 s, default 90); execution cannot be preempted, and the tool result says so truthfully. The tool is refused with `SERVER_BUSY` while a FEM solve is active.
+
+`close_document` does not save. Its result includes the document name, the path captured before close, and `discardedChanges`, which reports whether the pre-close state was dirty. Use `save_document` before close when the source must persist. Reopen and inspect the file when an independent persistence check is required.
 
 Use `run_script` for operations outside the structured tools: `FreeCADGui` calls, selection, imports of formats `import_model` does not support (it covers STEP and STL behind file consent), Parts Library access, mesh routes, and specialized property assignments.
 

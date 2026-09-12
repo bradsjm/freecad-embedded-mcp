@@ -331,6 +331,41 @@ def test_expression_key_unknown_rejected():
     assert obj.ops == []
 
 
+def test_dotted_expression_path_uses_existing_property_root():
+    obj = FakeObj(properties=["Placement"])
+    ctx = FakeCtx(obj)
+
+    result = call(
+        ctx,
+        {**base(), "expressions": {".Placement.Base.y": "Params.CenterY"}},
+    )
+
+    assert result["expressions"] == [".Placement.Base.y"]
+    assert ("expression", ".Placement.Base.y", "Params.CenterY") in obj.ops
+
+
+def test_dotted_expression_path_with_unknown_root_is_rejected():
+    obj = FakeObj(properties=["Placement"])
+    ctx = FakeCtx(obj)
+
+    with pytest.raises(ToolError) as excinfo:
+        call(ctx, {**base(), "expressions": {"Missing.Base.y": "1"}})
+
+    assert "not a property" in excinfo.value.message
+    assert obj.ops == []
+
+
+def test_dotted_expression_path_checks_non_container_read_only_root():
+    obj = FakeObj(properties=["Locked"], read_only=["Locked"])
+    ctx = FakeCtx(obj)
+
+    with pytest.raises(ToolError) as excinfo:
+        call(ctx, {**base(), "expressions": {"Locked.Base.y": "1"}})
+
+    assert "read-only" in excinfo.value.message
+    assert obj.ops == []
+
+
 # ---------------------------------------------------------------------------
 # Atomicity inside the shared mutation gate.
 # ---------------------------------------------------------------------------

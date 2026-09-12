@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import difflib
 import math
+import re
 from typing import Any
 
 import FreeCAD
@@ -39,6 +40,38 @@ _MAX_PROPERTY_PAGE = 64
 _PROPERTY_LIST_LIMIT = 64
 _ENUMERATION_LIMIT = 64
 _MAX_DEPENDENTS_LISTED = 64
+_MAX_SPREADSHEET_CELLS = 256
+_MAX_SPREADSHEET_CONTENT = 4096
+_MAX_SPREADSHEET_ERROR = 1024
+_SPREADSHEET_TYPE = "Spreadsheet::Sheet"
+_CELL_ADDRESS = re.compile(r"^[A-Za-z]+[1-9][0-9]*$")
+_SPREADSHEET_SIMPLE_UNITS = frozenset(
+    {
+        "a",
+        "cm",
+        "deg",
+        "f",
+        "ft",
+        "g",
+        "h",
+        "in",
+        "kg",
+        "m",
+        "mil",
+        "min",
+        "mm",
+        "n",
+        "nm",
+        "pa",
+        "rad",
+        "s",
+        "um",
+        "v",
+        "w",
+        "%",
+        "°",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Explicit FEM factory mapping (PLAN §5 item 8: no guessed factory names).
@@ -317,6 +350,35 @@ _PROPERTY_VALUE = {
     ]
 }
 
+_SPREADSHEET_VALUE = {
+    "anyOf": [
+        {"type": "string", "maxLength": _MAX_SPREADSHEET_CONTENT},
+        {"type": "number"},
+        {"type": "boolean"},
+        {"type": "null"},
+        _XYZ,
+        _PLACEMENT_VALUE,
+        _LINK_VALUE,
+        {
+            "type": "array",
+            "items": {
+                "anyOf": [
+                    {"type": "string", "maxLength": _MAX_SPREADSHEET_CONTENT},
+                    {"type": "number"},
+                    {"type": "boolean"},
+                ]
+            },
+            "maxItems": 64,
+        },
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["unavailable"],
+            "properties": {"unavailable": {"type": "string", "maxLength": _MAX_SPREADSHEET_ERROR}},
+        },
+    ]
+}
+
 _OBJECT_ROW = {
     "type": "object",
     "additionalProperties": False,
@@ -410,7 +472,62 @@ _PROPERTY_METADATA = {
         },
         "enumerationCount": {"type": "integer", "minimum": 0},
         "enumerationTruncated": {"type": "boolean"},
-        "expression": {"type": ["string", "null"]},
+        "expression": {
+            "type": ["string", "null"],
+            "maxLength": _MAX_SPREADSHEET_CONTENT,
+        },
+        "formula": {"type": ["string", "null"], "maxLength": _MAX_SPREADSHEET_CONTENT},
+        "formulaTruncated": {"type": "boolean"},
+        "expressionTruncated": {"type": "boolean"},
+    },
+}
+
+_SPREADSHEET_CELL = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "address",
+        "alias",
+        "content",
+        "contentTruncated",
+        "formula",
+        "formulaTruncated",
+        "value",
+        "valueTruncated",
+        "error",
+    ],
+    "properties": {
+        "address": {"type": "string", "minLength": 1},
+        "alias": {"type": ["string", "null"]},
+        "content": {"type": "string", "maxLength": _MAX_SPREADSHEET_CONTENT},
+        "contentTruncated": {"type": "boolean"},
+        "formula": {"type": ["string", "null"], "maxLength": _MAX_SPREADSHEET_CONTENT},
+        "formulaTruncated": {"type": "boolean"},
+        "value": _SPREADSHEET_VALUE,
+        "valueTruncated": {"type": "boolean"},
+        "error": {"type": ["string", "null"], "maxLength": _MAX_SPREADSHEET_ERROR},
+    },
+}
+
+_SPREADSHEET_INFO = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["available", "usedRange", "cells", "cellCount", "truncated"],
+    "properties": {
+        "available": {"type": "boolean"},
+        "error": {"type": "string", "maxLength": _MAX_SPREADSHEET_ERROR},
+        "usedRange": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "required": ["from", "to"],
+            "properties": {
+                "from": {"type": "string", "minLength": 1},
+                "to": {"type": "string", "minLength": 1},
+            },
+        },
+        "cells": {"type": "array", "items": _SPREADSHEET_CELL, "maxItems": _MAX_SPREADSHEET_CELLS},
+        "cellCount": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"},
     },
 }
 
@@ -427,6 +544,7 @@ _OBJECT_ROW["properties"].update(
             "items": {"type": "string"},
             "maxItems": _MAX_PROPERTY_PAGE,
         },
+        "spreadsheet": _SPREADSHEET_INFO,
     }
 )
 
@@ -434,6 +552,8 @@ _ROW_DEFS = {
     "placement": _PLACEMENT_ROW,
     "objectRow": _OBJECT_ROW,
     "propertyMetadata": _PROPERTY_METADATA,
+    "spreadsheetCell": _SPREADSHEET_CELL,
+    "spreadsheetInfo": _SPREADSHEET_INFO,
 }
 
 _CHANGE_PROPERTY = {
@@ -487,6 +607,7 @@ _CHANGE = {
         "geometry": _CHANGE_GEOMETRY,
         "dependentCountBefore": {"type": "integer", "minimum": 0},
         "dependentCount": {"type": "integer", "minimum": 0},
+        "cellContentsPersisted": {"type": "boolean"},
     },
 }
 
@@ -828,6 +949,9 @@ TOOL_DEFINITIONS = [
             "solid count, Body tip and link identities; full detail adds "
             "local and global placements, property pages and property "
             "metadata with typed unavailable markers and expressions. "
+            "Spreadsheet sheets also expose a bounded cell inventory with "
+            "raw contents, formulas, aliases, evaluated values and errors. "
+            "Cell rows mark truncated content and values explicitly. "
             "Pagination uses an opaque signed cursor bound to the document "
             "generation, the selection and the filters; a stale cursor is a "
             "restart-pagination error. limit and property_limit are "
@@ -890,6 +1014,9 @@ TOOL_DEFINITIONS = [
             "links) before the transaction opens, so a later invalid "
             "property leaves earlier ones unchanged. Preserves vector, "
             "placement, color, ViewObject and link conversions; "
+            "Spreadsheet::Sheet cell contents use properties.cells with "
+            "address or alias keys and persist through the native sheet API; "
+            "a cellContentsPersisted flag is returned after recompute readback. "
             "FuzzyTolerance is honored only when the feature actually "
             "exposes it. Optional expected_bounds (six document-space mm "
             "coordinates in xmin, ymin, zmin, xmax, ymax, zmax order plus "
@@ -1031,6 +1158,331 @@ def _number(value: Any, what: str) -> float:
     if not math.isfinite(number):
         raise ToolError(VALIDATION_FAILED, f"{what} must be finite")
     return number
+
+
+def _is_spreadsheet(obj: Any) -> bool:
+    return str(getattr(obj, "TypeId", "")) == _SPREADSHEET_TYPE
+
+
+def _spreadsheet_cell_address(sheet: Any, requested: Any) -> str:
+    if not isinstance(requested, str) or not requested.strip():
+        raise ToolError(VALIDATION_FAILED, "spreadsheet cell names must be non-empty strings")
+    key = requested.strip()
+    address: str | None = None
+    alias_resolver = getattr(sheet, "getCellFromAlias", None)
+    if callable(alias_resolver):
+        try:
+            resolved = alias_resolver(key)
+        except Exception:
+            resolved = None
+        if isinstance(resolved, str) and resolved:
+            address = resolved
+    if address is None:
+        if not _CELL_ADDRESS.fullmatch(key):
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"spreadsheet cell '{requested}' is not a single cell address or alias",
+                {"cell": requested, "nextTool": "inspect_objects"},
+            )
+        address = key.upper()
+    if not _CELL_ADDRESS.fullmatch(address):
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"spreadsheet alias '{requested}' resolved to an invalid cell address",
+            {"cell": requested},
+        )
+    return address
+
+
+def _spreadsheet_alias(sheet: Any, address: str) -> str | None:
+    getter = getattr(sheet, "getAlias", None)
+    if not callable(getter):
+        return None
+    try:
+        alias = getter(address)
+    except Exception:
+        return None
+    return str(alias) if isinstance(alias, str) and alias else None
+
+
+def _truncate_text(value: str, limit: int) -> tuple[str, bool]:
+    return value[:limit], len(value) > limit
+
+
+def _spreadsheet_error(value: Any) -> str:
+    return _truncate_text(str(value), _MAX_SPREADSHEET_ERROR)[0]
+
+
+def _spreadsheet_content_equivalent(left: str, right: str) -> bool:
+    if left == right:
+        return True
+
+    def normalized(value: str) -> tuple[str, Any, str]:
+        text = value.strip()
+        if text.startswith("'"):
+            return "text", text[1:].strip(), ""
+        match = re.fullmatch(
+            r"([+-]?(?:[0-9]+(?:[.,][0-9]*)?|[.,][0-9]+)(?:[eE][+-]?[0-9]+)?)"
+            r"\s*([A-Za-zµ%°][A-Za-z0-9_µ%°]*)?",
+            text,
+        )
+        if match is None:
+            return "text", text, ""
+        unit = (match.group(2) or "").casefold()
+        if unit and unit not in _SPREADSHEET_SIMPLE_UNITS:
+            return "text", text, ""
+        number = float(match.group(1).replace(",", "."))
+        if not math.isfinite(number):
+            return "text", text, ""
+        return "number", f"{number:.15g}", unit
+
+    return normalized(left) == normalized(right)
+
+
+def _spreadsheet_contents(sheet: Any, address: str) -> str:
+    getter = getattr(sheet, "getContents", None)
+    if not callable(getter):
+        raise ToolError(
+            VALIDATION_FAILED,
+            "the installed FreeCAD Spreadsheet::Sheet has no getContents API",
+            {"reason": "native_api_unavailable"},
+        )
+    try:
+        content = getter(address)
+    except Exception as exc:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"reading spreadsheet cell '{address}' failed: {_spreadsheet_error(_describe(exc))}",
+            {"cell": address},
+        ) from exc
+    if not isinstance(content, str):
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"spreadsheet cell '{address}' returned non-string contents",
+            {"cell": address},
+        )
+    return content
+
+
+def _spreadsheet_cell_snapshot(sheet: Any, requested: Any) -> dict[str, Any]:
+    address = _spreadsheet_cell_address(sheet, requested)
+    alias = _spreadsheet_alias(sheet, address)
+    try:
+        full_content = _spreadsheet_contents(sheet, address)
+    except ToolError as exc:
+        return {
+            "address": address,
+            "alias": alias,
+            "content": "",
+            "contentTruncated": False,
+            "formula": None,
+            "formulaTruncated": False,
+            "value": _unavailable("spreadsheet-read-failed"),
+            "valueTruncated": False,
+            "error": _truncate_text(exc.message, _MAX_SPREADSHEET_ERROR)[0],
+        }
+    content, content_truncated = _truncate_text(full_content, _MAX_SPREADSHEET_CONTENT)
+    full_formula = full_content if full_content.startswith("=") else None
+    formula = None
+    formula_truncated = False
+    if full_formula is not None:
+        formula, formula_truncated = _truncate_text(full_formula, _MAX_SPREADSHEET_CONTENT)
+    value: Any = _unavailable("spreadsheet-value-unavailable")
+    value_truncated = False
+    error: str | None = None
+    getter = getattr(sheet, "get", None)
+    if not callable(getter):
+        error = "the installed FreeCAD Spreadsheet::Sheet has no get API"
+    else:
+        try:
+            raw_value = getter(address)
+            value = _jsonify(raw_value)
+            value_truncated = (
+                isinstance(raw_value, (list, tuple)) and len(raw_value) > _PROPERTY_LIST_LIMIT
+            )
+        except Exception as exc:
+            error = _spreadsheet_error(_describe(exc))
+    if isinstance(value, str) and len(value) > _MAX_SPREADSHEET_CONTENT:
+        value, value_truncated = _truncate_text(value, _MAX_SPREADSHEET_CONTENT)
+    return {
+        "address": address,
+        "alias": alias,
+        "content": content,
+        "contentTruncated": content_truncated,
+        "formula": formula,
+        "formulaTruncated": formula_truncated,
+        "value": value,
+        "valueTruncated": value_truncated,
+        "error": error,
+    }
+
+
+def _spreadsheet_info(sheet: Any) -> dict[str, Any]:
+    used_getter = getattr(sheet, "getUsedCells", None)
+    range_getter = getattr(sheet, "getUsedRange", None)
+    if not callable(used_getter) or not callable(range_getter):
+        missing = [
+            name
+            for name, getter in (("getUsedCells", used_getter), ("getUsedRange", range_getter))
+            if not callable(getter)
+        ]
+        return {
+            "available": False,
+            "error": f"Spreadsheet::Sheet is missing native API: {', '.join(missing)}",
+            "usedRange": None,
+            "cells": [],
+            "cellCount": 0,
+            "truncated": False,
+        }
+    try:
+        raw_cells = used_getter() or ()
+        try:
+            raw_count = len(raw_cells)
+            sample = raw_cells[: _MAX_SPREADSHEET_CELLS + 1]
+        except TypeError:
+            raw_count = None
+            sample = []
+            for value in raw_cells:
+                sample.append(value)
+                if len(sample) > _MAX_SPREADSHEET_CELLS:
+                    break
+        addresses: set[str] = set()
+        for value in sample:
+            if not isinstance(value, str) or not value:
+                continue
+            if len(addresses) >= _MAX_SPREADSHEET_CELLS:
+                break
+            addresses.add(_spreadsheet_cell_address(sheet, value))
+        raw_range = range_getter()
+    except ToolError:
+        raise
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": "reading spreadsheet cell inventory failed: "
+            f"{_spreadsheet_error(_describe(exc))}",
+            "usedRange": None,
+            "cells": [],
+            "cellCount": 0,
+            "truncated": False,
+        }
+    used_range = None
+    if isinstance(raw_range, (list, tuple)) and len(raw_range) == 2:
+        start, end = (str(value) for value in raw_range)
+        if start and end:
+            used_range = {"from": start, "to": end}
+    cell_count = raw_count if raw_count is not None else len(addresses)
+    truncated = (
+        raw_count > _MAX_SPREADSHEET_CELLS
+        if raw_count is not None
+        else len(sample) > _MAX_SPREADSHEET_CELLS
+    )
+    cells = [
+        _spreadsheet_cell_snapshot(sheet, address)
+        for address in sorted(addresses)[:_MAX_SPREADSHEET_CELLS]
+    ]
+    return {
+        "available": True,
+        "usedRange": used_range,
+        "cells": cells,
+        "cellCount": cell_count,
+        "truncated": truncated,
+    }
+
+
+def _spreadsheet_write_plan(sheet: Any, cells: Any) -> list[tuple[str, str]]:
+    if not isinstance(cells, dict):
+        raise ToolError(VALIDATION_FAILED, "spreadsheet properties.cells must be an object")
+    if len(cells) > _MAX_SPREADSHEET_CELLS:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"spreadsheet properties.cells accepts at most {_MAX_SPREADSHEET_CELLS} cells",
+        )
+    plan: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for requested, content in cells.items():
+        address = _spreadsheet_cell_address(sheet, requested)
+        if address in seen:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"spreadsheet cells address '{address}' is listed more than once",
+            )
+        if not isinstance(content, str):
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"spreadsheet cell '{requested}' contents must be a string",
+            )
+        if len(content) > _MAX_SPREADSHEET_CONTENT:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"spreadsheet cell '{requested}' contents exceed "
+                f"{_MAX_SPREADSHEET_CONTENT} characters",
+            )
+        seen.add(address)
+        plan.append((address, content))
+    return plan
+
+
+def _spreadsheet_write_receipt(sheet: Any, cells: Any) -> list[tuple[Any, str, str, str]]:
+    receipt: list[tuple[Any, str, str, str]] = []
+    for address, content in _spreadsheet_write_plan(sheet, cells):
+        try:
+            before = _spreadsheet_contents(sheet, address)
+        except ToolError as exc:
+            if (
+                isinstance(exc.details, dict)
+                and exc.details.get("reason") == "native_api_unavailable"
+            ):
+                raise
+            before = ""
+        receipt.append((sheet, address, content, before))
+    return receipt
+
+
+def _set_spreadsheet_cell(sheet: Any, address: str, content: str) -> None:
+    setter = getattr(sheet, "set", None)
+    if not callable(setter):
+        raise ToolError(
+            VALIDATION_FAILED,
+            "the installed FreeCAD Spreadsheet::Sheet has no set API",
+            {"reason": "native_api_unavailable"},
+        )
+    try:
+        setter(address, content)
+    except Exception as exc:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"writing spreadsheet cell '{address}' failed: {_spreadsheet_error(_describe(exc))}",
+            {"cell": address},
+        ) from exc
+
+
+def _validate_spreadsheet_writes(writes: list[tuple[Any, str, str, str]]) -> None:
+    for sheet, address, expected, before in writes:
+        actual = _spreadsheet_contents(sheet, address)
+        if not actual and expected:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"spreadsheet cell '{address}' did not retain native contents",
+                {
+                    "cell": address,
+                    "expected": _truncate_text(expected, _MAX_SPREADSHEET_CONTENT)[0],
+                },
+            )
+        if (
+            actual == before
+            and expected != before
+            and not _spreadsheet_content_equivalent(expected, before)
+        ):
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"spreadsheet cell '{address}' reverted to its pre-write contents",
+                {
+                    "cell": address,
+                    "expected": _truncate_text(expected, _MAX_SPREADSHEET_CONTENT)[0],
+                    "actual": _truncate_text(actual, _MAX_SPREADSHEET_CONTENT)[0],
+                },
+            )
 
 
 def _vector_value(value: Any, what: str) -> Any:
@@ -1377,6 +1829,17 @@ def _check_view_property(obj: Any, view: Any, prop: str) -> None:
 
 def _check_document_property(obj: Any, prop: str) -> None:
     name = str(getattr(obj, "Name", "<unknown>"))
+    if _is_spreadsheet(obj):
+        try:
+            _spreadsheet_cell_address(obj, prop)
+        except ToolError:
+            pass
+        else:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"Spreadsheet cell '{prop}' must be written through properties.cells",
+                {"property": prop, "nextTool": "inspect_objects"},
+            )
     if not _property_exists(obj, prop):
         raise ToolError(
             VALIDATION_FAILED,
@@ -1403,7 +1866,10 @@ def _apply_properties(ctx: Any, doc: Any, obj: Any, properties: dict) -> None:
     """Assign a properties map onto an existing object (create path)."""
 
     for prop, value in properties.items():
-        if prop == "ViewObject":
+        if prop == "cells" and _is_spreadsheet(obj):
+            for address, content in _spreadsheet_write_plan(obj, value):
+                _set_spreadsheet_cell(obj, address, content)
+        elif prop == "ViewObject":
             if not isinstance(value, dict):
                 raise ToolError(VALIDATION_FAILED, "ViewObject must be an object")
             view = _viewobject(obj)
@@ -1430,7 +1896,12 @@ def _prepare_properties(
 
     prepared: list[tuple[str, str, Any]] = []
     for prop, value in properties.items():
-        if prop == "ViewObject":
+        if prop == "cells" and _is_spreadsheet(obj):
+            prepared.extend(
+                ("spreadsheet", address, content)
+                for address, content in _spreadsheet_write_plan(obj, value)
+            )
+        elif prop == "ViewObject":
             if not isinstance(value, dict):
                 raise ToolError(VALIDATION_FAILED, "ViewObject must be an object")
             view = _viewobject(obj)
@@ -1449,8 +1920,11 @@ def _prepare_properties(
 
 def _apply_prepared(obj: Any, prepared: list[tuple[str, str, Any]]) -> None:
     for target, prop, value in prepared:
-        holder = obj.ViewObject if target == "view" else obj
-        setattr(holder, prop, value)
+        if target == "spreadsheet":
+            _set_spreadsheet_cell(obj, prop, value)
+        else:
+            holder = obj.ViewObject if target == "view" else obj
+            setattr(holder, prop, value)
 
 
 # ---------------------------------------------------------------------------
@@ -1754,7 +2228,7 @@ def _property_metadata(holder: Any, prop: str) -> dict:
             member = raw_expression[0]
             if isinstance(member, str) and member:
                 expression = member
-    return {
+    metadata = {
         "type": property_type,
         "readOnly": read_only,
         "enumeration": enumeration,
@@ -1762,6 +2236,21 @@ def _property_metadata(holder: Any, prop: str) -> dict:
         "enumerationTruncated": truncated,
         "expression": expression,
     }
+    if isinstance(expression, str) and len(expression) > _MAX_SPREADSHEET_CONTENT:
+        metadata["expression"], _ = _truncate_text(expression, _MAX_SPREADSHEET_CONTENT)
+        metadata["expressionTruncated"] = True
+    if _is_spreadsheet(holder):
+        try:
+            address = _spreadsheet_cell_address(holder, prop)
+            content = _spreadsheet_contents(holder, address)
+        except ToolError:
+            pass
+        else:
+            formula = content if content.startswith("=") else ""
+            bounded_formula, formula_truncated = _truncate_text(formula, _MAX_SPREADSHEET_CONTENT)
+            metadata["formula"] = bounded_formula or None
+            metadata["formulaTruncated"] = formula_truncated
+    return metadata
 
 
 def _resolve_property_holder(obj: Any, name: str) -> tuple[Any, str] | None:
@@ -1803,7 +2292,12 @@ def _property_page(obj: Any, names: list[str]) -> tuple[dict, dict, list[str]]:
             raw = getattr(holder, plain, None)
         except Exception:
             raw = None
-        properties[name] = _jsonify(raw)
+        value = _jsonify(raw)
+        if _is_spreadsheet(holder) and isinstance(value, str):
+            value, value_truncated = _truncate_text(value, _MAX_SPREADSHEET_CONTENT)
+            if value_truncated:
+                truncated.append(name)
+        properties[name] = value
         metadata[name] = _property_metadata(holder, plain)
         if isinstance(raw, (list, tuple)) and len(raw) > _PROPERTY_LIST_LIMIT:
             truncated.append(name)
@@ -1869,6 +2363,8 @@ def _row(
         row["propertyCount"] = property_count
         row["nextPropertyOffset"] = next_property_offset
         row["truncatedProperties"] = truncated
+        if _is_spreadsheet(obj):
+            row["spreadsheet"] = _spreadsheet_info(obj)
     if _geometry_unavailable is not None:
         row["geometryUnavailable"] = _geometry_unavailable
     return row
@@ -2110,7 +2606,11 @@ def _snapshot_requested(obj: Any, properties: dict) -> list[tuple[str, Any]]:
 
     rows: list[tuple[str, Any]] = []
     for key, value in properties.items():
-        if key == "ViewObject" and isinstance(value, dict):
+        if key == "cells" and _is_spreadsheet(obj):
+            for requested in value:
+                snapshot = _spreadsheet_cell_snapshot(obj, requested)
+                rows.append((f"cells.{snapshot['address']}", snapshot["content"]))
+        elif key == "ViewObject" and isinstance(value, dict):
             view = getattr(obj, "ViewObject", None)
             for sub in value:
                 if view is not None and _property_exists(view, sub):
@@ -2140,24 +2640,31 @@ def _change_summary(
     bounds_after: list[float] | None,
     dependents_before: int,
     dependents: int,
+    cell_contents_persisted: bool = False,
 ) -> dict:
     """Build the compact factual ``change`` summary for one target."""
 
     if detail == "compact":
-        return {"properties": [{"name": row["name"], "after": row["after"]} for row in properties]}
-    return {
-        "properties": properties,
-        "geometry": {
-            "solidCountBefore": solid_before,
-            "solidCountAfter": solid_after,
-            "volumeBefore": volume_before,
-            "volumeAfter": volume_after,
-            "boundsBefore": bounds_before,
-            "boundsAfter": bounds_after,
-        },
-        "dependentCountBefore": dependents_before,
-        "dependentCount": dependents,
-    }
+        summary = {
+            "properties": [{"name": row["name"], "after": row["after"]} for row in properties]
+        }
+    else:
+        summary = {
+            "properties": properties,
+            "geometry": {
+                "solidCountBefore": solid_before,
+                "solidCountAfter": solid_after,
+                "volumeBefore": volume_before,
+                "volumeAfter": volume_after,
+                "boundsBefore": bounds_before,
+                "boundsAfter": bounds_after,
+            },
+            "dependentCountBefore": dependents_before,
+            "dependentCount": dependents,
+        }
+    if cell_contents_persisted:
+        summary["cellContentsPersisted"] = True
+    return summary
 
 
 def _check_workload(ctx: Any, targets: list[Any]) -> None:
@@ -2187,7 +2694,12 @@ def create_object(ctx: Any, args: dict) -> dict:
     factory, factory_kwargs = _plan_create(ctx, doc, obj_type, properties)
 
     created: list[Any] = []
+    spreadsheet_writes: list[tuple[Any, str, str, str]] = []
     outcome: dict = {}
+
+    def validate_spreadsheet_writes() -> None:
+        _validate_spreadsheet_writes(spreadsheet_writes)
+
     with mutation(
         ctx,
         doc,
@@ -2198,11 +2710,14 @@ def create_object(ctx: Any, args: dict) -> dict:
         bounds_tolerance=float(bounds_tolerance),
         outcome=outcome,
         check_workload=_check_workload,
+        validate_after_recompute=validate_spreadsheet_writes,
     ) as applied:
         if factory is not None:
             created.append(_call_factory(factory, doc, requested_name, factory_kwargs))
         else:
             created.append(doc.addObject(obj_type, requested_name))
+        if _is_spreadsheet(created[0]) and "cells" in properties:
+            spreadsheet_writes.extend(_spreadsheet_write_receipt(created[0], properties["cells"]))
         if properties:
             _apply_properties(ctx, doc, created[0], properties)
 
@@ -2233,6 +2748,7 @@ def create_object(ctx: Any, args: dict) -> dict:
             # A created object had no pre-mutation dependent closure.
             dependents_before=0,
             dependents=outcome["dependentCountAfter"],
+            cell_contents_persisted=bool(spreadsheet_writes),
         ),
     }
 
@@ -2250,6 +2766,11 @@ def edit_object(ctx: Any, args: dict) -> dict:
         bounds_tolerance = _DEFAULT_BOUNDS_TOLERANCE
     detail = str(args.get("response_detail") or "full")
     prepared = _prepare_properties(ctx, doc, obj, properties)
+    spreadsheet_writes = (
+        _spreadsheet_write_receipt(obj, properties["cells"])
+        if _is_spreadsheet(obj) and "cells" in properties
+        else []
+    )
 
     before_rows = _snapshot_requested(obj, properties)
     before_report = geometry_report(obj)
@@ -2267,6 +2788,7 @@ def edit_object(ctx: Any, args: dict) -> dict:
         bounds_tolerance=float(bounds_tolerance),
         outcome=outcome,
         check_workload=_check_workload,
+        validate_after_recompute=lambda: _validate_spreadsheet_writes(spreadsheet_writes),
     ) as applied:
         _apply_prepared(obj, prepared)
 
@@ -2298,6 +2820,7 @@ def edit_object(ctx: Any, args: dict) -> dict:
             bounds_after=report["bounds"],
             dependents_before=dependents,
             dependents=outcome["dependentCountAfter"],
+            cell_contents_persisted=bool(spreadsheet_writes),
         ),
     }
 
@@ -2414,6 +2937,14 @@ def edit_objects(ctx: Any, args: dict) -> dict:
         before_reports[obj.Name] = geometry_report(obj)
         before_bounds[obj.Name] = document_bounds(obj)
     dependent_counts = {obj.Name: dependent_count([obj]) for obj in targets}
+    spreadsheet_writes: list[tuple[Any, str, str, str]] = []
+    spreadsheet_writes_by_object: dict[str, bool] = {}
+    for obj, edit in zip(targets, edits, strict=True):
+        properties = edit["properties"]
+        if _is_spreadsheet(obj) and "cells" in properties:
+            writes = _spreadsheet_write_receipt(obj, properties["cells"])
+            spreadsheet_writes.extend(writes)
+            spreadsheet_writes_by_object[obj.Name] = bool(writes)
 
     outcome: dict = {}
     with mutation(
@@ -2424,6 +2955,7 @@ def edit_objects(ctx: Any, args: dict) -> dict:
         expectations=expectations,
         outcome=outcome,
         check_workload=_check_workload,
+        validate_after_recompute=lambda: _validate_spreadsheet_writes(spreadsheet_writes),
     ) as applied:
         for obj in targets:
             _apply_prepared(obj, prepared[obj.Name])
@@ -2450,6 +2982,7 @@ def edit_objects(ctx: Any, args: dict) -> dict:
                 bounds_after=report["bounds"],
                 dependents_before=dependent_counts[obj.Name],
                 dependents=outcome["dependentCountAfter"],
+                cell_contents_persisted=spreadsheet_writes_by_object.get(obj.Name, False),
             )
         )
     return {
@@ -2507,7 +3040,13 @@ def create_objects(ctx: Any, args: dict) -> dict:
     created: list[Any] = []
     name_mapping: list[dict] = []
     expectations_by_actual: dict[str, dict] = {}
+    spreadsheet_writes: list[tuple[Any, str, str, str]] = []
+    spreadsheet_writes_by_object: dict[str, bool] = {}
     outcome: dict = {}
+
+    def validate_spreadsheet_writes() -> None:
+        _validate_spreadsheet_writes(spreadsheet_writes)
+
     with mutation(
         ctx,
         doc,
@@ -2516,6 +3055,7 @@ def create_objects(ctx: Any, args: dict) -> dict:
         expectations=expectations_by_actual,
         outcome=outcome,
         check_workload=_check_workload,
+        validate_after_recompute=validate_spreadsheet_writes,
     ) as applied:
         for plan in plans:
             if plan["factory"] is not None:
@@ -2527,6 +3067,10 @@ def create_objects(ctx: Any, args: dict) -> dict:
             name_mapping.append({"requested": plan["name"], "actual": actual_name})
             if plan["name"] in expectations:
                 expectations_by_actual[actual_name] = expectations[plan["name"]]
+            if _is_spreadsheet(obj) and "cells" in plan["properties"]:
+                writes = _spreadsheet_write_receipt(obj, plan["properties"]["cells"])
+                spreadsheet_writes.extend(writes)
+                spreadsheet_writes_by_object[obj.Name] = bool(writes)
             if plan["properties"]:
                 _apply_properties(ctx, doc, obj, plan["properties"])
 
@@ -2556,6 +3100,7 @@ def create_objects(ctx: Any, args: dict) -> dict:
                 # A created object had no pre-mutation dependent closure.
                 dependents_before=0,
                 dependents=outcome["dependentCountAfter"],
+                cell_contents_persisted=spreadsheet_writes_by_object.get(obj.Name, False),
             )
         )
     return {

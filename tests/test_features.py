@@ -734,6 +734,41 @@ def test_edit_feature_compact_response_detail_keeps_body_report() -> None:
         validate_schema(result, definition["outputSchema"])
 
 
+def test_edit_feature_reports_supported_kinds_for_unsupported_feature() -> None:
+    with load_features() as module:
+        fillet = FakeFeature(
+            "Fillet",
+            "PartDesign::Fillet",
+            properties=("Base", "Radius"),
+            shape=FakeShape(),
+        )
+        body = FakeBody(members=[fillet], tip=fillet, shape=fillet.Shape)
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.append(fillet)
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            module.HANDLERS["edit_feature"](
+                ctx,
+                {
+                    "document": "Doc",
+                    "body": "Body",
+                    "object": "Fillet",
+                    "parameters": {"radius": 2},
+                },
+            )
+
+        error = excinfo.value
+        assert error.code == VALIDATION_FAILED
+        assert "pad, pocket, hole, gear_profile" in error.message
+        assert error.details == {
+            "typeId": "PartDesign::Fillet",
+            "supportedKinds": ["pad", "pocket", "hole", "gear_profile"],
+            "nextTool": "edit_object",
+        }
+        assert doc.transactions == []
+
+
 def test_tip_mismatch_rolls_the_creation_back() -> None:
     class TipStuckBody(FakeBody):
         """A build where newObject never advances the Body Tip."""

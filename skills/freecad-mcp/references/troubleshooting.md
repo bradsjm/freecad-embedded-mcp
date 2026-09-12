@@ -20,7 +20,7 @@ Then choose a registered type, load the relevant workbench/module if appropriate
 
 ### Property assignment failed
 
-Inspect property names, types, and metadata with `inspect_objects(document, detail="full")`. `edit_object` prevalidates every property before the transaction opens, so a failed call assigns nothing. Use plain numbers for quantity properties (internal units apply) and canonical `{"object", "subelement"}` links for references. Feature-specific assignments the mapper cannot express go through `run_script`.
+Inspect property names, types, and metadata with `inspect_objects(document, detail="full")`. For a `Spreadsheet::Sheet`, read cell contents and formulas from the row's bounded `spreadsheet` inventory. Use `edit_object` with `properties.cells` to write address or alias keys through the native sheet API. `edit_object` prevalidates every property before the transaction opens, so a failed call assigns nothing. Use plain numbers for quantity properties (internal units apply) and canonical `{"object", "subelement"}` links for references. Feature-specific assignments the mapper cannot express go through `run_script`.
 
 ### Atomic object batch failed
 

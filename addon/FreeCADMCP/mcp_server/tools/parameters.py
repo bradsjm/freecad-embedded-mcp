@@ -72,6 +72,7 @@ HANDLERS: dict[str, Callable[[Any, dict[str, Any]], Any]] = {}
 
 # Keys whose edit-mode status makes the property read-only to MCP.
 _READ_ONLY_MODES = frozenset({"ReadOnly", "Immutable"})
+_EXPRESSION_CONTAINER_ROOTS = frozenset({"AttachmentOffset", "Placement"})
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +230,12 @@ def _check_name(name: Any, *, what: str) -> str:
     return name
 
 
+def _expression_root(path: str) -> str | None:
+    normalized = path[1:] if path.startswith(".") else path
+    root = re.split(r"[.[]", normalized, maxsplit=1)[0]
+    return root or None
+
+
 def _check_type(prop_type: Any, obj: Any) -> str:
     if not isinstance(prop_type, str) or prop_type not in _PROPERTY_TYPES:
         raise _fail(
@@ -343,6 +350,16 @@ def _reject_read_only(obj: Any, name: str, *, what: str) -> None:
         )
 
 
+def _reject_expression_read_only(obj: Any, path: str, root: str | None, *, what: str) -> None:
+    normalized_path = path[1:] if path.startswith(".") else path
+    if root == normalized_path:
+        _reject_read_only(obj, root, what=what)
+        return
+    _reject_read_only(obj, path, what=what)
+    if root is not None and root != path and root not in _EXPRESSION_CONTAINER_ROOTS:
+        _reject_read_only(obj, root, what=what)
+
+
 def _validate_all(obj: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     """Validate every requested change up front; return the ordered plan."""
 
@@ -408,19 +425,20 @@ def _validate_all(obj: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     for prop, expression in expressions.items():
         if not isinstance(prop, str) or not isinstance(expression, str):
             raise _fail("expressions must map property names to strings")
-        if prop in rename:
+        root = _expression_root(prop)
+        if prop in rename or root in rename:
             raise _fail(
                 f"expression key '{prop}' uses a renamed-away name; use the "
                 "final (post-rename) property name"
             )
-        if prop not in final_names:
+        if prop not in final_names and root not in final_names:
             raise _fail(
                 f"expression key '{prop}' is not a property of "
                 f"'{getattr(obj, 'Name', '<unknown>')}' after the requested changes"
             )
         if not expression.strip():
             raise _fail(f"expression for '{prop}' must be a non-empty string")
-        _reject_read_only(obj, prop, what="expression")
+        _reject_expression_read_only(obj, prop, root, what="expression")
         expression_pairs.append((prop, expression))
 
     # 4. Clears: final (post-rename) names, not paired with a set, unique.
@@ -431,12 +449,13 @@ def _validate_all(obj: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     for prop in requested_clears:
         if not isinstance(prop, str):
             raise _fail("clear_expressions must contain property names")
-        if prop in rename:
+        root = _expression_root(prop)
+        if prop in rename or root in rename:
             raise _fail(
                 f"clear_expressions name '{prop}' uses a renamed-away name; use "
                 "the final (post-rename) property name"
             )
-        if prop not in final_names:
+        if prop not in final_names and root not in final_names:
             raise _fail(
                 f"clear_expressions name '{prop}' is not a property of "
                 f"'{getattr(obj, 'Name', '<unknown>')}' after the requested changes"
@@ -447,7 +466,7 @@ def _validate_all(obj: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             )
         if prop in clears:
             raise _fail(f"clear_expressions lists property '{prop}' twice")
-        _reject_read_only(obj, prop, what="clear_expressions")
+        _reject_expression_read_only(obj, prop, root, what="clear_expressions")
         clears.append(prop)
 
     return {

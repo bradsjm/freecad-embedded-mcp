@@ -49,6 +49,13 @@ _PROFILE_KINDS = (
     "helix",
 )
 _GEAR_PROFILE_KIND = "gear_profile"
+_EDITABLE_FEATURE_KINDS = {
+    "PartDesign::Pad": "pad",
+    "PartDesign::Pocket": "pocket",
+    "PartDesign::Hole": "hole",
+    "Part::Part2DObjectPython": _GEAR_PROFILE_KIND,
+}
+_EDITABLE_KIND_NAMES = tuple(_EDITABLE_FEATURE_KINDS.values())
 _SUPPORT_KINDS = ("sketch", "datum_plane", "datum_point", "primitive")
 _ORIGIN_PLANE_ROLES = {"xy": "XY_Plane", "xz": "XZ_Plane", "yz": "YZ_Plane"}
 
@@ -695,7 +702,9 @@ TOOL_DEFINITIONS = [
             "named Body: pad/pocket extent and length, hole diameter/depth "
             "and its cut, depth-type and thread parameters, "
             "or gear teeth/module/pressure angle. Parameters are validated "
-            "against the feature before the transaction opens; numeric values "
+            "against the feature before the transaction opens. Other feature "
+            "types are refused with the supported kinds and an edit_object "
+            "fallback. Numeric values "
             "are written natively and {expression} objects bind a native "
             "expression. The feature and its Body are recomputed and "
             "validated in one mutation, and the result reports the feature's "
@@ -2135,15 +2144,35 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
     }
 
 
-def _editable_type_id(feature: Any) -> str:
+def _editable_kind(feature: Any) -> str:
     type_id = str(getattr(feature, "TypeId", ""))
-    if type_id == "Part::Part2DObjectPython":
-        if str(getattr(getattr(feature, "Proxy", None), "Type", "")) != "InvoluteGear":
-            raise _fail(f"object '{feature.Name}' is not a trusted native gear feature")
-        return type_id
-    if type_id not in ("PartDesign::Pad", "PartDesign::Pocket", "PartDesign::Hole"):
-        raise _fail(f"object '{feature.Name}' is not an editable scalar feature")
-    return type_id
+    if (
+        type_id == "Part::Part2DObjectPython"
+        and str(getattr(getattr(feature, "Proxy", None), "Type", "")) != "InvoluteGear"
+    ):
+        raise _fail(
+            f"object '{feature.Name}' is not a trusted native gear feature; "
+            "use edit_object for its native properties",
+            {
+                "typeId": type_id,
+                "supportedKinds": list(_EDITABLE_KIND_NAMES),
+                "nextTool": "edit_object",
+            },
+        )
+    kind = _EDITABLE_FEATURE_KINDS.get(type_id)
+    if kind is None:
+        supported = ", ".join(_EDITABLE_KIND_NAMES)
+        raise _fail(
+            f"object '{feature.Name}' of type '{type_id}' is not editable by "
+            f"edit_feature; supported kinds are {supported}; use edit_object "
+            "for native properties",
+            {
+                "typeId": type_id,
+                "supportedKinds": list(_EDITABLE_KIND_NAMES),
+                "nextTool": "edit_object",
+            },
+        )
+    return kind
 
 
 def _check_edit_gear_bounds(feature: Any, parameters: Mapping[str, Any]) -> None:
@@ -2213,7 +2242,7 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
     body = ctx.require_object(doc, str(arguments["body"]))
     _require_body(body)
     feature = ctx.require_object(doc, str(arguments["object"]))
-    _editable_type_id(feature)
+    kind = _editable_kind(feature)
     _require_member(body, feature)
     expected_generation = arguments.get("expected_generation")
     if expected_generation is not None:
@@ -2228,7 +2257,6 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
     detail = str(arguments.get("response_detail") or "full")
     if not parameters:
         raise _fail("parameters must contain at least one semantic value")
-    kind = _semantic_kind(feature)
     unknown = sorted(
         set(parameters) - set(_EDIT_FEATURE_INPUT["properties"]["parameters"]["properties"])
     )
@@ -2350,19 +2378,6 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
         ),
         "applied": applied,
     }
-
-
-def _semantic_kind(feature: Any) -> str:
-    """Map a feature TypeId back onto the semantic contract it follows."""
-
-    type_id = str(getattr(feature, "TypeId", ""))
-    if type_id == "Part::Part2DObjectPython":
-        return _GEAR_PROFILE_KIND
-    return {
-        "PartDesign::Pad": "pad",
-        "PartDesign::Pocket": "pocket",
-        "PartDesign::Hole": "hole",
-    }[type_id]
 
 
 HANDLERS["create_feature"] = _create_feature

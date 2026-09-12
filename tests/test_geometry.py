@@ -468,7 +468,8 @@ def test_validate_geometry_valid_non_solid():
         ctx, {"document": "Doc", "objects": ["Group"], "expected_solids": 1}
     )
     entry = forced["objects"][0]
-    assert entry["verdicts"]["solids"] == "mismatch"
+    assert entry["verdicts"]["solids"] == "unavailable"
+    assert entry["error"] is not None
     assert entry["valid"] is False
 
 
@@ -545,6 +546,25 @@ def test_measure_interference_common_volume():
     assert result["common_volume"] == 0.0
     assert result["overlaps"] is False
     _assert_output_schema(result, "measure")
+
+
+def test_measure_interference_rejects_nonfinite_common_volume():
+    box_a = FakeObject("BoxA", FakeShape())
+    box_b = FakeObject("BoxB", FakeShape())
+    box_a.Shape._common = FakeShape(volume=float("nan"), solids=0)
+    ctx = FakeCtx({"BoxA": box_a, "BoxB": box_b})
+
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.HANDLERS["measure"](
+            ctx,
+            {"document": "Doc", "a": "BoxA", "mode": "interference", "b": "BoxB"},
+        )
+
+    assert excinfo.value.code == protocol.VALIDATION_FAILED
+    assert excinfo.value.details == {
+        "reason": "measurement_unavailable",
+        "measurement": "common_volume",
+    }
 
 
 # ---------------------------------------------------------------------------
