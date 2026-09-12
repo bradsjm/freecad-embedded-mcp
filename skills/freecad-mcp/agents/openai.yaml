@@ -1,4 +1,12 @@
 interface:
   display_name: "FreeCAD MCP"
-  short_description: "Design, validate, and 3D-print parts in FreeCAD via MCP"
-  default_prompt: "Use $freecad-mcp to design a part for my 3D printer, validate the geometry, and export it."
+  short_description: "Build and validate FreeCAD models through MCP"
+  default_prompt: "Use $freecad-mcp to choose the correct modeling strategy, build my FreeCAD model, validate it, and export the result."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "freecad"
+      description: "Embedded FreeCAD MCP server"
+      transport: "streamable_http"
+      url: "http://127.0.0.1:9876/mcp"

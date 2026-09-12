@@ -1,101 +1,82 @@
-# Python scripting and export through MCP
+# Python scripting with `run_script`
 
-Use `run_script` for Python that touches FreeCAD documents, geometry, GUI state, selection, recompute, or import when no structured tool covers the operation. Use the structured tools where they cover the operation: `save_document` for saving, `export` for STL/STEP/3MF/FCStd, `validate_geometry` and `measure` for checks. The [FreeCAD Scripting Basics](https://wiki.freecad.org/FreeCAD_Scripting_Basics) page documents the `App`/`Gui` split, `addObject`, object inspection, and recompute workflow.
+Use `run_script` only for a named operation that no structured tool covers. `run_script` is opt-in: it is registered but hidden unless `allow_scripts: true` is saved in `freecad_mcp_settings.json` and the server restarted. A disabled tool answers `tools/call` with `METHOD_NOT_FOUND` and never reaches schema validation, consent, or the GUI dispatch. Discovery reports `capabilities.scriptingEnabled`. Read [the tool contract](mcp-tools.md) for exact schemas.
 
-## Persistent script sessions
+## Contents
 
-`run_script` keeps one namespace per `session_id` for the server's lifetime and pre-seeds `FreeCAD`/`App` and `Gui`. Do not rely on this for hidden state when a model can be made explicit in the document. Use short, idempotent scripts where possible and print a compact result. At most 32 sessions are kept; new sessions are refused when the limit is reached.
+- [When to use it](#when-to-use-it)
+- [Session and call contract](#session-and-call-contract)
+- [Deadlines and the GUI thread](#deadlines-and-the-gui-thread)
+- [Safe script shape](#safe-script-shape)
+- [Validate after the script](#validate-after-the-script)
+- [Safety boundary](#safety-boundary)
+- [Sources](#sources)
+
+## When to use it
+
+Use `run_script` for:
+
+- `FreeCADGui` calls and the live selection.
+- Imports of formats `import_model` does not support.
+- Geometry or mesh operations the structured tools do not cover. See [Part geometry and topology](part-topsolids.md) and [Export, save, and mesh work](export-print.md).
+- Property assignments the property mapper cannot express. `edit_parameters` covers dynamic properties and expressions first.
+
+Use a structured tool, not `run_script`, whenever one covers the operation. Call `tools/list` for the live schemas.
+
+## Session and call contract
+
+Arguments: `code`, optional `session_id` (default `"default"`), optional `timeout_s`.
+
+- Variables persist per `session_id` for the server's lifetime, in a namespace pre-seeded with `FreeCAD`/`App` and `Gui`.
+- At most 32 sessions are kept. A new session is refused instead of evicting live state.
+- `stdout`, `stderr`, and the traceback are captured even when the code raises.
+- The tool is refused with `SERVER_BUSY` while a FEM solve is active.
+- A client that declares the Tasks extension may detach the call. Poll with `tasks/get` until terminal. Cancellation is cooperative and does not stop running code.
+
+## Deadlines and the GUI thread
+
+`run_script` executes on FreeCAD's main GUI thread through one shared dispatch queue, so a long script delays every later GUI operation. Execution cannot be preempted after it starts; `timeout_s` is a cooperative server deadline with a range of 1–3600 s and a default of 90 s, and the tool result says so truthfully.
+
+- Keep each script inside the deadline and split long work into stages.
+- A GUI operation that exceeds its deadline leaves the server reporting `GUI_DISPATCH_STUCK`. Read [troubleshooting](troubleshooting.md) before you retry.
+
+## Safe script shape
+
+- Make the script short, deterministic, and idempotent. Get or create the document instead of assuming an empty session.
+- Keep model state in document objects. A session namespace is not a place for hidden state.
+- Inspect an existing object before you overwrite it. Never replace a parametric feature with a raw shape silently.
+- Print one compact result and assert the invariants the script depends on.
+- Import only the modules the script uses.
 
 ```python
 import FreeCAD as App
-import FreeCADGui as Gui
 
-print(App.ActiveDocument.Name if App.ActiveDocument else "no active document")
-```
-
-`run_script` executes on the GUI thread. A client that declares the Tasks extension may detach it, but the code remains cooperative and cannot be preempted after it starts. Keep scripts within the `timeout_s` deadline (default 90 s, maximum 3600 s) and split long work into stages. `stdout`, `stderr`, and the traceback are captured even when the script fails.
-
-## Scripted modeling skeleton
-
-```python
-import FreeCAD as App
-import Part
-
-doc = App.ActiveDocument or App.newDocument("BuiltPart")
-
-base = doc.getObject("Base") or doc.addObject("Part::Feature", "Base")
-base.Label = "Base"
-base.Shape = Part.makeBox(40, 30, 5)
-
-# Keep coordinates explicit. This cylinder starts at z=0.
-tool = Part.makeCylinder(4, 5, App.Vector(20, 15, 0))
-base.Shape = base.Shape.cut(tool)
+doc = App.ActiveDocument or App.newDocument("Scratch")
+obj = doc.getObject("Final")
+assert obj is not None, "Final is missing"
 
 doc.recompute()
-assert base.Shape.isValid(), "invalid final BRep"
-print(base.Name, base.Shape.ShapeType, len(base.Shape.Solids), base.Shape.Volume)
+print({"name": obj.Name, "valid": obj.Shape.isValid(), "solids": len(obj.Shape.Solids)})
 ```
 
-If an object is already present, inspect it before overwriting its shape. Do not silently destroy a user's parametric history by replacing a PartDesign feature with a raw shape.
+## Validate after the script
 
-## Structured export
+Script output is not proof. Re-run the structured checks after the script and report their result:
 
-Use the `export` tool instead of ad-hoc writer code. It takes `document`, `objects` (internal names), `format` (`stl`, `step`, `3mf`, `fcstd`), and `path`. Optional arguments: `linear_deflection` and `angular_deflection` for mesh formats (defaults 0.03 and 0.12), and `bed_align` (one collective translation of the minimum Z of all copies to zero). It writes to a temporary sibling file, verifies the result by readback, then publishes; overwriting an existing destination requires consent. The result reports the readback: mesh solidity, facet count, and bounds for STL/3MF; validity, solid count, volume, and bounds for STEP; object identity, count, and placements for an FCStd copy.
+- `inspect_objects` for internal names, state, and bounds.
+- `validate_geometry` for shape validity, solid count, volume, and bounds.
+- `measure` for fit decisions.
+- The written-file readback for delivered files. See [Export, save, and mesh work](export-print.md).
 
-An absolute path inside an allowed root is required; paths outside `allowed_roots` fail with `PATH_NOT_ALLOWED`.
+See [validation](validation.md) for the full gate.
 
-### Tessellation control
+## Safety boundary
 
-The best deviation depends on curvature, fit, and file size. Smaller linear/angular deflection generally produces a finer mesh, but do not use extreme values without reason. When the structured tool does not fit the case, use the MeshPart scripting route documented by [Mesh from Part Shape](https://wiki.freecad.org/Mesh_FromPartShape) and [Mesh Scripting](https://wiki.freecad.org/Mesh_Scripting) through `run_script`. Verify the written file afterward. See [Mesh export and repair](export-print.md).
+`run_script` is arbitrary Python inside the FreeCAD process with the user's privileges. It is deliberately not sandboxed and is not restricted by `allowed_roots`. Never place credentials or untrusted code in it, and never print the bearer token.
 
-The older [Export to STL or OBJ](https://wiki.freecad.org/Export_to_STL_or_OBJ) tutorial says STL/OBJ has no embedded unit metadata and FreeCAD assumes millimetres on export. Treat the model as millimetres before export.
-
-### 3MF
-
-The `export` tool writes 3MF through the registered exporter; the result is a generic 3MF without application-specific settings.
-
-## Save the editable source
-
-Save the `.FCStd` source before or alongside the exported mesh:
-
-```text
-save_document(document=<name>, path="/absolute/path/Final.FCStd")
-```
-
-An explicit `path` is a native save-as; saving over a different existing file requires consent. Without `path`, an unsaved document is an actionable error. Use `reload_document(document)` only after an external process has changed the on-disk file. It closes and reopens the stale in-memory copy; it is not a general undo or refresh command.
-
-## Export only the intended object
-
-Do not export every visible object by accident. Build an explicit list of internal names for the `objects` argument:
-
-```python
-obj = App.ActiveDocument.getObject("Final")
-assert obj is not None
-assert obj.Shape.isValid()
-print([obj.Name])  # pass this list to export
-```
-
-If multiple independent parts are intentional, name and export them deliberately, then report the explicit object list and source bounds. Avoid exporting construction sketches, hidden tools, duplicate Bodies, or both a source feature and its final Tip.
-
-## Output reporting
-
-A good export report contains:
-
-- Internal object names and `TypeId`.
-- Shape type, solid count, volume, and bounding box.
-- Exact absolute output paths and the export readback fields.
-- Mesh facet count and deflection values when tessellating.
-
-The export readback verifies the written file. It does not validate how another application will consume the file; report the readback values as the verification evidence.
+It reaches the native bindings directly and is not covered by the `edit_sketch` guard: a malformed native constructor call, such as an unsupported `Sketcher.Constraint` argument form, can raise an unhandled C++ exception that terminates the whole FreeCAD process.
 
 ## Sources
 
 - [FreeCAD Scripting Basics](https://wiki.freecad.org/FreeCAD_Scripting_Basics)
 - [Scripting and macros](https://wiki.freecad.org/Scripting_and_macros)
-- [Part scripting](https://wiki.freecad.org/Part_scripting)
-- [Topological data scripting](https://wiki.freecad.org/Topological_data_scripting)
-- [Mesh from Part Shape](https://wiki.freecad.org/Mesh_FromPartShape)
-- [Mesh Scripting](https://wiki.freecad.org/Mesh_Scripting)
-- [Export to STL or OBJ](https://wiki.freecad.org/Export_to_STL_or_OBJ)
-- [Standard Export](https://wiki.freecad.org/Std_Export)
-- [Import Export](https://wiki.freecad.org/Import_Export)

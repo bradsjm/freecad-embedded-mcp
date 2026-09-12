@@ -1,8 +1,24 @@
 # Sketcher profiles through MCP
 
-Use this reference to build or edit a constrained profile. Read a sketch with `inspect_sketch`. Change it with `edit_sketch` in one atomic batch. Use `run_script` only for the cases this file marks as out of reach.
+Use this reference to build or edit a sketch profile. Read a sketch with `inspect_sketch`. Change it with `edit_sketch` in one atomic batch. Use `run_script` only for the cases this file marks as out of reach.
+
+Create the `PartDesign::Body` with `create_object` and the attached sketch with `create_feature`, using the payloads in [Common recipes](recipes.md); a standalone sketch uses `create_object` with type `Sketcher::SketchObject`. Property forms, units, and recompute belong to [FreeCAD fundamentals](fundamentals.md); support, `MapMode`, and attachment offsets belong to [Placement and attachment](placement-attachment.md).
 
 The [Sketcher scripting](https://wiki.freecad.org/Sketcher_scripting) page defines the constraint arguments and the index rules. Every statement below was checked against FreeCAD 1.1.3, and the enforced forms are recorded in `tests/native_contract.json`.
+
+## Contents
+
+- [Read the sketch before editing it](#read-the-sketch-before-editing-it)
+- [Index model](#index-model)
+- [Batch edit contract](#batch-edit-contract)
+- [Geometry entries](#geometry-entries)
+- [Constraint entries](#constraint-entries)
+- [setDatums](#setdatums)
+- [setExpressions](#setexpressions)
+- [Recipe: fully constrained rectangle](#recipe-fully-constrained-rectangle)
+- [Confirm the profile](#confirm-the-profile)
+- [Scripted sketches](#scripted-sketches)
+- [Sources](#sources)
 
 ## Read the sketch before editing it
 
@@ -51,7 +67,7 @@ The composite kinds (`rectangle`, `polyline`, `regularPolygon`) are semantic pro
 
 Every entry accepts `construction: true` for construction geometry. `inspect_sketch` reports the flag from the native `getConstruction(index)` call. Confirm the angle unit on the same call. Passing `startAngle: 0` and `endAngle: 180` produced a native arc that ends at 4.07 radians, which is 180 radians reduced modulo 2π.
 
-A sketch whose geometry is all construction has a null shape. Null shapes are valid: the batch succeeds and the sketch reports `solid_count: 0`. It cannot pad until it holds one normal closed edge.
+A sketch whose geometry is all construction has a null shape: the batch succeeds and the sketch reports `solid_count: 0`. It cannot pad until it holds one normal closed edge.
 
 ## Constraint entries
 
@@ -73,7 +89,7 @@ Geometry indices must be `>= 0`, axis references must be `-1` or `-2`, and point
 
 `Collinear`, `InternalAlignment`, `SnellsLaw`, `AngleViaPoint`, and `Weight` are rejected before any native call. The native 1.1.3 constructor accepted no verified form of them. Use `Tangent` between two lines instead of `Collinear`, or use `run_script` with a form recorded in `tests/native_contract.json`.
 
-`edit_sketch` refuses a `(type, argument-count)` shape outside the recorded native contract before execution, with a `VALIDATION_FAILED` error rather than a native call, because an unverified native constructor call can abort the FreeCAD process. The error's `acceptedArgumentCounts` lists the safe arities for the requested type (`null` when the type has no recorded form), alongside `reason: unrecorded_constraint_shape` and `nextTool: inspect_sketch`.
+`edit_sketch` refuses a `(type, argument-count)` shape outside the recorded native contract before execution, with a `VALIDATION_FAILED` error rather than a native call. The error's `acceptedArgumentCounts` lists the safe arities for the requested type (`null` when the type has no recorded form), alongside `reason: unrecorded_constraint_shape` and `nextTool: inspect_sketch`.
 
 Datum strings carry a unit: `"40 mm"`, `"30 mm"`, `"90 deg"`. The value lands in the property's internal unit.
 
@@ -85,65 +101,9 @@ The server converts each datum string to a native `FreeCAD.Units.Quantity` befor
 
 `setExpressions` binds a FreeCAD expression to a datum constraint: each entry is `{"index": <final constraint index>, "expression": "..."}`. The server calls `setExpression("Constraints[index]", expression)`; an `expression` of `null` clears an existing binding. Expressions are at most 256 characters. `inspect_sketch` and `edit_sketch` return the live bindings in `expressionBindings`.
 
-## Create the sketch, then edit it
-
-Create a sketch inside a `PartDesign::Body` with `create_feature`:
-
-```json
-{
-  "document": "Part",
-  "body": "Body",
-  "kind": "sketch",
-  "name": "Profile",
-  "support": {"object": "XY_Plane"},
-  "properties": {"MapMode": "FlatFace"}
-}
-```
-
-The server applies the attachment through `AttachmentSupport` on FreeCAD 1.1.3 and requires the explicit `MapMode`. The typed-parameters route attaches the sketch to a Body origin plane without `support` or `properties`:
-
-```json
-{
-  "document": "Part",
-  "body": "Body",
-  "kind": "sketch",
-  "name": "Profile",
-  "parameters": {"plane": "xy"}
-}
-```
-
-`plane` and `support` are mutually exclusive attachment targets. Create a standalone sketch with `create_object` and type `Sketcher::SketchObject`.
-
-## Sequence that works
-
-1. Create the `PartDesign::Body` with `create_object`.
-2. Create the sketch and its attachment with `create_feature`.
-3. `edit_sketch` the geometry, then `edit_sketch` the constraints. Read `addedGeometry` from the first batch so the second batch refers to real indices.
-4. `inspect_sketch` to confirm the indices, the geometry kinds, the construction flags, and the reported `degreesOfFreedom` and `fullyConstrained` values.
-5. Create the Pad with `create_feature`. Validate the resulting solid. See [Geometry validation](validation.md).
-
 ## Recipe: fully constrained rectangle
 
-Verified on FreeCAD 1.1.3 with structured calls only. The profile solves to `fullyConstrained: true` with `degreesOfFreedom: 0` and forms one closed wire of 40 x 30 mm.
-
-Build the Body and the attached sketch with the tools:
-
-```json
-{"document": "Part", "name": "Body", "type": "PartDesign::Body"}
-```
-
-```json
-{
-  "document": "Part",
-  "body": "Body",
-  "kind": "sketch",
-  "name": "Profile",
-  "support": {"object": "XY_Plane"},
-  "properties": {"MapMode": "FlatFace"}
-}
-```
-
-Then add the rectangle with one batch:
+Verified on FreeCAD 1.1.3 with structured calls only. Create the Body and the origin-plane sketch as in [Common recipes](recipes.md), then add the profile with one batch:
 
 ```json
 {
@@ -158,7 +118,7 @@ Then add the rectangle with one batch:
 }
 ```
 
-Then constrain it with a second batch:
+Constrain it with a second batch:
 
 ```json
 {
@@ -180,36 +140,18 @@ Then constrain it with a second batch:
 }
 ```
 
-Then pad it:
-
-```json
-{
-  "document": "Part",
-  "body": "Body",
-  "kind": "pad",
-  "name": "Pad",
-  "profile": "Profile",
-  "properties": {"Length": 10}
-}
-```
-
-The verified result is one solid with volume `12000.0 mm3` and `degreesOfFreedom == 0`. Remove one `Horizontal` and one `Vertical` entry when the profile must stay skewed.
+Pad it with the `pad` payload in [Common recipes](recipes.md). The profile solves to `fullyConstrained: true` with `degreesOfFreedom: 0` and forms one closed wire of 40 x 30 mm; the verified result is one solid with volume `12000.0 mm3`. Remove one `Horizontal` and one `Vertical` entry when the profile must stay skewed.
 
 ### Confirm the profile
 
 1. Read `inspect_sketch` again. Confirm the returned `addedGeometry` and `addedConstraints` indices, the geometry kinds, and the `datum` values.
 2. Confirm the profile closes. The wires must come from coincident endpoints, not from near-identical coordinates.
-3. Read the reported `degreesOfFreedom` and `fullyConstrained` fields. `degreesOfFreedom == 0` means fully constrained. Conflicting constraints can produce a negative `DoF` or an invalid state: the native `addConstraint` accepts a conflicting entry, and the sketch then reports `Invalid`. In the verified case, two `DistanceX` datums of `10 mm` and `20 mm` produced solve status `-3` and state `['Touched', 'Invalid']`.
-4. `inspect_sketch` and `edit_sketch` report the object `state`, the `statusText` string, and `solver.solverStatus`. Read them from either response, or rely on the mutation gate: `edit_sketch` rejects a sketch left in an invalid state.
-5. Validate the resulting solid after the profile becomes a feature. See [Geometry validation](validation.md).
-
-## Shapeless and null-shape objects
-
-A fresh object has a null shape until geometry is assigned. Null shapes and shapeless objects are valid: `create_object` with `PartDesign::Body` or `Part::Feature` succeeds and reports `solid_count: 0`. An explicit positive `expected_solids` on such an object fails with `has no geometry; expected_solids=N cannot be satisfied`.
+3. Read the reported `degreesOfFreedom` and `fullyConstrained` fields. `degreesOfFreedom == 0` means fully constrained. Conflicting constraints can produce a negative `DoF` and state `['Touched', 'Invalid']`, because the native `addConstraint` accepts a conflicting entry (verified: two `DistanceX` datums of `10 mm` and `20 mm` produced solve status `-3`). `edit_sketch` rejects a sketch left in an invalid state; read `state`, `statusText`, and `solver.solverStatus` from either sketch response, and read [failure recovery](troubleshooting.md) to repair it.
+4. Validate the solid after the profile becomes a feature. See [Geometry validation](validation.md).
 
 ## Scripted sketches
 
-Stay with the structured tools when they cover the operation. Use `run_script` for external geometry, `Weight`, constraint names, driving and reference toggles, and datum edits through the native quantity API. Read the native `sketch.Geometry` and `sketch.Constraints` to confirm the result, and apply this reference's index rules unchanged.
+Stay with the structured tools when they cover the operation. Use `run_script` for external geometry, `Weight`, constraint names, driving and reference toggles, and datum edits through the native quantity API; read [the run_script contract](python-export.md). Read the native `sketch.Geometry` and `sketch.Constraints` to confirm the result, and apply this reference's index rules unchanged.
 
 An unverified `Sketcher.Constraint` argument form can abort the FreeCAD process. Build constraints with the structured tool, or with a form recorded in `tests/native_contract.json`.
 

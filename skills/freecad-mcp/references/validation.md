@@ -2,6 +2,19 @@
 
 A successful MCP response only means the requested operation returned successfully. It does not prove that the result is a valid, correctly placed, single solid. Use this gate before export.
 
+## Contents
+
+- [1. Recompute and inspect](#1-recompute-and-inspect)
+- [2. Validate the BRep](#2-validate-the-brep)
+- [3. Enforce one solid](#3-enforce-one-solid)
+- [4. Assert the expected global bounds](#4-assert-the-expected-global-bounds)
+- [5. Measure fit and clearance with both modes](#5-measure-fit-and-clearance-with-both-modes)
+- [6. Prove shape-preserving changes](#6-prove-shape-preserving-changes)
+- [7. Review the result visually](#7-review-the-result-visually)
+- [8. Mesh sanity before export](#8-mesh-sanity-before-export)
+- [9. Final acceptance checklist](#9-final-acceptance-checklist)
+- [Sources](#sources)
+
 ## 1. Recompute and inspect
 
 After each meaningful modeling stage:
@@ -10,6 +23,10 @@ After each meaningful modeling stage:
 2. Read the final object's `typeId`, internal `name`, `state`, `placement`, `bounds`, `shape_valid`, and `solid_count` from the returned row.
 3. Reject `Shape.error`, missing shape data, zero volume when a solid is expected, or an unexpected compound/multiple-solid result.
 4. Check the final Body `Tip` if using PartDesign.
+
+Pass explicit `objects`. Default to compact detail. Use full detail only for selected objects and targeted property pages.
+
+After a spreadsheet edit, inspect the sheet with full detail. Confirm the target cell's content, formula, alias, value, and error state.
 
 The MCP add-on itself recomputes after create/edit and rejects objects reporting `invalid`, `error`, or `touched` state, or `isValid()==False`. Treat that as a stop condition, not a warning. Call `validate_geometry(document, objects=["Final"])` for the structured report: state, validity, solid count, volume, bounds, `shape.check` diagnostics, and maximum tolerance, optionally against `expected_solids` and `expected_bounds`.
 
@@ -73,7 +90,21 @@ print({
 - `interference` returns the common volume and reports `overlaps: true` only when that volume is positive. Surface-only, edge-only, or tangential contact has zero common volume and reports `overlaps: false`.
 - Use `distance` for clearance magnitude, `interference` for volumetric overlap, and both together with the stated tolerance for a fit decision. Report which modes a decision used.
 
-## 6. Review the result visually
+For an inherited assembly, measure the unmodified model first. Treat its interference as the baseline, not automatically as a defect.
+
+After a change, attribute each interference delta to named geometry before you accept or reject it.
+
+## 6. Prove shape-preserving changes
+
+For a refactor, compare the changed model with the accepted physical baseline.
+
+1. Record the baseline bounds, volume, solid count, critical distances, and interference.
+2. Use the accepted export mesh as the baseline when it defines the manufactured shape.
+3. Compare critical profile samples when equal bounds and volume cannot prove equivalence.
+4. Set pass bands from CAD and tessellation tolerances, not printer resolution alone.
+5. Report each delta and its declared pass band.
+
+## 7. Review the result visually
 
 Inspect at least `Bottom`, `Front`, `Top`, and `Isometric` views with `capture_view(document, focus_object=<final object>, view_name=...)` to catch accidental rotations, offsets, or missed features.
 
@@ -107,13 +138,13 @@ Read the capture against this list, and report the answer for each group:
 
 Do not use screenshot appearance as a substitute for BRep validation. A view can look correct while the BRep carries an invalid or non-manifold region.
 
-## 7. Mesh sanity before export
+## 8. Mesh sanity before export
 
 STL is a triangle mesh, not a parametric solid. For curved parts, choose a tessellation deviation small enough that the faceted surface does not affect fit or function. The [Export to STL or OBJ](https://wiki.freecad.org/Export_to_STL_or_OBJ) tutorial notes that default export settings may produce visibly jagged curves; verify current exporter/tessellation behavior programmatically in FreeCAD 1.1 with `FreeCAD.getExporters()`, `dir(MeshPart)`, and `supportedTypes()`.
 
 If importing an existing mesh, read [Mesh to Part](https://wiki.freecad.org/Mesh_to_Part), [Part Shape From Mesh](https://wiki.freecad.org/Part_ShapeFromMesh), and [Part MakeSolid](https://wiki.freecad.org/Part_MakeSolid). Mesh repair tools can help with holes and normals, but they do not guarantee a valid BRep.
 
-## 8. Final acceptance checklist
+## 9. Final acceptance checklist
 
 Before reporting the CAD export as validated:
 

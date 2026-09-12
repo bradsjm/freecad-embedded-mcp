@@ -1,138 +1,156 @@
 # FreeCAD MCP troubleshooting
 
-Use the smallest recovery step that addresses the observed failure. Preserve user work and do not hide errors with arbitrary deletion or scaling.
+Use the smallest recovery step that matches the observed failure. Preserve user work. Never hide a failure by deleting or rescaling geometry.
 
-## Tool and document failures
+Read `details.reason` first. When `details.nextTool` exists, call that tool next; never call a `details.nextAction` value as a tool. Error codes and payload shape: [mcp-tools.md](mcp-tools.md#errors).
 
-### Connection or server is unavailable
+## Contents
 
-Call `discover_capabilities`. If the client cannot connect, the embedded server may not be running: start it with the **Start MCP Server** toolbar action in the MCP Addon workbench, or enable auto-start in **MCP Settings**. The default endpoint is `http://127.0.0.1:9876/mcp` (port from settings). Local mode needs no token; network-access mode requires the bearer token on every request, and `PATH_NOT_ALLOWED` on file tools means the path is outside `allowed_roots` (the configured absolute `recovery_directory` is also allowed).
+| Symptom | First action |
+|---|---|
+| [Connection unavailable](#connection-unavailable) | Call `discover_capabilities` off the GUI thread |
+| [Wrong document or object](#wrong-document-or-object) | `inspect_documents` without arguments, then `inspect_objects` |
+| [Unsupported type](#unsupported-type) | Read `supportedTypes` from `discover_capabilities(detail="full")` |
+| [Property assignment failed](#property-assignment-failed) | `inspect_objects(detail="full")` for names, types, and metadata |
+| [Mutation succeeded but the effect is wrong](#mutation-succeeded-but-the-effect-is-wrong) | Re-read the exact property, cell, link, or file effect |
+| [Atomic batch failed](#atomic-batch-failed) | Treat as fully rolled back and correct the invalid entry |
+| [Sketch edit failed](#sketch-edit-failed) | Read `details.reason`; treat the batch as rolled back |
+| [Invalid or Touched object](#invalid-or-touched-object) | Inspect `state`, then the support and tool links |
+| [Deadline exceeded with unknown outcome](#deadline-exceeded-with-unknown-outcome) | Stop GUI calls, then inspect actual document state |
+| [Recovery checkpoint failed](#recovery-checkpoint-failed) | Inspect the recovery directory before any retry |
+| [GUI dispatch stuck](#gui-dispatch-stuck) | Stop all GUI and document calls |
+| [FEM failure](#fem-failure) | Confirm the analysis graph in `fem.md` |
+| [Export mismatch](#export-mismatch) | Read the `export` readback, not hand-derived values |
+| [Tool mount unavailable](#tool-mount-unavailable) | Recheck the client mount before diagnosing the model |
 
-### Wrong document or object
+## Connection unavailable
 
-Call `inspect_objects(document)` on the intended document. Use the actual internal `Name` returned by create/inspection calls. Do not use a display `Label` as a link target. When the document name is unknown, call `inspect_documents` (no arguments) and read its rows.
+1. Call `discover_capabilities`. It does not use the GUI thread. Treat one transport error as transient and re-query before concluding failure.
+2. If the client still cannot connect, the embedded server is not running. It lives inside FreeCAD's GUI process, so enable auto-start in MCP Settings or enable the add-on's server start for unattended runs.
+3. Match the client to the configured port, mode, and token: local mode needs no token, network mode requires the bearer token on every request.
+4. `PATH_NOT_ALLOWED` means the path is outside `allowed_roots`. The configured absolute `recovery_directory` is allowed automatically.
 
-### `not a document object type`
+Endpoint, modes, token, and path contract: [protocol-security.md](protocol-security.md#connection), [protocol-security.md](protocol-security.md#settings-and-path-access).
 
-The requested type is not registered in the current session. `discover_capabilities` reports the complete `supportedTypes` list.
+## Wrong document or object
 
-Then choose a registered type, load the relevant workbench/module if appropriate, or construct a deterministic `Part::Feature` shape through `run_script`. Do not repeatedly retry the same unknown type.
+1. Call `inspect_documents` with no arguments when the document name is unknown, and read its rows.
+2. Call `inspect_objects(document)` on the intended document and reuse the internal `name` values it returns.
+3. Never use a display `label` as an edit or link target.
 
-### Property assignment failed
+## Unsupported type
 
-Inspect property names, types, and metadata with `inspect_objects(document, detail="full")`. For a `Spreadsheet::Sheet`, read cell contents and formulas from the row's bounded `spreadsheet` inventory. Use `edit_object` with `properties.cells` to write address or alias keys through the native sheet API. `edit_object` prevalidates every property before the transaction opens, so a failed call assigns nothing. Use plain numbers for quantity properties (internal units apply) and canonical `{"object", "subelement"}` links for references. Feature-specific assignments the mapper cannot express go through `run_script`.
+1. Call `discover_capabilities` with `detail: "full"` and read `supportedTypes`.
+2. Choose a registered type, load the workbench it needs, or build the shape deterministically through `run_script`.
+3. Do not retry the same rejected type. Type resolution: [mcp-tools.md](mcp-tools.md#create_object-details).
 
-### Atomic object batch failed
+## Property assignment failed
 
-`create_objects` and `edit_objects` roll back the whole 1–32-entry batch when validation or recompute fails. Read the error details, correct the invalid entry, and retry from the original document state. `create_objects` does not resolve sibling links inside the batch; create the entries first, read `nameMapping`, then use `edit_objects`.
+`edit_object` and `edit_objects` prevalidate every property before the transaction opens, so a failed call assigns nothing.
 
+1. Inspect names, types, and metadata with `inspect_objects(document, detail="full")`.
+2. Use plain numbers for quantity properties and canonical `{"object", "subelement"}` links for references.
+3. For a `Spreadsheet::Sheet`, read the row's `spreadsheet` inventory and write address or alias keys through `edit_object` `properties.cells`.
+4. Send feature-specific assignments the mapper cannot express through `run_script`.
+
+Mapping rules: [mcp-tools.md](mcp-tools.md#property-mapping).
+
+## Mutation succeeded but the effect is wrong
+
+1. Re-read the exact property, cell, link, bounds, or file readback that the call should change.
+2. For spreadsheet writes, require `cellContentsPersisted: true` and inspect the cell after recompute.
+3. For export, compare the returned bounds and objects with the requested orientation and selection.
+4. For save, require the `save_document` acknowledgement. Reopen only when independent persistence proof is required.
+5. If the effect differs, stop dependent work and choose the correct tool or payload from `tools/list`.
+
+Current tool schemas reject unknown arguments. Do not probe schemas with deliberate invalid calls when `tools/list` is available.
+
+## Atomic batch failed
+
+1. Treat the whole 1–32-entry `create_objects` or `edit_objects` batch as rolled back; the document is unchanged.
+2. Read the error details, correct the invalid entry, and retry from the original document state.
+3. `create_objects` does not resolve links inside the batch: create the entries, read `nameMapping`, then link them with `edit_objects`.
 
 ## Sketch edit failed
 
-`edit_sketch` is atomic: a rejected entry rolls back the whole batch and reports `nextTool: inspect_sketch`. The document is unchanged, so no cleanup is needed. Pass `expected_generation` to refuse a batch whose target changed since you last read it; a mismatch fails before the transaction opens and the details carry `reason: stale_generation`, `expectedGeneration`, `actualGeneration`, and `nextTool: inspect_sketch`.
+1. Treat the batch as rolled back. The document is unchanged and needs no cleanup.
+2. `reason: stale_generation` means the target changed since your last read. Re-inspect the sketch, then retry with the current `expected_generation`.
+3. A `VALIDATION_FAILED` refusal happened before any native call. Correct the datum or constraint form and retry; accepted constraint forms are in [sketcher.md](sketcher.md).
+4. Add geometry and read `addedGeometry` before you constrain it in the same batch.
+5. After a delete, re-read the indices; never reuse a pre-delete index.
+6. An `Invalid` sketch after an accepted batch means a redundant or conflicting constraint that the native call does not reject. Delete the redundant constraint, then re-inspect.
 
-- A `setDatums` datum that is not a valid quantity fails with `VALIDATION_FAILED` before the transaction opens. Correct the datum string; the native call always receives a `FreeCAD.Units.Quantity`.
-- `VALIDATION_FAILED` naming the accepted forms means the server rejected the constraint entry before any native call. `Collinear`, `InternalAlignment`, `SnellsLaw`, `AngleViaPoint`, and `Weight` are rejected without a native call, because the native 1.1.3 constructor accepted no verified form of them. Use `Tangent` between two lines, or use `run_script` with a form recorded in `tests/native_contract.json`.
-- A batch that used geometry indices for constraints added in the same batch fails or constrains the wrong element. Add the geometry, read the returned `addedGeometry` indices, then add the constraints.
-- Deleting geometry or constraints renumbers the remaining rows. Never reuse a pre-delete index after a delete.
+Sketch call contract: [mcp-tools.md](mcp-tools.md#inspect_sketch-and-edit_sketch).
 
-A sketch that reports `Invalid` after a batch accepted a conflicting or redundant constraint. The native `addConstraint` does not reject it. Delete the redundant constraint, then re-read the sketch. A conflicting pair and a redundant pair each produced a negative `solve()` result and state `['Touched', 'Invalid']` on FreeCAD 1.1.3.
+## Invalid or Touched object
 
-## FreeCAD crash during a live session
+Mutation tools reject `Invalid`, `Error`, `Touched`, and `isValid() == False` after recompute, and roll the document back on failure. Find the first failed dependency:
 
-The client connection dropping mid-call may mean FreeCAD died. A dropped connection alone does not prove it: check for a live process first.
-
-```bash
-pgrep -f FreeCAD
-```
-
-When FreeCAD died, read the newest crash report and the triggered thread frames:
-
-```bash
-ls -t ~/Library/Logs/DiagnosticReports/freecad-*.ips | head -1
-```
-
-The `.ips` file holds two JSON documents: the first line is one object, the remainder is a second. Read `exception`, `termination`, and the frames of the thread whose `triggered` key is true.
-
-When you verify work, stop with the reason. Record the step, the journal path, and the crash-report path. Do not restart FreeCAD and do not retry the step.
-
-When you develop tests, restart FreeCAD and resume only with the `--dev` mode of `examples/native_contract_probe.py`:
-
-```bash
-osascript -e 'quit app "FreeCAD"'
-osascript -e 'tell application "FreeCAD" to activate'
-```
-
-When `osascript activate` fails, use `open -a FreeCAD`. Never resume by replaying the interrupted call. Recreate the probe document, confirm `discover_capabilities` reports `gui.state == "healthy"` with `queuedJobs == 0`, and complete one trivial GUI-thread call before the next step.
-
-## Invalid or touched object
-
-The mutation tools validate after recompute and reject states such as `Invalid`, `Error`, and `Touched`, as well as `isValid()==False`; a failed mutation rolls the document back and reports rollback failures separately. Find the first failed dependency:
-
-1. Inspect the feature's `state` and status string.
-2. Inspect its support/profile/base/tool links.
+1. Inspect the feature's `state` and status text.
+2. Inspect its support, profile, base, and tool links.
 3. Check dimensions, placement, and subelement references.
 4. Recompute after the smallest correction.
 5. Validate the final Body Tip or Part feature with `validate_geometry`.
 
-[Check Geometry](https://wiki.freecad.org/Part_CheckGeometry) diagnoses BRep issues but does not repair them automatically.
+[Check Geometry](https://wiki.freecad.org/Part_CheckGeometry) diagnoses BRep faults and never repairs them; fix the modeling history instead. Gates: [validation.md](validation.md).
 
 ## Deadline exceeded with unknown outcome
 
-A tool deadline (60 s default) does not prove that the operation failed or rolled back. In an observed session, a timed-out script had completed its feature creation; replaying it would have duplicated objects.
+A deadline does not prove that the operation failed or rolled back; it may have completed.
 
-1. Stop GUI-thread requests and call `discover_capabilities`; it never waits for the GUI thread. Treat one transport error as transient and re-query health separately.
-2. If the call detached as a task, poll `tasks/get` for its terminal result instead of assuming an outcome.
-3. Once healthy, inspect the target document's actual object names, states, Body Tip, and shape validity with `inspect_objects` and `validate_geometry`, plus output-file existence where relevant. Do not rely solely on variables assigned by the interrupted call.
-4. Resume only the missing stage. Never blindly replay document creation, feature additions, save, or export after an unknown outcome.
-5. Keep geometry mutation, expensive boolean audits, export, and screenshot capture in separate bounded calls. Save a valid milestone with `save_document` before expensive checks; this does not authorize exporting unvalidated geometry.
+1. Stop GUI-thread requests and call `discover_capabilities`. Re-query health separately after one transport error.
+2. Poll `tasks/get` for the terminal result of a detached call instead of assuming an outcome.
+3. Inspect the target document's actual names, states, Tip, and shape validity, plus output-file existence. Do not trust variables assigned by the interrupted call.
+4. Resume only the missing stage. Never replay creation, save, or export after an unknown outcome.
+5. Keep mutation, expensive audits, export, and capture in separate bounded calls, and save a valid milestone with `save_document` before expensive work.
 
-## Checkpoint and crash recovery
+Deadlines and detached tasks: [protocol-security.md](protocol-security.md#limits-and-deadlines), [protocol-security.md](protocol-security.md#tasks-and-cancellation).
 
-Save each validated milestone with `save_document`; do not wait until export. Preserve the last known-good source and exports during experiments. A transaction or `finally` block cannot guarantee restoration after a process crash.
+## Recovery checkpoint failed
 
-When `capabilities.recoveryEnabled` is true, the server also creates a verified FCStd checkpoint before expensive feature mutations. `create_feature` checkpoints `fillet`, `chamfer`, `thickness`, `draft`, `linear_pattern`, `polar_pattern`, `mirrored`, `loft`, `pipe`, `helix`, `multi_transform`, and `scaled`; `edit_feature` checkpoints when the affected Body contains one of these types. The checkpoint directory is allowed automatically and needs no `allowed_roots` entry. A failed checkpoint refuses the mutation with `VALIDATION_FAILED`, `reason: checkpoint_failed`, and `nextAction: inspect_recovery_directory`.
+A failed checkpoint refuses the mutation with `VALIDATION_FAILED`, `reason: checkpoint_failed`, and `nextAction: inspect_recovery_directory`, and removes only its staging file.
 
-1. Create a separate validation document before parameter sweeps or expensive geometry checks.
-2. Separate each mutation, recompute, inspection, and restoration into bounded calls.
-3. Start with the smallest functional probe. Avoid large GUI-thread loops of booleans or point-in-solid queries.
-4. After an aborted call, check `discover_capabilities` before issuing another document request. A busy server is not proof of a crash.
-5. After relaunch, enumerate documents again. Recovery can change document names, restore older values, or leave no documents open.
-6. Inspect Body membership, Tip, states, and parameter values before resuming. Discard stale Python object references from the previous process.
-7. Save the recovered valid state before further experiments. Resume only stages whose completion is confirmed.
+1. Inspect the recovery directory before retrying; never replay the refused mutation blind.
+2. Save each validated milestone with `save_document`; do not wait for export, and preserve the last known-good source and exports.
+3. After a relaunch, enumerate documents again: recovery can rename documents, restore older values, or leave none open.
+4. Inspect Body membership, Tip, states, and parameter values, discard stale Python object references, and save the recovered valid state before further work.
 
-Observed on 2026-09-09: crashes followed a combined parameter/boolean batch and a large `isInside()` surface-travel loop. The operation preceding each crash was known, but no crash-log diagnosis established the cause. Do not claim either API is inherently unsafe. Do not repeat the same workload unchanged after a crash. Isolated height-change, point-probe, and restoration calls later completed successfully; this is limited evidence, not a general stability guarantee.
-
-Deleting a Body did not remove its old feature chains in this session. Inspect dependencies before cleanup. A clean document made with `copyObject([active bodies], recursive=True)` retained the active dependency graphs without those obsolete chains. Verify copied names, links, states, and external workbench dependencies before using this approach. Preserve the source until the clean checkpoint is saved and checked.
+Which operations checkpoint: [mcp-tools.md](mcp-tools.md#recovery-checkpoints).
 
 ## GUI dispatch stuck
 
-If a call fails with `GUI_DISPATCH_STUCK`, or `discover_capabilities` reports a non-healthy `gui.state`:
+1. If `gui.state` is `busy`, wait before dependent GUI calls.
+2. If `gui.state` is `stuck`, stop all GUI and document calls.
+3. Call `discover_capabilities` to identify the running operation and health; it is GUI-independent.
+4. Wait for the running operation. It cannot be safely cancelled, and no parallel FEM or GUI call may start meanwhile.
+5. Restart FreeCAD only if health does not return.
 
-1. Stop sending document/GUI requests.
-2. Call `discover_capabilities` to identify the running operation and health; it is GUI-independent.
-3. Wait for the running operation to finish; it cannot be safely cancelled.
-4. If the state does not return to healthy, restart FreeCAD.
-
-Do not force-cancel a running GUI operation or start parallel FEM/GUI calls.
+Dispatch health and limits: [protocol-security.md](protocol-security.md#gui-dispatch-health).
 
 ## FEM failure
 
-Confirm the analysis contains the solid, material, generated Gmsh mesh, fixed constraint, force/pressure constraint, and a modern `Fem::SolverCalculiX` solver; `run_fem` selects or creates the modern solver and refuses legacy `Fem::SolverCcxTools` or ambiguous setups. Missing CalculiX produces an actionable error, never an auto-install. A solver failure reports `SOLVER_FAILED`; report the actual error and working directory. Cancellation is cooperative: a running solve is never killed. The dependency-free [client example](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/examples/cantilever_fem.py) shows the intended flow, but update its checked-in `EXPECTED_TOOLS = 23` guard to 25 before running it against the current default server.
+1. Confirm the analysis graph: Part solid, material, generated Gmsh mesh, fixed and force/pressure constraints, and a modern `Fem::SolverCalculiX`. See [fem.md](fem.md).
+2. Let `run_fem` select or create the modern solver. Legacy `Fem::SolverCcxTools` and ambiguous setups are explicit errors, never silent conversions.
+3. On `SOLVER_FAILED`, report the actual solver error and its working directory.
+4. A missing CalculiX installation is an actionable error; never auto-install it.
+5. Cancellation is cooperative: a running solve is never killed.
 
 ## Export mismatch
 
-If a downstream consumer of an exported file reports a scale, placement, hole, or geometry problem, verify only the CAD-side facts:
+Verify CAD-side facts only.
 
-- Use the `export` readback (mesh facets/bounds, STEP validity/solid count/volume, FCStd identity/placements) instead of re-deriving values by hand.
-- Verify millimetre assumptions and compare reported downstream dimensions with the `validate_geometry` global bounds.
-- Recheck which objects were exported; the result echoes the `objects` list.
-- Revise CAD orientation or geometry deliberately when CAD evidence supports it.
+1. Read the `export` readback (mesh facets and bounds, STEP validity/solid count/volume, FCStd identity/placements) instead of re-deriving values by hand.
+2. Confirm the millimetre assumption and compare the reported downstream dimensions with the `validate_geometry` global bounds.
+3. Recheck which objects were exported: the readback echoes `objects`.
+4. Revise orientation or geometry deliberately only when CAD evidence supports it.
 
-## Sources
+Mechanics: [export-print.md](export-print.md), [validation.md](validation.md).
 
-- [FreeCAD MCP README](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/README.md)
-- [Server orchestrator](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/addon/FreeCADMCP/mcp_server/server.py)
-- [GUI dispatch](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/addon/FreeCADMCP/mcp_server/gui_dispatch.py)
-- [Object validation](https://github.com/bradsjm/freecad-embedded-mcp/blob/main/addon/FreeCADMCP/mcp_server/object_validation.py)
-- [Part Check Geometry](https://wiki.freecad.org/Part_CheckGeometry)
+## Tool mount unavailable
+
+Treat `No such tool` as a client or mount failure, not as evidence about the FreeCAD model.
+
+1. Check that the FreeCAD MCP server remains mounted in the client session.
+2. Call `discover_capabilities` after the mount returns.
+3. Reinspect documents and objects before you resume mutation.
+4. Do not infer model state from calls that never reached the server.

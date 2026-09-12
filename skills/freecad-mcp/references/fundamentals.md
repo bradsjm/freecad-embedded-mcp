@@ -2,6 +2,17 @@
 
 Use this reference when a task involves document state, object types, properties, or the App/GUI boundary.
 
+## Contents
+
+- [App and GUI objects](#app-and-gui-objects)
+- [Documents and object identity](#documents-and-object-identity)
+- [Object types and properties](#object-types-and-properties)
+- [Property types](#property-types)
+- [Dependency queries](#dependency-queries)
+- [Recompute discipline](#recompute-discipline)
+- [Units and quantities](#units-and-quantities)
+- [Sources](#sources)
+
 ## App and GUI objects
 
 FreeCAD separates application data from its graphical representation. `App`/`FreeCAD` owns documents, objects, geometry definitions, and properties; `Gui`/`FreeCADGui` owns views and presentation. The [Document structure](https://wiki.freecad.org/Document_structure) and [FreeCAD Scripting Basics](https://wiki.freecad.org/FreeCAD_Scripting_Basics) pages describe this split.
@@ -68,7 +79,7 @@ Object bounds use `[xmin, ymin, zmin, xmax, ymax, zmax]` order in document coord
 
 `edit_parameters` adds dynamic properties, renames dynamic properties, and binds or clears expressions. The added property types are `App::PropertyBool`, `Integer`, `Float`, `String`, `Length`, `Distance`, `Angle`, `Vector`, `Color`, `StringList`, `FloatList`, and `IntegerList`. It refuses to rename a built-in property.
 
-A `Part::FeaturePython` object keeps a custom property such as `Side` across a save and reload. Its Python proxy does not survive unless the proxy class is importable from an installed module. See [Parametric and scripted workflows](workflows.md).
+A `Part::FeaturePython` object keeps a custom property such as `Side` across a save and reload. Its Python proxy does not survive unless the proxy class is importable from an installed module.
 
 ## Dependency queries
 

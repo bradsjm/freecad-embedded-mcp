@@ -4,6 +4,18 @@ Use this reference only when the part will be made by fused-filament fabrication
 
 Values in this reference are starting heuristics. Printer condition, nozzle, material, layer height, extrusion width, cooling, and slicer settings can change them. Prefer a measured calibration part or an explicit machine profile over a generic value.
 
+## Contents
+
+- [Collect process inputs only when they matter](#collect-process-inputs-only-when-they-matter)
+- [Choose the build orientation with the geometry](#choose-the-build-orientation-with-the-geometry)
+- [Design overhangs and bridges deliberately](#design-overhangs-and-bridges-deliberately)
+- [Size printable features from the process](#size-printable-features-from-the-process)
+- [Parameterize clearances and compensation](#parameterize-clearances-and-compensation)
+- [Consider material behavior](#consider-material-behavior)
+- [Deliver applicable manufacturing guidance](#deliver-applicable-manufacturing-guidance)
+- [Verify the design before export](#verify-the-design-before-export)
+- [Sources](#sources)
+
 ## Collect process inputs only when they matter
 
 Do not require a printer model before all CAD work. Ask only for inputs that affect the requested part:

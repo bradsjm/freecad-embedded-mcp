@@ -1,12 +1,26 @@
 # Part geometry and topology
 
-Use this reference for deterministic shape construction, CSG, topology inspection, and scripted shape work. Use structured mutation tools when they cover the operation, and use `run_script` for Part shape construction or document changes the structured tools do not cover. All document changes run on the GUI thread; use `export` for STL/STEP/3MF/FCStd output and `validate_geometry` for structured validity reports.
+Use this reference for deterministic shape construction, CSG, topology inspection, and scripted shape work. Use structured mutation tools when they cover the operation, and use `run_script` for Part shape construction or document changes the structured tools do not cover.
+
+Read [the run_script contract](python-export.md) before scripting; the standard escape-hatch payload is in [Common recipes](recipes.md). Use `export` for STL/STEP/3MF/FCStd output and `validate_geometry` for structured validity reports. Property names, units, and object identity belong to [FreeCAD fundamentals](fundamentals.md); placement payloads belong to [Placement and attachment](placement-attachment.md).
+
+## Contents
+
+- [Geometry versus document features](#geometry-versus-document-features)
+- [Primitives and booleans](#primitives-and-booleans)
+- [Construction vocabulary](#construction-vocabulary)
+- [Pass edges and faces from the shape that owns them](#pass-edges-and-faces-from-the-shape-that-owns-them)
+- [Reverse a hole wire](#reverse-a-hole-wire)
+- [Topology inspection](#topology-inspection)
+- [Transformations](#transformations)
+- [Refinement and tolerance](#refinement-and-tolerance)
+- [Sources](#sources)
 
 ## Geometry versus document features
 
 The Part module creates OpenCASCADE BRep geometry. A `Part.Shape`/TopoShape contains a hierarchy such as compounds, compsolids, solids, shells, faces, wires, edges, and vertices. A document feature is the container that stores the shape and gives it a name/properties/view representation.
 
-The [Part scripting](https://wiki.freecad.org/Part_scripting) and [Topological data scripting](https://wiki.freecad.org/Topological_data_scripting) pages are the primary references. The basic pattern is:
+The [Part scripting](https://wiki.freecad.org/Part_scripting) and [Topological data scripting](https://wiki.freecad.org/Topological_data_scripting) pages are the primary references. The basic pattern assigns one shape to one document feature, then recomputes; read [Recompute discipline](fundamentals.md#recompute-discipline) before scripting a longer chain.
 
 ```python
 import FreeCAD as App
@@ -17,6 +31,8 @@ obj = doc.addObject("Part::Feature", "Final")
 obj.Shape = Part.makeBox(40, 30, 5)
 doc.recompute()
 ```
+
+Every constructor and method argument below takes a plain number in the model's millimetre convention; unit handling is in [Units and quantities](fundamentals.md#units-and-quantities).
 
 ## Primitives and booleans
 
@@ -125,13 +141,13 @@ For a single-solid result, expect one valid solid unless a deliberate multi-part
 
 ## Transformations
 
-Use `Placement` for an object’s location/orientation. Use shape transformations only when the geometry definition itself must change. The topology-scripting guidance distinguishes rigid transforms from general transformations; non-uniform transforms can alter curves and surfaces and may produce less robust geometry. Test the resulting shape and recheck bounds.
+Use `Placement` for an object’s location/orientation; read [Placement and attachment](placement-attachment.md) for the payload. Use shape transformations only when the geometry definition itself must change. The topology-scripting guidance distinguishes rigid transforms from general transformations; non-uniform transforms can alter curves and surfaces and may produce less robust geometry. Test the resulting shape and recheck bounds.
 
 Keep the source shape and final shape separate while developing if a reversible history matters. Do not repeatedly replace the same Body feature with transient shape results.
 
 ## Refinement and tolerance
 
-Boolean operations can leave redundant edges. A late refined copy or `removeSplitter()` may simplify the result, but refinement can also remove edges that later features rely on. Refine only after the feature graph is complete and validate again. Read [Part RefineShape](https://wiki.freecad.org/Part_RefineShape) and [Part ToleranceSet](https://wiki.freecad.org/Part_ToleranceSet) for current FreeCAD 1.1 behavior.
+Boolean operations can leave redundant edges. A late refined copy or `removeSplitter()` may simplify the result, but refinement can also remove edges that later features rely on. Refine only after the feature graph is complete and validate again with the [geometry validation](validation.md) gate. Read [Part RefineShape](https://wiki.freecad.org/Part_RefineShape) and [Part ToleranceSet](https://wiki.freecad.org/Part_ToleranceSet) for current FreeCAD 1.1 behavior.
 
 FreeCAD’s [Check Geometry](https://wiki.freecad.org/Part_CheckGeometry) reports BRep problems and can run Boolean checks; it does not automatically repair them. Fix the modeling operation that created the problem.
 

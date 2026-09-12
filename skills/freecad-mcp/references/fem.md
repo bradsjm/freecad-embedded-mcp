@@ -2,6 +2,17 @@
 
 Use FEM to estimate structural behavior before committing to a design; do not treat a successful solve as proof of real-world strength. A simple isotropic bulk-material model does not represent manufacturing defects, assembly effects, or load paths that differ from the defined constraints.
 
+## Contents
+
+- [Required analysis graph](#required-analysis-graph)
+- [Recommended MCP sequence](#recommended-mcp-sequence)
+- [Material values](#material-values)
+- [Constraint properties](#constraint-properties)
+- [Mesh and solver limits](#mesh-and-solver-limits)
+- [Results](#results)
+- [Interpretation](#interpretation)
+- [Sources](#sources)
+
 ## Required analysis graph
 
 `run_fem` runs the modern `Fem::SolverCalculiX` pipeline. It expects an existing `Fem::FemAnalysis` container (the legacy `Fem::AnalysisPython` TypeId is accepted as an alias when creating) with:
