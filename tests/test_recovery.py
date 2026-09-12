@@ -17,9 +17,16 @@ if str(ADDON_DIR) not in sys.path:
 from mcp_server.tools import recovery
 
 
-def _identity(path: Path) -> tuple[int, int]:
+def _identity(path: Path) -> tuple[int, ...]:
+    # Mirror the five stat fields production captures for stage ownership.
     status = os.stat(path)
-    return (status.st_dev, status.st_ino)
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
 
 
 def test_remove_created_removes_the_stage_it_still_owns(tmp_path: Path) -> None:

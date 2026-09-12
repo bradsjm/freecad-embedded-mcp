@@ -47,9 +47,10 @@ def checkpoint_before_mutation(ctx: Any, doc: Any, label: str) -> dict:
     )
     # Reserve the stage name exclusively: a colliding file must never be
     # overwritten by saveCopy, and cleanup may only remove what this call
-    # created. The stage's device/inode identity is captured now so the
-    # final cleanup can prove it still owns the path it removes.
-    created_identity: tuple[int, int] | None = None
+    # created. The identity captured here proves this call created the
+    # file; it is refreshed after saveCopy so cleanup can also compare
+    # size and timestamps against whatever sits at the path later.
+    created_identity: tuple[int, ...] | None = None
     try:
         staged_fd = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
@@ -78,6 +79,24 @@ def checkpoint_before_mutation(ctx: Any, doc: Any, label: str) -> dict:
                 f"recovery saveCopy failed: {type(exc).__name__}: {exc}",
                 {"path": destination},
             ) from exc
+        # Recapture the stage identity now that saveCopy wrote its content:
+        # Linux filesystems recycle freed inode numbers immediately, so a
+        # bare device/inode match would mistake a replacement file for the
+        # staged copy this checkpoint created. Size and nanosecond
+        # timestamps must match as well before the path may be unlinked.
+        try:
+            status = os.stat(staged)
+            created_identity = (
+                status.st_dev,
+                status.st_ino,
+                status.st_size,
+                status.st_mtime_ns,
+                status.st_ctime_ns,
+            )
+        except OSError:
+            # The stage vanished before it could be re-identified: nothing
+            # at the path is provably ours, so cleanup removes nothing.
+            created_identity = None
         if str(getattr(doc, "FileName", "") or "") != original_file_name:
             raise _checkpoint_failed(
                 "recovery saveCopy changed the document save identity",
@@ -224,7 +243,7 @@ def _checkpoint_failed(message: str, details: dict) -> ToolError:
     return ToolError(VALIDATION_FAILED, message, enriched)
 
 
-def _remove_created(path: str, identity: tuple[int, int] | None) -> None:
+def _remove_created(path: str, identity: tuple[int, ...] | None) -> None:
     """Remove ``path`` only when this checkpoint created and still owns it."""
 
     if identity is None:
@@ -233,7 +252,16 @@ def _remove_created(path: str, identity: tuple[int, int] | None) -> None:
         current = os.stat(path)
     except OSError:
         return
-    if (current.st_dev, current.st_ino) != identity:
+    current_fields = (
+        current.st_dev,
+        current.st_ino,
+        current.st_size,
+        current.st_mtime_ns,
+        current.st_ctime_ns,
+    )
+    if current_fields != identity:
+        # A device/inode match alone proves nothing on Linux: freed inode
+        # numbers are recycled for the next file created at the same path.
         # The path was replaced after this checkpoint reserved it: the
         # replacement is not ours to remove, and unlinking it would destroy
         # a file another writer created at that path.
