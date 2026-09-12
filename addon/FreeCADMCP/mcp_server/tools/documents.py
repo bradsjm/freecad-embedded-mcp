@@ -96,6 +96,47 @@ def _canonical_document_path(ctx: Any, path: Any, *, what: str) -> str:
     return canonical
 
 
+def _reload_path(ctx: Any, doc: Any) -> str:
+    """Canonical saved file of ``doc``, validated against the allowed roots.
+
+    Refuses an unsaved document, a path outside ``allowed_roots``, a
+    non-FCStd file and a missing file. The same check runs again immediately
+    before the native close/reopen.
+    """
+
+    raw = str(getattr(doc, "FileName", "") or "")
+    if not raw:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"document '{doc.Name}' has never been saved; there is no file to reload from",
+        )
+    canonical = _canonical_document_path(ctx, raw, what="reload path")
+    _validate_fcstd_path(canonical, what="reload path")
+    if not os.path.isfile(canonical):
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"the saved file for '{doc.Name}' no longer exists: '{canonical}'",
+        )
+    return canonical
+
+
+def _document_save_path(ctx: Any, doc: Any) -> str | None:
+    """Canonical containment-checked path of ``doc``'s current file.
+
+    Returns ``None`` for a document that has never been saved, and raises
+    ``PATH_NOT_ALLOWED`` when the current file sits outside the allowed
+    roots: an implicit save must not write outside the containment policy
+    that an explicit save-as already enforces.
+    """
+
+    raw = str(getattr(doc, "FileName", "") or "")
+    if not raw:
+        return None
+    canonical = _canonical_document_path(ctx, raw, what="document path")
+    _validate_fcstd_path(canonical, what="document path")
+    return canonical
+
+
 def _is_dirty(ctx: Any, doc: Any) -> bool:
     """Conservative dirty verdict; unknown state prompts.
 
@@ -225,6 +266,9 @@ def _save_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
     doc = ctx.require_document(args["document"])
     path = args.get("path")
     if path is None:
+        # An implicit save writes to the document's own file, so the same
+        # containment check as an explicit save-as must run before the write.
+        _document_save_path(ctx, doc)
         return None
     canonical = _canonical_document_path(ctx, path, what="save path")
     _validate_fcstd_path(canonical, what="save path")
@@ -259,18 +303,7 @@ def _close_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
 
 def _reload_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
     doc = ctx.require_document(args["document"])
-    path = getattr(doc, "FileName", "")
-    if not path:
-        raise ToolError(
-            VALIDATION_FAILED,
-            f"document '{doc.Name}' has never been saved; there is no file to reload from",
-        )
-    if not os.path.isfile(path):
-        raise ToolError(
-            VALIDATION_FAILED,
-            f"the saved file for '{doc.Name}' no longer exists: '{path}'",
-        )
-    _validate_fcstd_path(path, what="reload path")
+    path = _reload_path(ctx, doc)
     if not _is_dirty(ctx, doc):
         return None
     message = (
@@ -493,7 +526,7 @@ def _save_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     path = arguments.get("path")
     try:
         if path is None:
-            if not doc.FileName:
+            if _document_save_path(ctx, doc) is None:
                 raise ToolError(
                     VALIDATION_FAILED,
                     f"document '{doc.Name}' has never been saved; provide an explicit save path",
@@ -556,18 +589,7 @@ def _close_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
 def _reload_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     doc = ctx.require_document(arguments["document"])
     ctx.check_document_idle(doc)
-    path = str(doc.FileName)
-    if not path:
-        raise ToolError(
-            VALIDATION_FAILED,
-            f"document '{doc.Name}' has never been saved; there is no file to reload from",
-        )
-    if not os.path.isfile(path):
-        raise ToolError(
-            VALIDATION_FAILED,
-            f"the saved file for '{doc.Name}' no longer exists: '{path}'",
-        )
-    _validate_fcstd_path(path, what="reload path")
+    path = _reload_path(ctx, doc)
     if _is_dirty(ctx, doc):
         _require_approved(ctx, _reload_preflight(ctx, arguments))
     name = str(doc.Name)

@@ -703,6 +703,22 @@ def _fail(message: str) -> ToolError:
     return ToolError(VALIDATION_FAILED, message)
 
 
+def _reject_duplicate_indexes(indexes: list, operation: str) -> None:
+    """Refuse a repeated index, which descending deletion would mis-target.
+
+    Non-integer entries are skipped here: the per-index bounds check
+    reports the bad type with the existing message.
+    """
+
+    seen: set = set()
+    for index in indexes:
+        if isinstance(index, bool) or not isinstance(index, int):
+            continue
+        if index in seen:
+            raise _fail(f"{operation} lists index {index} more than once")
+        seen.add(index)
+
+
 def _finite(value: Any) -> float | None:
     try:
         number = float(value)
@@ -1384,6 +1400,16 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
             "surviving constraints from a fresh inspect_sketch"
         )
 
+    if delete_geometry and delete_constraints:
+        # The same renumbering makes a constraint index meaningless once
+        # geometry is deleted first: the batch would delete a different
+        # constraint than the one the caller planned.
+        raise _fail(
+            "deleteGeometry cannot be combined with deleteConstraints in one "
+            "batch; delete the geometry first, then delete the surviving "
+            "constraints from a fresh inspect_sketch"
+        )
+
     # Reject missing native methods before any planning error so the cause
     # names the missing capability, not a simulated index.
     for operation, method in _OPERATION_METHODS.items():
@@ -1413,6 +1439,9 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
                 f"deleteConstraints index {index!r} does not exist; the "
                 f"sketch has {constraint_count} constraints"
             )
+
+    _reject_duplicate_indexes(delete_geometry, "deleteGeometry")
+    _reject_duplicate_indexes(delete_constraints, "deleteConstraints")
 
     checked_geometry_input = [
         _validate_geometry_add(entry, f"addGeometry[{position}]")

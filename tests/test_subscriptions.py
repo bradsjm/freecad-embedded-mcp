@@ -347,7 +347,35 @@ def test_publishing_never_blocks_the_publisher() -> None:
     assert sub.closed
 
 
-# -- helpers --------------------------------------------------------------
+def test_full_queue_still_receives_the_terminal_result_on_shutdown() -> None:
+    """A stream whose queue filled with notifications must still get its
+    promised ``subscriptions/listen`` result when the server shuts down."""
+
+    registry = make_registry(queue_limit=2)
+    sub = registry.register("conn-a", 1, {"taskIds": ["t1"]}, principal="alice")
+    # Ack fills entry 1; one task event fills entry 2 — the data limit.
+    assert (
+        registry.publish_task_status(
+            tasks_module.detailed_task_wire(_fake_task("t1", status="working"))
+        )
+        == 1
+    )
+    assert not sub.closed
+
+    assert registry.shutdown() == 1
+
+    messages = drain(sub)
+    assert [m["method"] for m in messages if "method" in m] == [
+        "notifications/subscriptions/acknowledged",
+        "notifications/tasks",
+    ]
+    finals = [m for m in messages if "result" in m]
+    assert len(finals) == 1
+    assert finals[0]["id"] == 1
+    assert finals[0]["result"]["resultType"] == "complete"
+
+
+# -- registration limits ---------------------------------------------------
 
 
 def _fake_task(task_id: str, *, status: str) -> tasks_module.Task:

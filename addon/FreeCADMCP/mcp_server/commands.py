@@ -162,6 +162,11 @@ def _restart_required(saved: dict | None, status: dict) -> bool:
         # running server even while recovery is disabled, so any change
         # must surface as a pending restart.
         or str(saved.get("recovery_directory", "")) != str(connection.get("recovery_directory", ""))
+        # Path containment is read from the active settings, so a changed
+        # root list only takes effect on restart — including a narrowing
+        # that would otherwise leave the old, wider policy active.
+        or [str(root) for root in saved.get("allowed_roots") or []]
+        != [str(root) for root in connection.get("allowed_roots") or []]
     )
 
 

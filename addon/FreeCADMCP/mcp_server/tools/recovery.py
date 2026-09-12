@@ -224,13 +224,6 @@ def _checkpoint_failed(message: str, details: dict) -> ToolError:
     return ToolError(VALIDATION_FAILED, message, enriched)
 
 
-def _remove_quietly(path: str) -> None:
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-
-
 def _remove_created(path: str, identity: tuple[int, int] | None) -> None:
     """Remove ``path`` only when this checkpoint created and still owns it."""
 
@@ -242,5 +235,10 @@ def _remove_created(path: str, identity: tuple[int, int] | None) -> None:
         return
     if (current.st_dev, current.st_ino) != identity:
         # The path was replaced after this checkpoint reserved it: the
-        # replacement is not ours to remove.
-        _remove_quietly(path)
+        # replacement is not ours to remove, and unlinking it would destroy
+        # a file another writer created at that path.
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass

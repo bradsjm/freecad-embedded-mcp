@@ -583,12 +583,19 @@ def _validate_param_headers(
 
     Encoding validity is always enforced. When ``param_paths`` declares a
     mirror for a header suffix, presence and value are checked in both
-    directions; unknown suffixes are only checked for valid encoding.
+    directions; without an annotation table a suffix is resolved to a body
+    value by name and checked against it; a suffix that names no body value
+    is only checked for valid encoding.
     """
 
     annotated: dict = {}
     for suffix, path in (param_paths or {}).items():
         annotated[suffix.lower()] = tuple(path)
+    if param_paths is None:
+        # The live HTTP path has no per-method annotation table: resolve
+        # each header suffix against the body so a mirrored header can never
+        # contradict the request it accompanies.
+        annotated.update(_infer_param_paths(params, raw_headers))
 
     for raw_name, raw_value in raw_headers.items():
         if not raw_name.startswith("mcp-param-"):
@@ -627,6 +634,59 @@ def _validate_param_headers(
                 HEADER_MISMATCH,
                 f"header mismatch: Mcp-Param-{suffix} does not match the request body",
             )
+
+
+def _infer_param_paths(
+    params: Mapping[str, Any], raw_headers: Mapping[str, Any]
+) -> dict[str, tuple[str, ...]]:
+    """Resolve un-annotated ``Mcp-Param-*`` suffixes to body values by name.
+
+    ``Mcp-Param-Region`` matches a top-level ``params`` key or a key of
+    ``params.arguments`` case-insensitively. A suffix that names no body
+    value returns no mirror, so a client that sends no parameter headers, or
+    sends one naming nothing, is unaffected. A value the comparison cannot
+    read (a list, object, or null) also returns no mirror: a complex
+    parameter is only checked for valid header encoding, never rejected for
+    an unverifiable mismatch.
+    """
+
+    arguments = params.get("arguments")
+    arguments = arguments if isinstance(arguments, Mapping) else {}
+    inferred: dict[str, tuple[str, ...]] = {}
+    for raw_name in raw_headers:
+        if not raw_name.startswith("mcp-param-"):
+            continue
+        suffix = raw_name[len("mcp-param-") :]
+        if suffix in inferred:
+            continue
+        key = _matching_key(arguments, suffix)
+        if key is not None and _is_mirrorable(arguments[key]):
+            inferred[suffix] = ("arguments", key)
+            continue
+        key = _matching_key(params, suffix)
+        if key is not None and _is_mirrorable(params[key]):
+            inferred[suffix] = (key,)
+    return inferred
+
+
+def _is_mirrorable(value: Any) -> bool:
+    """True when ``header_matches_body`` can compare this body value."""
+
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, (int, float)):
+        return True
+    return isinstance(value, str)
+
+
+def _matching_key(container: Mapping[str, Any], suffix: str) -> str | None:
+    """Return the key of ``container`` whose lowercase form equals ``suffix``."""
+
+    lowered = suffix.lower()
+    for key in container:
+        if isinstance(key, str) and key.lower() == lowered:
+            return key
+    return None
 
 
 # ---------------------------------------------------------------------------

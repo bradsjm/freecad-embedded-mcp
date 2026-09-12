@@ -1,6 +1,6 @@
 """Server orchestration for the embedded MCP v2 add-on.
 
-Owns startup/shutdown, the exact 24-tool registry, request dispatch
+Owns startup/shutdown, the exact 26-tool registry, request dispatch
 (discovery, tools, tasks, subscriptions and document resources), the
 document observer with per-document generations, the shared consent
 preflight choreography and the one execution lifecycle for blocking calls
@@ -75,9 +75,9 @@ from mcp_server.subscriptions import (
 )
 from mcp_server.tasks import (
     TASK_ELIGIBLE_OPERATIONS,
-    TASKS_EXTENSION_ID,
     TaskStore,
     create_task_wire,
+    declares_tasks_capability,
     detailed_task_wire,
     require_tasks_capability,
 )
@@ -877,7 +877,12 @@ class Server:
         return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
     def ensure_script_namespace(self, session_id: str) -> dict:
-        """Return the named script session, capped at 32 live sessions."""
+        """Return the named script session, capped at 32 live sessions.
+
+        One allocator for ``run_script``: new sessions are seeded with the
+        FreeCAD/App/Gui bindings, and a 33rd session is refused with
+        ``SERVER_BUSY`` instead of evicting live state.
+        """
 
         if not isinstance(session_id, str) or not session_id:
             raise ToolError(VALIDATION_FAILED, "session_id must be a non-empty string")
@@ -890,7 +895,7 @@ class Server:
                         "script session limit reached; restart the server to reset",
                         {"reason": "session_limit", "limit": MAX_SCRIPT_SESSIONS},
                     )
-                namespace = {}
+                namespace = {"FreeCAD": self.App, "App": self.App, "Gui": self.Gui}
                 self.script_namespaces[session_id] = namespace
             return namespace
 
@@ -1224,7 +1229,15 @@ class Server:
     ) -> dict | StreamResponse:
         params = validated["params"]
         name = params.get("name")
-        if isinstance(name, str) and name in self._definitions and not self._tool_enabled(name):
+        if not isinstance(name, str) or not name:
+            # A non-string name is unhashable for the registry lookups
+            # below; report malformed parameters instead of letting a
+            # TypeError escape as an infrastructure failure.
+            raise ProtocolError(
+                INVALID_PARAMS,
+                "invalid parameters: tools/call name must be a non-empty string",
+            )
+        if name in self._definitions and not self._tool_enabled(name):
             # A disabled tool is not part of the surface: reject it before
             # argument-shape validation, schema checks, consent, operation
             # allocation or GUI dispatch.
@@ -1301,8 +1314,7 @@ class Server:
         return self._start_blocking_call(validated, principal, name, arguments, target, deadline_s)
 
     def _client_declares_tasks(self, validated: dict) -> bool:
-        extensions = validated["client_capabilities"].get("extensions")
-        return isinstance(extensions, Mapping) and TASKS_EXTENSION_ID in extensions
+        return declares_tasks_capability(validated["client_capabilities"])
 
     # -- consent choreography ---------------------------------------------
 
@@ -2042,14 +2054,35 @@ class Server:
 
     # -- task methods ---------------------------------------------------------
 
+    @staticmethod
+    def _require_task_id_value(task_id: Any) -> str:
+        """Return one validated task identifier.
+
+        The task store is dict-backed, so a list or object id would raise an
+        unhashable ``TypeError`` and escape as an infrastructure failure.
+        """
+
+        if not isinstance(task_id, str) or not task_id:
+            raise ProtocolError(
+                INVALID_PARAMS,
+                "invalid parameters: taskId must be a non-empty string",
+            )
+        return task_id
+
+    @classmethod
+    def _require_task_id(cls, params: Mapping[str, Any]) -> str:
+        """Return ``params.taskId``, refusing a non-string before store lookup."""
+
+        return cls._require_task_id_value(params.get("taskId"))
+
     def _dispatch_tasks_get(self, validated: dict, principal: str) -> dict:
         require_tasks_capability(validated["client_capabilities"])
-        task = self._task_store.get(validated["params"].get("taskId"), principal=principal)
+        task = self._task_store.get(self._require_task_id(validated["params"]), principal=principal)
         return _rpc_result(validated["id"], complete_result(detailed_task_wire(task)))
 
     def _dispatch_tasks_update(self, validated: dict, principal: str) -> dict:
         require_tasks_capability(validated["client_capabilities"])
-        task_id = validated["params"].get("taskId")
+        task_id = self._require_task_id(validated["params"])
         self._task_store.get(task_id, principal=principal)
         # All tools elicit before task creation, so no input keys can be
         # outstanding: every supplied key is ignored (never granted
@@ -2058,7 +2091,9 @@ class Server:
 
     def _dispatch_tasks_cancel(self, validated: dict, principal: str) -> dict:
         require_tasks_capability(validated["client_capabilities"])
-        self._task_store.request_cancel(validated["params"].get("taskId"), principal=principal)
+        self._task_store.request_cancel(
+            self._require_task_id(validated["params"]), principal=principal
+        )
         # Honest acknowledgement: a terminal task is not re-cancelled, the
         # cancel event is only a cooperative request either way.
         return _rpc_result(validated["id"], complete_result({}))
@@ -2087,7 +2122,18 @@ class Server:
             # A task subscription is a task method: it requires the Tasks
             # extension capability on this request.
             require_tasks_capability(validated["client_capabilities"])
-            for task_id in notifications["taskIds"]:
+            task_ids = notifications["taskIds"]
+            if not isinstance(task_ids, list) or not all(
+                isinstance(task_id, str) and task_id for task_id in task_ids
+            ):
+                # Checked before iteration as well as per member: a truthy
+                # non-iterable (5, true) would raise TypeError inside the
+                # loop and escape as an infrastructure failure.
+                raise ProtocolError(
+                    INVALID_PARAMS,
+                    "invalid parameters: notifications.taskIds must be a list of non-empty strings",
+                )
+            for task_id in task_ids:
                 # Existence and principal ownership are checked BEFORE the
                 # stream is registered; a foreign id is indistinguishable
                 # from an unknown one.
@@ -2354,6 +2400,7 @@ class Server:
             "connection": {
                 "remote_enabled": bool(self.settings.get("remote_enabled", False)),
                 "allowed_ips": str(self.settings.get("allowed_ips", "")),
+                "allowed_roots": [str(root) for root in self.settings.get("allowed_roots") or []],
                 "configured_port": self.settings.get("port"),
                 "allow_scripts": bool(self.settings.get("allow_scripts", False)),
                 "recovery_enabled": bool(self.settings.get("recovery_enabled", False)),

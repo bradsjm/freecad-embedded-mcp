@@ -852,18 +852,3 @@ def test_cancel_event_marks_requested_without_touching_the_result(
         # Finished before cancellation could take effect: completed, with
         # the diagnostic — never a false cancelled state.
         assert future.exception() is None
-
-
-def test_request_cancel_is_a_truthful_no_kill_boundary(tmp_path: Path) -> None:
-    with load_fem() as fem:
-        ctx = FakeCtx(FakeDocument(), tmp_path)
-        _future, _doc, _analysis = start_solve(fem, ctx, tmp_path)
-        operation = ctx.active_solves["identity-Doc"]
-        tool = operation.tool
-
-        operation.request_cancel()
-
-        assert operation.cancel_requested is True
-        assert tool.compute_called is True  # process was started, never killed
-        # The solve is still active until it actually completes.
-        assert ctx.active_solves.get("identity-Doc") is operation

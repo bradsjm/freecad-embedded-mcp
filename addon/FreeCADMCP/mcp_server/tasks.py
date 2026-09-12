@@ -66,17 +66,31 @@ def _utc_now_iso() -> str:
     return now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def require_tasks_capability(client_capabilities: object) -> None:
-    """Raise ``-32021`` unless the request declared the Tasks extension.
+def declares_tasks_capability(client_capabilities: object) -> bool:
+    """True when the request declared the Tasks extension as an object.
 
-    ``client_capabilities`` is the ``io.modelcontextprotocol/clientCapabilities``
-    object of the current request (may be ``None``). Extensions live under the
-    ``extensions`` key and an extension's value must be an object.
+    ``client_capabilities`` is the
+    ``io.modelcontextprotocol/clientCapabilities`` object of the current
+    request (may be ``None``). Extensions live under the ``extensions`` key
+    and an extension's value must be an object.
+
+    The server selects the detached task path with this exact predicate, so
+    a client whose extension value is not an object can never be handed a
+    task it is unable to poll or cancel.
     """
-    extensions: Any = None
-    if isinstance(client_capabilities, dict):
-        extensions = client_capabilities.get("extensions")
-    if not isinstance(extensions, dict) or not isinstance(extensions.get(TASKS_EXTENSION_ID), dict):
+
+    if not isinstance(client_capabilities, dict):
+        return False
+    extensions = client_capabilities.get("extensions")
+    if not isinstance(extensions, dict):
+        return False
+    return isinstance(extensions.get(TASKS_EXTENSION_ID), dict)
+
+
+def require_tasks_capability(client_capabilities: object) -> None:
+    """Raise ``-32021`` unless the request declared the Tasks extension."""
+
+    if not declares_tasks_capability(client_capabilities):
         raise ProtocolError(
             MISSING_REQUIRED_CLIENT_CAPABILITY,
             "This request requires the MCP Tasks extension capability",

@@ -112,27 +112,11 @@ def run_script(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             details={"active_solves": sorted(active_solves)},
         )
 
-    namespaces = ctx.script_namespaces
-    namespace = namespaces.get(session_id)
-    if namespace is None:
-        if len(namespaces) >= SESSION_LIMIT:
-            raise ToolError(
-                VALIDATION_FAILED,
-                f"the script session limit of {SESSION_LIMIT} was reached; "
-                f"refusing new session {session_id!r} instead of evicting "
-                "live state",
-                details={
-                    "limit": SESSION_LIMIT,
-                    "sessions": sorted(namespaces),
-                },
-            )
-        namespace = _seed_namespace(ctx)
-        namespaces[session_id] = namespace
-
     cancel_event = getattr(ctx, "cancel_event", None)
     if cancel_event is not None and cancel_event.is_set():
         # Safe boundary: the operation was cancelled before execution, so
-        # the code truthfully never ran and no state changed.
+        # the code truthfully never ran and no state changed — including the
+        # session budget, which a cancelled call must not consume.
         return {
             "session_id": session_id,
             "stdout": "",
@@ -141,6 +125,10 @@ def run_script(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             "stderrTruncated": False,
             "executed": False,
         }
+
+    # One allocator for every script session: the server owns the cap, the
+    # refusal code and the seeding, so this module only executes code.
+    namespace = ctx.ensure_script_namespace(session_id)
 
     stdout = _BoundedStream(OUTPUT_LIMIT_CHARS)
     stderr = _BoundedStream(OUTPUT_LIMIT_CHARS)
@@ -241,10 +229,6 @@ def _format_traceback_tail() -> tuple[str, bool]:
         else:
             tail = (tail + chunk)[-TRACEBACK_LIMIT_CHARS:]
     return tail, total > TRACEBACK_LIMIT_CHARS
-
-
-def _seed_namespace(ctx: Any) -> dict[str, Any]:
-    return {"FreeCAD": ctx.App, "App": ctx.App, "Gui": ctx.Gui}
 
 
 def _script_error_message(traceback_text: str) -> str:

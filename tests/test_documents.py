@@ -284,6 +284,38 @@ def test_save_preflight_rejects_missing_parent_directory(tmp_path):
     assert excinfo.value.code == VALIDATION_FAILED
 
 
+def test_implicit_save_and_reload_reject_a_file_outside_allowed_roots(tmp_path):
+    """A document opened manually from outside the containment policy must not
+    be written or read back through an implicit save/reload, which carry no
+    explicit path argument to validate."""
+
+    ctx = FakeCtx(tmp_path)
+    outside = tmp_path / "outside" / "escaped.FCStd"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("foreign")
+    ctx.add_document(FakeDoc("escaped", file_name=str(outside)))
+
+    with pytest.raises(ToolError) as excinfo:
+        documents.preflight(ctx, "save_document", {"document": "escaped"})
+    assert excinfo.value.code == PATH_NOT_ALLOWED
+
+    with pytest.raises(ToolError) as excinfo:
+        documents.HANDLERS["save_document"](ctx, {"document": "escaped"})
+    assert excinfo.value.code == PATH_NOT_ALLOWED
+
+    with pytest.raises(ToolError) as excinfo:
+        documents.preflight(ctx, "reload_document", {"document": "escaped"})
+    assert excinfo.value.code == PATH_NOT_ALLOWED
+
+    with pytest.raises(ToolError) as excinfo:
+        documents.HANDLERS["reload_document"](ctx, {"document": "escaped"})
+    assert excinfo.value.code == PATH_NOT_ALLOWED
+
+    # Refused before any native write or close/reopen.
+    assert ctx.App.calls == []
+    assert outside.read_text() == "foreign"
+
+
 def test_close_preflight_dirty_consent_and_clean_none(tmp_path):
     ctx = FakeCtx(tmp_path)
     dirty = FakeDoc("dirty", modified=True, objects=[object()])

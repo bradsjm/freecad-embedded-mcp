@@ -87,8 +87,10 @@ def _normalize_settings(raw, *, generate_token):
         token = ""
     if not isinstance(token, str):
         raise SettingsError(f"Invalid token: {token!r}")
-    if not token.strip():
-        token = ""
+    # The HTTP layer strips the credentials before its constant-time
+    # compare, so a token stored with surrounding whitespace could never
+    # authenticate; store the exact form a client must send.
+    token = token.strip()
     if remote_enabled and not token:
         if generate_token:
             token = secrets.token_urlsafe(32)

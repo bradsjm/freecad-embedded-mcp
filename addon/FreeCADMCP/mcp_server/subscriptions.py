@@ -278,7 +278,11 @@ class Subscription:
         size = _serialized_size_bounded(message, byte_limit)
         if size is None or self._queued_bytes + size > byte_limit:
             return False
-        if len(self._queue) >= self._queue_limit:
+        # A terminal result owns one queue entry beyond the data limit: a
+        # stream whose queue filled with notifications must still receive
+        # the subscriptions/listen response it was promised.
+        entry_limit = self._queue_limit + 1 if terminal else self._queue_limit
+        if len(self._queue) >= entry_limit:
             return False
         self._queue.append((message, size))
         self._queued_bytes += size

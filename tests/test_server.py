@@ -735,6 +735,106 @@ def test_tool_arguments_are_schema_validated():
     assert exc.value.code == protocol.INVALID_PARAMS
 
 
+def _raw_view(method, params, *, capabilities=None, rpc_id=1):
+    """Dispatch dictionary shaped like the legacy adapter's normalization.
+
+    Built directly so a malformed member can reach dispatch without passing
+    the routing-header mirroring that would refuse it first.
+    """
+
+    return {
+        "id": rpc_id,
+        "is_notification": False,
+        "method": method,
+        "params": params,
+        "_meta": {
+            META_PROTOCOL_VERSION: "2026-07-28",
+            META_CLIENT_INFO: {"name": "t", "version": "1"},
+            META_CLIENT_CAPABILITIES: {} if capabilities is None else capabilities,
+        },
+        "protocol_version": "2026-07-28",
+        "client_info": {"name": "t", "version": "1"},
+        "client_capabilities": {} if capabilities is None else capabilities,
+    }
+
+
+@pytest.mark.parametrize("name", [[], {}, 5])
+def test_unhashable_tool_name_is_invalid_params_not_an_internal_error(name):
+    server = make_server()
+    with pytest.raises(protocol.ProtocolError) as exc:
+        server.dispatch(_raw_view("tools/call", {"name": name, "arguments": {}}), PRINCIPAL, CONN)
+    assert exc.value.code == protocol.INVALID_PARAMS
+
+
+@pytest.mark.parametrize("task_id", [[], {}, 5])
+def test_unhashable_task_id_is_invalid_params_not_an_internal_error(task_id):
+    server = make_server()
+    for method in ("tasks/get", "tasks/update", "tasks/cancel"):
+        with pytest.raises(protocol.ProtocolError) as exc:
+            server.dispatch(
+                _raw_view(method, {"taskId": task_id}, capabilities=TASKS_CAPS),
+                PRINCIPAL,
+                CONN,
+            )
+        assert exc.value.code == protocol.INVALID_PARAMS
+
+
+@pytest.mark.parametrize("task_id", [[], {}, 5])
+def test_unhashable_listen_task_id_is_invalid_params_not_an_internal_error(task_id):
+    """The listen filter checks task existence before registry validation, so
+    it needs the same identifier guard as the tasks/* methods."""
+
+    server = make_server()
+    with pytest.raises(protocol.ProtocolError) as exc:
+        dispatch(
+            server,
+            "subscriptions/listen",
+            {"notifications": {"taskIds": [task_id]}},
+            capabilities=TASKS_CAPS,
+        )
+    assert exc.value.code == protocol.INVALID_PARAMS
+
+
+@pytest.mark.parametrize("task_ids", [5, True, "t1"])
+def test_non_list_listen_task_ids_is_invalid_params_not_an_internal_error(task_ids):
+    """A truthy non-iterable taskIds must be refused, not iterated."""
+
+    server = make_server()
+    with pytest.raises(protocol.ProtocolError) as exc:
+        dispatch(
+            server,
+            "subscriptions/listen",
+            {"notifications": {"taskIds": task_ids}},
+            capabilities=TASKS_CAPS,
+        )
+    assert exc.value.code == protocol.INVALID_PARAMS
+
+
+def test_listen_task_ids_accepts_a_valid_filter():
+    server = make_server()
+    record = server._task_store.create("run_script", {}, principal=PRINCIPAL)
+
+    response = dispatch(
+        server,
+        "subscriptions/listen",
+        {"notifications": {"taskIds": [record.task_id]}},
+        capabilities=TASKS_CAPS,
+    )
+
+    assert isinstance(response, server_module.StreamResponse)
+
+
+def test_tasks_extension_with_a_non_object_value_never_detaches():
+    """A client that declares the extension with a scalar cannot poll or
+    cancel a task, so it must receive a blocking result instead."""
+
+    server = make_server()
+    capabilities = {"extensions": {tasks_module.TASKS_EXTENSION_ID: None}}
+    assert not server._client_declares_tasks({"client_capabilities": capabilities})
+    assert not server._client_declares_tasks({"client_capabilities": {"extensions": {}}})
+    assert server._client_declares_tasks({"client_capabilities": TASKS_CAPS})
+
+
 # ---------------------------------------------------------------------------
 # Blocking tools/call lifecycle.
 # ---------------------------------------------------------------------------
@@ -2046,10 +2146,18 @@ def test_service_actions_stay_responsive_while_gui_work_is_stuck():
 
 def test_script_session_cap_is_bounded():
     server = make_server()
+    namespace = server.ensure_script_namespace("seeded")
+    assert namespace["App"] is server.App
+    assert namespace["FreeCAD"] is server.App
+    assert namespace["Gui"] is server.Gui
+    # The same session is reused, never re-seeded.
+    assert server.ensure_script_namespace("seeded") is namespace
+
+    cap_server = make_server()
     for index in range(server_module.MAX_SCRIPT_SESSIONS):
-        server.ensure_script_namespace(f"s{index}")
+        cap_server.ensure_script_namespace(f"s{index}")
     with pytest.raises(protocol.ToolError) as exc:
-        server.ensure_script_namespace("one-too-many")
+        cap_server.ensure_script_namespace("one-too-many")
     assert exc.value.code == "SERVER_BUSY"
     assert exc.value.details["reason"] == "session_limit"
 

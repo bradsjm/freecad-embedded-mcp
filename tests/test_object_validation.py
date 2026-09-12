@@ -419,6 +419,39 @@ def test_a_foreign_surviving_transaction_is_never_closed() -> None:
     assert details["operationState"] == "rolled_back"
 
 
+def test_committed_mutation_left_open_is_reported_not_hidden() -> None:
+    """When the force-close cannot clear this operation's own transaction,
+    the commit must not be reported as a clean success: every later
+    mutation would be refused as a nested user transaction."""
+
+    class _WedgedApp:
+        """Entry check sees a clean stack; the force-close then fails and the
+        operation's own transaction stays on the stack."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def getActiveTransaction(self) -> tuple[str, int] | None:
+            self.calls += 1
+            return None if self.calls == 1 else ("gate", 7)
+
+        def closeActiveTransaction(self, abort: bool) -> None:
+            raise RuntimeError("cannot close")
+
+    obj = FakeShapeObj("Box")
+    doc = FakeGateDoc([obj])
+    ctx = FakeGateCtx(doc)
+    ctx.App = _WedgedApp()
+
+    with pytest.raises(ToolError) as excinfo, mutation(ctx, doc, "gate", [obj]):
+        pass
+
+    details = excinfo.value.details or {}
+    assert details["operationState"] == "may_have_changed"
+    assert details["reason"] == "transaction_still_open"
+    assert details["nextAction"] == "inspect_target"
+
+
 class _InsetBox:
     def __init__(self, xmin: float, ymin: float, xmax: float, ymax: float) -> None:
         self.XMin = xmin

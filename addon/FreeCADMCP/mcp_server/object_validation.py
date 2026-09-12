@@ -670,6 +670,11 @@ def mutation(
                 f"cannot open mutation transaction '{label}': {_describe(exc)}",
             ) from exc
 
+        # Only the success path below sets this: the abort handler always
+        # raises, so a still-open transaction after a successful commit is
+        # detected after the handler without being confused with a
+        # rolled-back failure.
+        survived_commit = False
         try:
             yield applied
 
@@ -824,6 +829,7 @@ def mutation(
                     },
                 ) from commit_exc
             _force_close_surviving_transaction(ctx, doc, label)
+            survived_commit = _own_transaction_active(ctx, label)
             # A committed change should be visible without the user hunting
             # for it: frame the view on what changed. This is presentation
             # only and never fails the mutation.
@@ -878,6 +884,23 @@ def mutation(
                     },
                 ) from exc
             raise
+
+        if survived_commit:
+            # The commit succeeded, but FreeCAD kept the transaction on its
+            # stack: without this report the caller would believe the gate
+            # left a clean state while every later mutation is refused as a
+            # nested user transaction.
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"mutation '{label}' committed, but its transaction is still "
+                "open; later mutations are refused until it is closed or "
+                "FreeCAD restarts",
+                {
+                    "operationState": "may_have_changed",
+                    "nextAction": "inspect_target",
+                    "reason": "transaction_still_open",
+                },
+            )
     finally:
         doc.UndoMode = undo_mode
 

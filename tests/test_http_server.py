@@ -61,13 +61,16 @@ def valid_request(rpc_id=1, method="test/echo", params=None, version=SUPPORTED_V
     return {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params}
 
 
-def routing_headers(method="test/echo", version=SUPPORTED_VERSION, name=None, raw_name=None):
+def routing_headers(
+    method="test/echo", version=SUPPORTED_VERSION, name=None, raw_name=None, **extra
+):
     headers = {
         "MCP-Protocol-Version": version,
         "Mcp-Method": method,
     }
     if name is not None:
         headers["Mcp-Name"] = raw_name if raw_name is not None else name
+    headers.update(extra)
     return headers
 
 
@@ -693,6 +696,58 @@ def test_oversized_body_returns_413_before_reading():
         assert server.dispatch_calls() == []
 
 
+def test_thousands_of_content_length_digits_are_malformed_not_internal():
+    """A digits-only length long enough to hit CPython's integer conversion
+    limit is still a malformed request, never a 500."""
+
+    with running_server(echo_dispatch) as server:
+        status, _, body = raw_post(server, extra_headers=["Content-Length: " + "9" * 5000])
+        assert status == 400
+        assert json.loads(body)["error"]["code"] == -32600
+        assert server.dispatch_calls() == []
+
+
+def test_deeply_nested_json_is_a_parse_error_not_internal():
+    """Decoder recursion failure is malformed input, answered with the
+    documented parse error instead of an unexpected server error."""
+
+    nested = b"[" * 200000 + b"]" * 200000
+    with running_server(echo_dispatch) as server:
+        status, _, body = raw_post(
+            server,
+            extra_headers=[f"Content-Length: {len(nested)}"],
+            body=nested,
+        )
+        assert status == 400
+        assert json.loads(body)["error"]["code"] == -32700
+        assert server.dispatch_calls() == []
+
+
+def test_zero_padded_content_length_is_accepted():
+    """Leading zeros are legal Content-Length padding: only the significant
+    digits decide whether the value is representable."""
+
+    body = json.dumps(valid_request()).encode("utf-8")
+    padded = "0" * 30 + str(len(body))
+    with running_server(echo_dispatch) as server:
+        lines = [
+            "POST /mcp HTTP/1.1",
+            f"Host: 127.0.0.1:{server.port}",
+            f"Authorization: Bearer {TOKEN}",
+            "Content-Type: application/json",
+            "Accept: application/json, text/event-stream",
+            f"MCP-Protocol-Version: {SUPPORTED_VERSION}",
+            "Mcp-Method: test/echo",
+            f"Content-Length: {padded}",
+        ]
+        payload = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
+        status, _, response = raw_exchange(server.port, payload)
+
+        assert status == 200
+        assert len(server.dispatch_calls()) == 1
+        assert json.loads(response)["result"]["echo"] == "hi"
+
+
 def test_missing_content_length_is_rejected():
     with running_server(echo_dispatch) as server:
         status, _, body = raw_post(server, extra_headers=[])
@@ -799,6 +854,25 @@ def test_name_header_mismatch_returns_400():
         status, _, body = server.post(
             valid_request(method="tools/call", params=params),
             routing_headers(method="tools/call", name="other_tool"),
+        )
+        assert status == 400
+        assert json.loads(body)["error"]["code"] == -32020
+        assert server.dispatch_calls() == []
+
+
+def test_param_header_contradicting_the_body_is_rejected_on_the_live_path():
+    """The live HTTP request path has no per-method annotation table; a
+    mirrored Mcp-Param-* header must still match the request body."""
+
+    params = {"name": "real_tool", "arguments": {"region": "us-west1"}, "_meta": _meta()}
+    with running_server(echo_dispatch) as server:
+        status, _, body = server.post(
+            valid_request(method="tools/call", params=params),
+            routing_headers(
+                method="tools/call",
+                name="real_tool",
+                **{"Mcp-Param-Region": "eu-east1"},
+            ),
         )
         assert status == 400
         assert json.loads(body)["error"]["code"] == -32020

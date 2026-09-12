@@ -46,6 +46,16 @@ class FakeCtx:
         self.script_namespaces: dict[str, dict[str, Any]] = {}
         self.active_solves: dict[str, Any] = {}
         self.cancel_event: threading.Event | None = None
+        self.allocation_calls: list[str] = []
+
+    def ensure_script_namespace(self, session_id: str) -> dict[str, Any]:
+        """Server-contract double: get-or-create one seeded namespace."""
+        self.allocation_calls.append(session_id)
+        namespace = self.script_namespaces.get(session_id)
+        if namespace is None:
+            namespace = {"FreeCAD": self.App, "App": self.App, "Gui": self.Gui}
+            self.script_namespaces[session_id] = namespace
+        return namespace
 
 
 def call(module: types.ModuleType, code: str, **kwargs: Any) -> Any:
@@ -113,22 +123,27 @@ def test_failure_raises_tool_error_with_stdout_stderr_and_traceback() -> None:
         assert ctx.script_namespaces["default"]
 
 
-def test_namespace_cap_rejects_new_sessions_without_eviction() -> None:
+def test_session_allocation_goes_through_the_server_allocator() -> None:
+    """The 32-session cap and its refusal code are the server's policy; this
+    module must never allocate a namespace on its own."""
+
     with load_script() as script:
         ctx = FakeCtx()
-        for index in range(32):
-            call(script, f"value = {index}", ctx=ctx, session_id=f"s{index}")
-        assert len(ctx.script_namespaces) == 32
+        call(script, "marker = 1", ctx=ctx)
+        call(script, "marker = 2", ctx=ctx, session_id="other")
 
+        assert ctx.allocation_calls == ["default", "other"]
+
+    class RefusingCtx(FakeCtx):
+        def ensure_script_namespace(self, session_id: str) -> dict[str, Any]:
+            raise ToolError("SERVER_BUSY", "script session limit reached")
+
+    with load_script() as script:
+        ctx = RefusingCtx()
         with pytest.raises(ToolError) as excinfo:
-            call(script, "value = 99", ctx=ctx, session_id="overflow")
-
-        assert excinfo.value.code == "VALIDATION_FAILED"
-        assert excinfo.value.details["limit"] == 32
-        assert "overflow" not in excinfo.value.details["sessions"]
-        # Full, but every stored session is still usable.
-        assert call(script, "print(value)", ctx=ctx, session_id="s31")["stdout"] == "31\n"
-        assert len(ctx.script_namespaces) == 32
+            call(script, "print('never')", ctx=ctx)
+        assert excinfo.value.code == "SERVER_BUSY"
+        assert ctx.script_namespaces == {}
 
 
 def test_refused_while_a_fem_solve_is_active() -> None:
@@ -161,7 +176,9 @@ def test_cancelled_before_execution_never_runs_the_code() -> None:
             "stderrTruncated": False,
             "executed": False,
         }
-        assert "executed_marker" not in ctx.script_namespaces["default"]
+        # A cancelled call allocates no session at all.
+        assert ctx.script_namespaces == {}
+        assert ctx.allocation_calls == []
 
 
 def test_output_of_exactly_the_limit_is_not_flagged() -> None:

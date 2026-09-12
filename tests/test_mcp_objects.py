@@ -2057,15 +2057,21 @@ def test_mutation_force_closes_surviving_empty_transaction() -> None:
     ctx = FakeCtx(doc)
     closed: list[bool] = []
     calls = {"n": 0}
+    surviving = {"open": True}
 
     def _active():
         # Entry check sees a clean stack; after the commit our own label
         # survived FreeCAD's commit (the observed 1.1.3 quirk).
         calls["n"] += 1
-        return None if calls["n"] == 1 else ("edit_parameters", 5)
+        if calls["n"] == 1 or not surviving["open"]:
+            return None
+        return ("edit_parameters", 5)
 
     def _close(commit: bool) -> None:
         closed.append(bool(commit))
+        # The native call clears the transaction; without this the double
+        # would report a wedged stack after a successful cleanup.
+        surviving["open"] = False
 
     ctx.App = types.SimpleNamespace(getActiveTransaction=_active, closeActiveTransaction=_close)
 

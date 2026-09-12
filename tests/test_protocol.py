@@ -416,6 +416,56 @@ class TestReleasedHeaderEncoding:
         expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
 
 
+class TestLiveParamHeaderMirroring:
+    """The live HTTP path supplies no annotation table, so a ``Mcp-Param-*``
+    header must still be checked against the body it mirrors."""
+
+    def test_param_header_that_contradicts_the_body_is_rejected(self):
+        params = make_params(name="execute_sql", arguments={"region": "us-west1"})
+        headers = make_headers(name="execute_sql", **{"Mcp-Param-Region": "eu-east1"})
+
+        with pytest.raises(protocol.ProtocolError) as excinfo:
+            protocol.validate_request(valid_message(params=params), headers)
+        expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
+
+    def test_matching_param_header_is_accepted_and_top_level_keys_mirror(self):
+        params = make_params(name="execute_sql", arguments={"region": "us-west1"})
+        matching = make_headers(name="execute_sql", **{"Mcp-Param-Region": "us-west1"})
+        validated = protocol.validate_request(valid_message(params=params), matching)
+        assert validated["params"]["arguments"]["region"] == "us-west1"
+
+        task_params = make_params(taskId="task-9")
+        task_headers = make_headers(
+            method="tasks/cancel",
+            name="task-9",
+            **{"Mcp-Param-TaskId": "task-9"},
+        )
+        assert (
+            protocol.validate_request(
+                valid_message(method="tasks/cancel", params=task_params), task_headers
+            )["params"]["taskId"]
+            == "task-9"
+        )
+
+    def test_suffix_naming_no_body_value_only_needs_valid_encoding(self):
+        params = make_params(name="execute_sql", arguments={"region": "us-west1"})
+        unknown = make_headers(name="execute_sql", **{"Mcp-Param-Elsewhere": "x"})
+        assert protocol.validate_request(valid_message(params=params), unknown)["method"] == (
+            "tools/call"
+        )
+
+    def test_complex_body_value_is_encoding_checked_only(self):
+        """A list or object argument cannot be compared against a header, so
+        it must never be rejected as a mismatch."""
+
+        params = make_params(name="execute_sql", arguments={"entries": [{"a": 1}]})
+        headers = make_headers(name="execute_sql", **{"Mcp-Param-Entries": "encoded-blob"})
+
+        validated = protocol.validate_request(valid_message(params=params), headers)
+
+        assert validated["params"]["arguments"]["entries"] == [{"a": 1}]
+
+
 # ---------------------------------------------------------------------------
 # Finite schemas.
 # ---------------------------------------------------------------------------

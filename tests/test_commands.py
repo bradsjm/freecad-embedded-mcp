@@ -416,6 +416,7 @@ def _status(**overrides):
         "connection": {
             "remote_enabled": False,
             "allowed_ips": "127.0.0.1",
+            "allowed_roots": ["/tmp/fc-test"],
             "configured_port": 9876,
         },
     }
@@ -511,12 +512,18 @@ def test_running_network_and_stuck_gui_have_truthful_status():
 
 
 def test_restart_required_distinguishes_active_vs_saved_settings():
-    saved = {"remote_enabled": True, "allowed_ips": "", "port": 9876}
+    saved = {
+        "remote_enabled": True,
+        "allowed_ips": "",
+        "port": 9876,
+        "allowed_roots": ["/tmp/fc-test"],
+    }
     active_network = _status(
         state="running",
         connection={
             "remote_enabled": True,
             "allowed_ips": "",
+            "allowed_roots": ["/tmp/fc-test"],
             "configured_port": 9876,
         },
     )
@@ -533,6 +540,7 @@ def test_restart_required_flags_directory_change_while_recovery_disabled():
         "remote_enabled": False,
         "allowed_ips": "",
         "port": 9876,
+        "allowed_roots": ["/tmp/fc-test"],
         "recovery_enabled": False,
         "recovery_directory": "/old/checkpoints",
     }
@@ -541,6 +549,7 @@ def test_restart_required_flags_directory_change_while_recovery_disabled():
         connection={
             "remote_enabled": False,
             "allowed_ips": "",
+            "allowed_roots": ["/tmp/fc-test"],
             "configured_port": 9876,
             "recovery_enabled": False,
             "recovery_directory": "/old/checkpoints",
@@ -553,12 +562,46 @@ def test_restart_required_flags_directory_change_while_recovery_disabled():
         connection={
             "remote_enabled": False,
             "allowed_ips": "",
+            "allowed_roots": ["/tmp/fc-test"],
             "configured_port": 9876,
             "recovery_enabled": False,
             "recovery_directory": "/new/checkpoints",
         },
     )
     assert commands._restart_required(saved, moved) is True
+
+
+def test_restart_required_flags_allowed_roots_change():
+    """Containment is read from the active settings, so a narrowed or widened
+    root list only takes effect on restart and must be surfaced."""
+
+    saved = {
+        "remote_enabled": False,
+        "allowed_ips": "",
+        "port": 9876,
+        "allowed_roots": ["/tmp/fc-test"],
+    }
+    active = _status(
+        state="running",
+        connection={
+            "remote_enabled": False,
+            "allowed_ips": "",
+            "allowed_roots": ["/tmp/fc-test"],
+            "configured_port": 9876,
+        },
+    )
+    assert commands._restart_required(saved, active) is False
+
+    narrowed = _status(
+        state="running",
+        connection={
+            "remote_enabled": False,
+            "allowed_ips": "",
+            "allowed_roots": ["/tmp/fc-test/sub"],
+            "configured_port": 9876,
+        },
+    )
+    assert commands._restart_required(saved, narrowed) is True
 
 
 # ---------------------------------------------------------------------------

@@ -79,6 +79,10 @@ _SINGLE_VALUE_HEADERS = frozenset(
 
 _PARAM_HEADER_RE = re.compile(r"^mcp-param-(.+)$")
 _DIGITS_RE = re.compile(r"[0-9]+")
+#: A digits-only Content-Length longer than this cannot describe a body
+#: under ``MAX_BODY_BYTES`` and would hit CPython's integer-string
+#: conversion limit; it is malformed, never an infrastructure failure.
+_MAX_CONTENT_LENGTH_DIGITS = 20
 
 # JSON-RPC error code -> HTTP status for protocol-level failures.
 _HTTP_STATUS_BY_CODE = {
@@ -635,7 +639,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                 body.decode("utf-8"),
                 parse_constant=_reject_json_constant,
             )
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             # A body that cannot be parsed is legacy-facing when the client
             # sent no modern routing header: JSON-RPC 2.0 wants an explicit
             # null id there instead of an omitted member.
@@ -758,7 +762,13 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         raw = raw.strip()
         if not raw or not _DIGITS_RE.fullmatch(raw):
             return None
-        return int(raw)
+        # Leading zeros are legal padding, so the significant digits decide
+        # whether the value is representable; measuring the padded string
+        # would reject a conforming client and convert nothing.
+        significant = raw.lstrip("0") or "0"
+        if len(significant) > _MAX_CONTENT_LENGTH_DIGITS:
+            return None
+        return int(significant)
 
     def _host_allowed(self):
         host = self.headers.get("Host")

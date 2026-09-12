@@ -235,6 +235,19 @@ def test_blank_token_is_valid_in_local_mode(tmp_path, token):
     assert load_settings(str(path))["token"] == ""
 
 
+def test_token_with_surrounding_whitespace_is_stored_trimmed(tmp_path):
+    """The HTTP layer strips received credentials before comparing, so a
+    padded stored token could never authenticate; the stored form must be
+    exactly what a client sends."""
+
+    path = tmp_path / "settings.json"
+    settings = valid_settings(token="  padded-secret  ")
+    save_settings(settings, str(path))
+
+    assert load_settings(str(path))["token"] == "padded-secret"
+    assert json.loads(path.read_text(encoding="utf-8"))["token"] == "padded-secret"
+
+
 @pytest.mark.parametrize("auto_start", ["yes", 1, 0, None])
 def test_invalid_auto_start_fails_closed(tmp_path, auto_start):
     with pytest.raises(SettingsError):

@@ -232,7 +232,7 @@ def run_fem(ctx: Any, arguments: dict[str, Any]) -> Any:
             details=prereq,
         )
 
-    solver, created_solver = _select_solver(ctx, doc, analysis)
+    solver = _select_solver(ctx, doc, analysis)
     _run_analysis_checks(analysis, solver)
 
     operation = _FemSolve(
@@ -241,13 +241,12 @@ def run_fem(ctx: Any, arguments: dict[str, Any]) -> Any:
         analysis=analysis,
         solver=solver,
         working_dir=_create_working_directory(ctx),
-        created_solver=created_solver,
     )
     operation.start()
     return operation.future
 
 
-def _select_solver(ctx: Any, doc: Any, analysis: Any) -> tuple[Any, bool]:
+def _select_solver(ctx: Any, doc: Any, analysis: Any) -> Any:
     """Pick the single modern CalculiX solver, or create one; never convert."""
     modern: list[Any] = []
     legacy: list[Any] = []
@@ -275,7 +274,7 @@ def _select_solver(ctx: Any, doc: Any, analysis: Any) -> tuple[Any, bool]:
             details={"solvers": _names(modern)},
         )
     if modern:
-        return modern[0], False
+        return modern[0]
     if legacy:
         raise ToolError(
             SOLVER_FAILED,
@@ -285,7 +284,7 @@ def _select_solver(ctx: Any, doc: Any, analysis: Any) -> tuple[Any, bool]:
             "deletes existing solvers",
             details={"legacy_solvers": _names(legacy)},
         )
-    return _create_modern_solver(ctx, doc, analysis), True
+    return _create_modern_solver(ctx, doc, analysis)
 
 
 def _create_modern_solver(ctx: Any, doc: Any, analysis: Any) -> Any:
@@ -389,14 +388,12 @@ class _FemSolve:
         analysis: Any,
         solver: Any,
         working_dir: str,
-        created_solver: bool,
     ) -> None:
         self.ctx = ctx
         self.doc = doc
         self.analysis = analysis
         self.solver = solver
         self.working_dir = working_dir
-        self.created_solver = created_solver
         self.identity: str | None = None
         self.generation: int | None = None
         self.future: concurrent.futures.Future = concurrent.futures.Future()
@@ -451,11 +448,6 @@ class _FemSolve:
                     },
                 )
             )
-
-    def request_cancel(self) -> None:
-        """Server entry point: mark cancellation requested, keep the solver."""
-        self.cancel_requested = True
-        self._stop_cancel_watch()
 
     def _cancel_requested(self) -> bool:
         """True through any shared route: direct request or the ctx Event.

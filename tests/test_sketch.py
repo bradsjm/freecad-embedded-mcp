@@ -707,23 +707,53 @@ def test_deletes_apply_in_descending_index_order(sketch_module) -> None:
     sketch.Constraints = [StubConstraint("Coincident", 0, 2, 1, 1) for _ in range(4)]
     ctx = FakeCtx(FakeDoc(sketch))
 
-    result = call_edit(
-        sketch_module,
-        ctx,
-        deleteGeometry=[3, 0],
-        deleteConstraints=[2, 1],
-    )
+    result = call_edit(sketch_module, ctx, deleteGeometry=[3, 0])
 
     assert result["deletedGeometry"] == [3, 0]
-    assert result["deletedConstraints"] == [2, 1]
     assert [op for op in sketch.ops if op[0] == "delGeometry"] == [
         ("delGeometry", 3),
         ("delGeometry", 0),
     ]
+
+    constraints = call_edit(sketch_module, ctx, deleteConstraints=[2, 1])
+
+    assert constraints["deletedConstraints"] == [2, 1]
     assert [op for op in sketch.ops if op[0] == "delConstraint"] == [
         ("delConstraint", 2),
         ("delConstraint", 1),
     ]
+
+
+def test_mixed_and_duplicate_deletions_are_refused_before_the_transaction(
+    sketch_module,
+) -> None:
+    """Native geometry deletion renumbers the surviving constraints, so a
+    constraint deleted in the same batch would not be the planned one; a
+    repeated index in one list would also shift under descending deletion."""
+
+    sketch = rectangle_sketch()
+    sketch.Constraints = [StubConstraint("Coincident", 0, 2, 1, 1) for _ in range(4)]
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(sketch_module, ctx, deleteGeometry=[3], deleteConstraints=[2])
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert "deleteConstraints" in excinfo.value.message
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(sketch_module, ctx, deleteGeometry=[3, 3])
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert "more than once" in excinfo.value.message
+
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(sketch_module, ctx, deleteConstraints=[1, 1])
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert "more than once" in excinfo.value.message
+
+    # Every refusal happens before the transaction opens.
+    assert sketch.ops == []
+    assert doc.transactions == []
 
 
 def test_set_datums_run_after_additions_with_final_indexes(sketch_module) -> None:
