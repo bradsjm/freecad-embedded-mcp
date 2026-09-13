@@ -362,6 +362,7 @@ def make_server(clock=None) -> "server_module.Server":
             "port": 9876,
             "token": "test-token",
             "auto_start": False,
+            "remote_enabled": False,
             "allowed_ips": "127.0.0.1",
             "allowed_roots": ["/tmp/fc-test"],
             "allow_scripts": True,
@@ -370,7 +371,7 @@ def make_server(clock=None) -> "server_module.Server":
         },
         signer=protocol.ConsentSigner(ttl_s=60.0),
         task_store=tasks_module.TaskStore(),
-        registry=subs_module.SubscriptionRegistry(),
+        registry=subs_module.SubscriptionRegistry(support_tools_list_changed=True),
         clock=time.monotonic if clock is None else clock,
     )
 
@@ -638,6 +639,67 @@ def test_disabled_run_script_is_absent_from_every_advertised_surface():
     server.settings["allow_scripts"] = True
     enabled = dispatch(server, "tools/list")["result"]
     assert "run_script" in [tool["name"] for tool in enabled["tools"]]
+
+
+def test_apply_settings_toggles_run_script_without_restart():
+    """A saved allow_scripts change reaches the wire immediately."""
+    server = make_server()
+    _reset_dispatcher_for_tests()
+    server.settings["allow_scripts"] = False
+    saved = dict(server.settings)
+
+    outcome = server.apply_settings({**saved, "allow_scripts": True})
+    assert outcome == {"applied": ["allow_scripts"], "restartRequired": []}
+    names = [tool["name"] for tool in dispatch(server, "tools/list")["result"]["tools"]]
+    assert "run_script" in names
+    response = dispatch(server, "tools/call", {"name": "run_script", "arguments": {}})
+    [event] = drain_stream(response, 1)
+    assert event["result"]["resultType"] == "complete"
+
+    outcome = server.apply_settings({**server.settings, "allow_scripts": False})
+    assert outcome == {"applied": ["allow_scripts"], "restartRequired": []}
+    names = [tool["name"] for tool in dispatch(server, "tools/list")["result"]["tools"]]
+    assert "run_script" not in names
+    with pytest.raises(protocol.ProtocolError) as exc:
+        dispatch(server, "tools/call", {"name": "run_script", "arguments": {}})
+    assert exc.value.code == protocol.METHOD_NOT_FOUND
+
+
+def test_apply_settings_publishes_tools_list_changed_once():
+    """Subscribers that requested the filter learn about the new surface."""
+    server = make_server()
+    server.settings["allow_scripts"] = False
+    subscription = server._registry.register(
+        CONN, "sub-tools", {"toolsListChanged": True}, principal=PRINCIPAL
+    )
+    subscription.receive(timeout=0)  # drain the acknowledgement
+
+    server.apply_settings({**server.settings, "allow_scripts": True})
+    event = subscription.receive(timeout=0)
+    assert event["method"] == "notifications/tools/list_changed"
+    assert event["params"]["_meta"][subs_module.SUBSCRIPTION_ID_META_KEY] == "sub-tools"
+
+    # An apply that keeps the enabled set unchanged publishes nothing.
+    server.apply_settings({**server.settings, "allowed_roots": ["/tmp/other"]})
+    assert subscription.receive(timeout=0) is None
+
+
+def test_apply_settings_keeps_bind_time_transport_values():
+    """Restart-tier changes stay out of the active settings until a restart."""
+    server = make_server()
+    saved = {**server.settings, "port": 9999, "remote_enabled": True}
+
+    outcome = server.apply_settings(saved)
+    assert outcome["applied"] == []
+    assert outcome["restartRequired"] == ["port", "remote_enabled"]
+    assert server.settings["port"] == 9876
+    assert server.settings["remote_enabled"] is False
+    assert server.status()["connection"]["configured_port"] == 9876
+
+    # A live-tier change in the same save still applies.
+    outcome = server.apply_settings({**server.settings, "allowed_roots": ["/tmp/other"]})
+    assert outcome == {"applied": ["allowed_roots"], "restartRequired": []}
+    assert server.settings["allowed_roots"] == ["/tmp/other"]
 
 
 def test_discovery_is_gui_independent_and_complete():

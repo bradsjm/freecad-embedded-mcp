@@ -141,33 +141,28 @@ def _indicator_state(status: dict) -> dict:
     }
 
 
-def _restart_required(saved: dict | None, status: dict) -> bool:
-    """True when saved connection settings differ from the active ones."""
+def _restart_required(saved: dict | None, status: dict) -> list[str]:
+    """Return the saved connection settings a restart must still apply.
+
+    Only bind-time transport values qualify (network mode, allowed IPs,
+    port): scripting, path containment and recovery settings are applied
+    to a running server as soon as they are saved.
+    """
 
     if saved is None:
-        return False
+        return []
     connection = status.get("connection") or {}
     active = status.get("state") in ("running", "starting", "draining")
     if not active:
-        return False
-    recovery_enabled_saved = bool(saved.get("recovery_enabled", False))
-    recovery_enabled_active = bool(connection.get("recovery_enabled"))
-    return (
-        bool(saved.get("remote_enabled", False)) != bool(connection.get("remote_enabled"))
-        or str(saved.get("allowed_ips", "")) != str(connection.get("allowed_ips", ""))
-        or saved.get("port") != connection.get("configured_port")
-        or bool(saved.get("allow_scripts", False)) != bool(connection.get("allow_scripts"))
-        or recovery_enabled_saved != recovery_enabled_active
-        # The configured directory widens path containment for the
-        # running server even while recovery is disabled, so any change
-        # must surface as a pending restart.
-        or str(saved.get("recovery_directory", "")) != str(connection.get("recovery_directory", ""))
-        # Path containment is read from the active settings, so a changed
-        # root list only takes effect on restart — including a narrowing
-        # that would otherwise leave the old, wider policy active.
-        or [str(root) for root in saved.get("allowed_roots") or []]
-        != [str(root) for root in connection.get("allowed_roots") or []]
-    )
+        return []
+    pending: list[str] = []
+    if bool(saved.get("remote_enabled", False)) != bool(connection.get("remote_enabled")):
+        pending.append("network access")
+    if str(saved.get("allowed_ips", "")) != str(connection.get("allowed_ips", "")):
+        pending.append("allowed IPs")
+    if saved.get("port") != connection.get("configured_port"):
+        pending.append("port")
+    return pending
 
 
 class McpUiController(QtCore.QObject):
@@ -749,6 +744,7 @@ class MCPSettingsCommand:
             return
         saved = outcome["saved"]
         _controller_settings_changed()
+        applied = mcp_server_module.apply_settings(saved)
         _report_message(
             "[MCP] Settings saved: port "
             f"{saved['port']}; auto-start "
@@ -762,8 +758,11 @@ class MCPSettingsCommand:
                 "[MCP] A bearer token was generated for network access; "
                 "clients can view it in Connection Details."
             )
-        if _restart_required(saved, mcp_server_module.server_status()):
-            _report_message("[MCP] Restart the MCP server for changes to take effect.")
+        if applied["applied"]:
+            _report_message("[MCP] Applied without restart: " + ", ".join(applied["applied"]) + ".")
+        pending = _restart_required(saved, mcp_server_module.server_status())
+        if pending:
+            _report_message("[MCP] Restart the MCP server to apply: " + ", ".join(pending) + ".")
 
     def IsActive(self):
         return True

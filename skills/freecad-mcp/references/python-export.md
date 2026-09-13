@@ -1,6 +1,6 @@
 # Python scripting with `run_script`
 
-Use `run_script` only for a named operation that no structured tool covers. `run_script` is opt-in: it is registered but hidden unless `allow_scripts: true` is saved in `freecad_mcp_settings.json` and the server restarted. A disabled tool answers `tools/call` with `METHOD_NOT_FOUND` and never reaches schema validation, consent, or the GUI dispatch. Discovery reports `capabilities.scriptingEnabled`. Read [the tool contract](mcp-tools.md) for exact schemas.
+Use `run_script` only for a named operation that no structured tool covers. `run_script` is opt-in: it is registered but hidden unless `allow_scripts: true` is saved in `freecad_mcp_settings.json`. Saving the setting applies it immediately and the tool appears in the next `tools/list`. A disabled tool answers `tools/call` with `METHOD_NOT_FOUND` and never reaches schema validation, consent, or the GUI dispatch. Discovery reports `capabilities.scriptingEnabled`. Read [the tool contract](mcp-tools.md) for exact schemas.
 
 ## Contents
 

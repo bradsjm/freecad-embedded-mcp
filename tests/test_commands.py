@@ -511,10 +511,10 @@ def test_running_network_and_stuck_gui_have_truthful_status():
     assert stuck["action_enabled"] is True
 
 
-def test_restart_required_distinguishes_active_vs_saved_settings():
+def test_restart_required_lists_pending_transport_settings():
     saved = {
         "remote_enabled": True,
-        "allowed_ips": "",
+        "allowed_ips": "127.0.0.1",
         "port": 9876,
         "allowed_roots": ["/tmp/fc-test"],
     }
@@ -522,19 +522,37 @@ def test_restart_required_distinguishes_active_vs_saved_settings():
         state="running",
         connection={
             "remote_enabled": True,
-            "allowed_ips": "",
+            "allowed_ips": "127.0.0.1",
             "allowed_roots": ["/tmp/fc-test"],
             "configured_port": 9876,
         },
     )
-    assert commands._restart_required(saved, active_network) is False
-    assert commands._restart_required(saved, _status(state="running")) is True
-    assert commands._restart_required(saved, _status(state="stopped")) is False
+    assert commands._restart_required(saved, active_network) == []
+    assert commands._restart_required(saved, _status(state="running")) == ["network access"]
+    assert commands._restart_required(saved, _status(state="stopped")) == []
 
 
-def test_restart_required_flags_directory_change_while_recovery_disabled():
-    """The configured recovery directory widens containment even when
-    recovery is disabled, so changing it must request a restart."""
+def test_restart_required_lists_each_changed_transport_key():
+    saved = {"remote_enabled": False, "allowed_ips": "10.0.0.5", "port": 9876}
+    drifted = _status(
+        state="running",
+        connection={
+            "remote_enabled": True,
+            "allowed_ips": "",
+            "configured_port": 9999,
+        },
+    )
+    assert commands._restart_required(saved, drifted) == [
+        "network access",
+        "allowed IPs",
+        "port",
+    ]
+
+
+def test_restart_required_ignores_settings_that_apply_live():
+    """Scripting, path containment and recovery settings apply to a
+    running server as soon as they are saved, so only transport drift
+    surfaces as a pending restart."""
 
     saved = {
         "remote_enabled": False,
@@ -543,65 +561,21 @@ def test_restart_required_flags_directory_change_while_recovery_disabled():
         "allowed_roots": ["/tmp/fc-test"],
         "recovery_enabled": False,
         "recovery_directory": "/old/checkpoints",
+        "allow_scripts": False,
     }
-    active = _status(
-        state="running",
-        connection={
-            "remote_enabled": False,
-            "allowed_ips": "",
-            "allowed_roots": ["/tmp/fc-test"],
-            "configured_port": 9876,
-            "recovery_enabled": False,
-            "recovery_directory": "/old/checkpoints",
-        },
-    )
-    assert commands._restart_required(saved, active) is False
-
-    moved = _status(
-        state="running",
-        connection={
-            "remote_enabled": False,
-            "allowed_ips": "",
-            "allowed_roots": ["/tmp/fc-test"],
-            "configured_port": 9876,
-            "recovery_enabled": False,
-            "recovery_directory": "/new/checkpoints",
-        },
-    )
-    assert commands._restart_required(saved, moved) is True
-
-
-def test_restart_required_flags_allowed_roots_change():
-    """Containment is read from the active settings, so a narrowed or widened
-    root list only takes effect on restart and must be surfaced."""
-
-    saved = {
-        "remote_enabled": False,
-        "allowed_ips": "",
-        "port": 9876,
-        "allowed_roots": ["/tmp/fc-test"],
-    }
-    active = _status(
-        state="running",
-        connection={
-            "remote_enabled": False,
-            "allowed_ips": "",
-            "allowed_roots": ["/tmp/fc-test"],
-            "configured_port": 9876,
-        },
-    )
-    assert commands._restart_required(saved, active) is False
-
-    narrowed = _status(
+    changed = _status(
         state="running",
         connection={
             "remote_enabled": False,
             "allowed_ips": "",
             "allowed_roots": ["/tmp/fc-test/sub"],
             "configured_port": 9876,
+            "recovery_enabled": False,
+            "recovery_directory": "/new/checkpoints",
+            "allow_scripts": True,
         },
     )
-    assert commands._restart_required(saved, narrowed) is True
+    assert commands._restart_required(saved, changed) == []
 
 
 # ---------------------------------------------------------------------------

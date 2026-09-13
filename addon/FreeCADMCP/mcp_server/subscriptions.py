@@ -40,6 +40,7 @@ SERVER_INFO_META_KEY = META_SERVER_INFO
 ACK_NOTIFICATION_METHOD = "notifications/subscriptions/acknowledged"
 TASKS_NOTIFICATION_METHOD = "notifications/tasks"
 RESOURCE_UPDATED_NOTIFICATION_METHOD = "notifications/resources/updated"
+TOOLS_LIST_CHANGED_NOTIFICATION_METHOD = "notifications/tools/list_changed"
 
 DOCUMENTS_RESOURCE_URI = "freecad://documents"
 
@@ -456,6 +457,17 @@ class SubscriptionRegistry:
         with self._lock:
             targets = self._targets_locked(lambda sub: task_id in sub.honored.get("taskIds", ()))
         return self._deliver(targets, TASKS_NOTIFICATION_METHOD, lambda sub: dict(task))
+
+    def publish_tools_list_changed(self) -> int:
+        """Emit ``notifications/tools/list_changed`` to requesting streams.
+
+        Only streams whose honored filter includes ``toolsListChanged``
+        receive the event; the notification carries no params beyond the
+        subscription ``_meta``.
+        """
+        with self._lock:
+            targets = self._targets_locked(lambda sub: bool(sub.honored.get("toolsListChanged")))
+        return self._deliver(targets, TOOLS_LIST_CHANGED_NOTIFICATION_METHOD, lambda sub: {})
 
     # -- internals ---------------------------------------------------------
 

@@ -49,7 +49,9 @@ Invalid settings fail closed. Network mode without a token creates and stores on
 
 Use absolute paths under `allowed_roots` for document, import, export, and FEM file operations. The absolute `recovery_directory` is allowed automatically. `allowed_roots` does not restrict `run_script`.
 
-Settings changes take effect after a server restart.
+Scripting, allowed-roots, and recovery settings take effect on a running
+server as soon as they are saved. Port, network access, and allowed-IP
+changes take effect after a server restart.
 
 ## Consent
 

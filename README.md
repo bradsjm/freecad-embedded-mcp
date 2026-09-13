@@ -109,7 +109,7 @@ The **FreeCAD MCP** toolbar has one contextual action. Its label, icon, and avai
 The menu also provides:
 
 - **Connection Details…** — endpoint, access mode, bind address, allowed IPs, and, when network access is enabled, the masked bearer token with copy buttons.
-- **MCP Settings…** — port, auto-start, network access, allowed IPs, allowed roots, verified recovery copies, and unrestricted Python access in one dialog. Changes take effect on the next server start and never restart a running server.
+- **MCP Settings…** — port, auto-start, network access, allowed IPs, allowed roots, verified recovery copies, and unrestricted Python access in one dialog. Scripting, allowed roots, and recovery settings apply to a running server immediately; port, network access, and allowed IPs take effect on the next server start.
 
 A status-bar indicator shows the confirmed state, such as **MCP: Running (Local only)**, **MCP: Running (Network enabled)**, **MCP: Running — GUI blocked**, **MCP: Starting**, **MCP: Stopping (N operations)**, or **MCP: Stopped**, and opens **Connection Details…** when clicked.
 
@@ -157,7 +157,7 @@ The embedded server routes these MCP methods:
 - `subscriptions/listen` — open an SSE response stream for acknowledged, task, or document-resource notifications.
 - `resources/list` and `resources/read` — expose the live document resource `freecad://documents`.
 
-Subscription filters can select `freecad://documents` updates and task IDs. Task-ID filters require the Tasks extension and same-principal task ownership. The server does not currently honor tools-, prompts-, or resources-list-changed boolean filters.
+Subscription filters can select `freecad://documents` updates, task IDs, and tool-list changes (`"toolsListChanged": true`). Task-ID filters require the Tasks extension and same-principal task ownership. A saved change to `allow_scripts` publishes `notifications/tools/list_changed` to streams that requested the filter; prompts- and resources-list-changed filters are not honored.
 
 The server does not provide a standalone GET-based SSE endpoint. `subscriptions/listen` is a POST request that returns an SSE stream.
 

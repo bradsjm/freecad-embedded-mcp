@@ -184,6 +184,32 @@ def test_malformed_filters_are_invalid_params() -> None:
         assert excinfo.value.code == INVALID_PARAMS == -32602
 
 
+# -- tools list changed ---------------------------------------------------
+
+
+def test_tools_list_changed_reaches_only_requesting_streams() -> None:
+    registry = make_registry(support_tools_list_changed=True)
+    subscriber = registry.register("conn-a", 1, {"toolsListChanged": True}, principal="alice")
+    bystander = registry.register("conn-b", 1, {}, principal="bob")
+    drain(subscriber)
+    drain(bystander)
+
+    assert registry.publish_tools_list_changed() == 1
+    [event] = drain(subscriber)
+    assert event["method"] == "notifications/tools/list_changed"
+    assert event["params"] == {"_meta": {SUBSCRIPTION_ID_META_KEY: 1}}
+    assert drain(bystander) == []
+
+
+def test_tools_list_changed_request_is_not_honored_when_unsupported() -> None:
+    registry = make_registry()
+    sub = registry.register("conn-a", 1, {"toolsListChanged": True}, principal="alice")
+    [ack] = drain(sub)
+    assert "toolsListChanged" not in ack["params"]["notifications"]
+    assert registry.publish_tools_list_changed() == 0
+    assert drain(sub) == []
+
+
 # -- connection-scoped identity ------------------------------------------
 
 

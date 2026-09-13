@@ -55,7 +55,10 @@ default server exposes 25. Document tools return the actual sanitized
 
 `run_script` is opt-in: it is registered but hidden unless
 `allow_scripts: true` is saved in `freecad_mcp_settings.json` (or the
-settings dialog checkbox is enabled) and the server is restarted. A
+settings dialog checkbox is enabled). Saving the setting applies it to a
+running server immediately: the tool appears in the next `tools/list`,
+and streams that requested the `toolsListChanged` filter receive
+`notifications/tools/list_changed`. A
 disabled `run_script` answers `tools/call` with METHOD_NOT_FOUND and never
 enters schema validation, consent, or the GUI dispatch. Discovery carries
 `capabilities.scriptingEnabled` and `capabilities.recoveryEnabled` so

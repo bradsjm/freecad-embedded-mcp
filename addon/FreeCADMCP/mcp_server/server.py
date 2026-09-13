@@ -214,6 +214,19 @@ _OPEN_WORLD_TOOLS = frozenset(
     }
 )
 
+#: Settings the request path reads live from ``self.settings``; a saved
+#: change takes effect on a running server without a restart.
+_LIVE_SETTINGS_KEYS = (
+    "allow_scripts",
+    "allowed_roots",
+    "recovery_enabled",
+    "recovery_directory",
+)
+
+#: Settings captured once at bind; a saved change needs a server restart,
+#: so the active settings keep the bind-time value until then.
+_RESTART_SETTINGS_KEYS = ("port", "remote_enabled", "allowed_ips", "token")
+
 
 def _tool_annotations(name: str) -> dict[str, bool]:
     """Return the fixed advisory policy for one registered tool."""
@@ -638,7 +651,8 @@ class Server:
         self.signer = signer or ConsentSigner()
         self._task_store = task_store or TaskStore()
         self._registry = registry or SubscriptionRegistry(
-            supported_resource_uris=(DOCUMENTS_RESOURCE_URI,)
+            supported_resource_uris=(DOCUMENTS_RESOURCE_URI,),
+            support_tools_list_changed=True,
         )
         self._clock = clock
 
@@ -650,6 +664,7 @@ class Server:
         self._state_lock = threading.Lock()
         self._state = "stopped"  # stopped | starting | running | draining
         self._bound = False
+        self._settings_lock = threading.Lock()
         self._http: McpHTTPServer | None = None
         self._observer: _DocumentObserver | None = None
         self._observer_registered = False
@@ -2408,6 +2423,42 @@ class Server:
             },
         }
 
+    def _enabled_tool_names(self) -> frozenset[str]:
+        """Return the tools currently exposed on the wire."""
+
+        return frozenset(name for name in PLAN_TOOL_ORDER if self._tool_enabled(name))
+
+    def apply_settings(self, new_settings: Mapping[str, Any]) -> dict:
+        """Adopt saved settings on a running server without a restart.
+
+        Live-tier keys take effect immediately because the request path
+        reads them from ``self.settings`` per request. Restart-tier keys
+        keep their bind-time values so the connection snapshot and the
+        restart hint stay truthful until the server rebinds. When the
+        enabled-tool set changes, ``notifications/tools/list_changed`` is
+        published to streams that requested it. Returns the changed keys
+        per tier as ``{"applied": [...], "restartRequired": [...]}``.
+        """
+
+        with self._settings_lock:
+            previous = self._enabled_tool_names()
+            old = self.settings
+            active = dict(new_settings)
+            # Bind-time transport values stay active until a restart.
+            for key in _RESTART_SETTINGS_KEYS:
+                if key in old:
+                    active[key] = old[key]
+            self.settings = active
+            if previous != self._enabled_tool_names():
+                self._registry.publish_tools_list_changed()
+        applied = sorted(
+            key for key in _LIVE_SETTINGS_KEYS if old.get(key) != new_settings.get(key)
+        )
+        restart = sorted(
+            key for key in _RESTART_SETTINGS_KEYS if old.get(key) != new_settings.get(key)
+        )
+        return {"applied": applied, "restartRequired": restart}
+
 
 class _SubscriptionStream:
     """``StreamResponse`` source bridging one ``Subscription``.
@@ -2825,3 +2876,18 @@ def server_status() -> dict:
             "connection": {},
         }
     return server.status()
+
+
+def apply_settings(settings: Mapping[str, Any]) -> dict:
+    """Apply saved settings to the running server without a restart.
+
+    A stopped or absent server reports nothing pending: the next start
+    reloads the saved file anyway. Returns the changed keys per tier as
+    ``{"applied": [...], "restartRequired": [...]}``.
+    """
+
+    with _server_lock:
+        server = _server
+    if server is None or server.status().get("state") != "running":
+        return {"applied": [], "restartRequired": []}
+    return server.apply_settings(settings)

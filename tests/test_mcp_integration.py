@@ -286,3 +286,22 @@ def test_modern_metadata_rejections_are_unchanged_over_http(wired_server):
     status, body, _response_headers = _read_json(response)
     assert status == 400
     assert body["error"]["code"] == -32600
+
+
+def test_apply_settings_toggles_run_script_over_real_http(wired_server):
+    """A saved allow_scripts change reaches the transport immediately."""
+    server, http, _waker = wired_server
+    server.settings["allow_scripts"] = False
+
+    message, headers = _modern("tools/list", 21)
+    status, body, _response_headers = _read_json(_post(http, message, headers))
+    assert status == 200
+    assert "run_script" not in [tool["name"] for tool in body["result"]["tools"]]
+
+    outcome = server.apply_settings({**server.settings, "allow_scripts": True})
+    assert outcome == {"applied": ["allow_scripts"], "restartRequired": []}
+
+    message, headers = _modern("tools/list", 22)
+    status, body, _response_headers = _read_json(_post(http, message, headers))
+    assert status == 200
+    assert "run_script" in [tool["name"] for tool in body["result"]["tools"]]
