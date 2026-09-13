@@ -109,7 +109,7 @@ Build a shape, verify it, and save a checkpoint before adding the next layer of 
 
 After each stage:
 
-1. Run `capture_view` from at least `Isometric`, `Top`, and `Front`.
+1. Run one `capture_view` call in the default `overview` mode; its labeled sheet covers `Isometric`, `Top`, `Front`, and the other named orientations.
 2. Run `validate_geometry` for bounds, solid count, and validity.
 3. Save the milestone with `save_document` before the next stage.
 

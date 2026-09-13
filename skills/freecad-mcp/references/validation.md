@@ -106,7 +106,7 @@ For a refactor, compare the changed model with the accepted physical baseline.
 
 ## 7. Review the result visually
 
-Inspect at least `Bottom`, `Front`, `Top`, and `Isometric` views with `capture_view(document, focus_object=<final object>, view_name=...)` to catch accidental rotations, offsets, or missed features.
+Inspect the result with one `capture_view(document, focus_object=<final object>)` call: the default `overview` mode returns one labeled sheet with the `Isometric`, `Front`, `Back`, `Left`, `Right`, `Top`, and `Bottom` views, which catches accidental rotations, offsets, or missed features. Add `interior` when internal features matter and `fit` for a mating interface.
 
 Read the capture against this list, and report the answer for each group:
 
@@ -136,7 +136,7 @@ Read the capture against this list, and report the answer for each group:
 - Each bound in the report matches the stated requirement. Each critical fit dimension matches the value recorded in the model.
 - The exported selection contains the final object and not a helper, a sketch, or a per-feature intermediate.
 
-Do not use screenshot appearance as a substitute for BRep validation. A view can look correct while the BRep carries an invalid or non-manifold region.
+Do not use screenshot appearance as a substitute for BRep validation. A view can look correct while the BRep carries an invalid or non-manifold region. `interior` and `fit` section panels are qualitative only: occlusion and cut-surface appearance are not guaranteed, and `inspect_topology`/`measure` remain the evidence for geometry.
 
 ## 8. Mesh sanity before export
 
@@ -153,7 +153,7 @@ Before reporting the CAD export as validated:
 - [ ] Intended object has a valid shape and positive volume.
 - [ ] Single-solid requirement satisfied or multi-part intent explicitly confirmed.
 - [ ] Bounding box matches the asserted expected bounds.
-- [ ] Result reviewed through `capture_view` where visual evidence is useful.
+- [ ] Result reviewed through `capture_view` in `overview` mode where visual evidence is useful.
 - [ ] Print orientation chosen, with a flat bed face and no unexplained overhang. Recommendations reported.
 - [ ] Every sourced real-world dimension records its source and date, and every assumed value is marked as assumed.
 - [ ] Every mating interface has a named fit class and per-side clearance; uncalibrated values are reported as assumptions.

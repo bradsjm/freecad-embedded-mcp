@@ -49,7 +49,7 @@ Read `references/mcp-tools.md` only when the active tool schema or a server edge
 10. Re-read each changed property, cell, link, or file effect.
 11. Validate the stage before you add dependent features.
 12. Save the editable source before expensive or destructive work.
-13. Validate geometry, fit, placement, and visual form.
+13. Validate geometry, fit, placement, and visual form; run the `overview` review after large modifications and document opens.
 14. Export only the intended final objects.
 15. Report tool results as evidence, not as inferred success.
 
@@ -144,7 +144,7 @@ Require all applicable evidence:
 - The bounds match the design within a stated tolerance.
 - `measure(mode="distance")` confirms clearance magnitude.
 - `measure(mode="interference")` confirms no volumetric overlap.
-- `capture_view` confirms the requested form and placement.
+- `capture_view` in `overview` mode confirms the requested form and placement; `interior`/`fit` supplement where internal features matter.
 - The export readback matches the source bounds and solid intent.
 
 A positive distance alone does not prove separation. A zero common volume does not prove clearance. Use both modes for mating parts.

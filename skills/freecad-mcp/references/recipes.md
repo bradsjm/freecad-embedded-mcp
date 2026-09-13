@@ -316,13 +316,13 @@ Validate the final object:
 
 Use `validate_geometry`. Use actual schema shapes from `tools/list` if validation rejects an expectation map.
 
-Capture useful views:
+Capture one review sheet:
 
 ```json
-{"document":"Bracket","focus_object":"Body","view_name":"Isometric","width":1024,"height":768}
+{"tool": "capture_view", "arguments": {"document": "Bracket", "focus_object": "Body"}}
 ```
 
-Also inspect `Front`, `Top`, and the planned bed-facing view when they reveal different risks.
+The default `overview` mode returns one labeled sheet covering `Isometric`, `Front`, `Top`, `Bottom`, and the side orientations, so the bed-facing view needs no second call. Use `interior` for internal features and `fit` for a mating interface when the question needs them.
 
 Save the editable source:
 

@@ -38,6 +38,8 @@ REQUIRED: tuple[str, ...] = (
     "feature.scaled",
     "feature.datum_point",
     "hole.thread_enums",
+    "view.camera",
+    "view.clipping",
     "doc.lifecycle",
 )
 

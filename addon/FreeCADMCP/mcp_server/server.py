@@ -247,9 +247,10 @@ MAX_OPERATIONS = 32
 MAX_SUBSCRIPTIONS = 32
 MAX_SUBSCRIPTION_ID_LENGTH = 1024
 
-#: Orientation applied when a committed mutation reveals its targets. This is
-#: the same Isometric perspective ``capture_view`` documents as its first
-#: named view, so a reveal and a capture show the model the same way.
+#: Orientation applied when a committed mutation reveals its targets. This
+#: is the Isometric perspective ``capture_view`` uses as the first panel of
+#: its default overview sheet, so a reveal and an overview capture show
+#: the model the same way.
 _REVEAL_ORIENTATION = "Isometric"
 
 #: Ordinary GUI deadline; export/measure get 600 s; script/FEM use their
@@ -503,9 +504,10 @@ class _OpContext:
         """Frame the 3D view on the objects a mutation just changed.
 
         The user should see a change without hunting for it. The view is
-        switched to the same orientation ``capture_view`` uses by default
-        (Isometric) and then framed on the changed objects, so a reveal and a
-        capture show the same perspective. As with capture, navigation
+        switched to the Isometric orientation ``capture_view`` uses as the
+        first panel of its default overview sheet and then framed on the
+        changed objects, so a reveal and an overview capture show the same
+        perspective. As with capture, navigation
         animations are disabled around the orientation change: an animated
         camera would otherwise still be mid-flight when the framing runs.
 

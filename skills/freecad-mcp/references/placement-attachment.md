@@ -46,7 +46,7 @@ Length properties take plain numbers in the internal unit; read [Units and quant
 
 A shape can be defined with vertices already offset from the origin, or it can be placed with `Placement.Base`; both affect the final location. Do not double-translate by applying an offset in the shape constructor and the same offset in Placement unless that is intentional.
 
-Always inspect the global `Shape.BoundBox` after rotating or placing an object. Primitive dimensions describe local geometry and may not describe the world-space envelope. Orient and place the final object deliberately, and confirm the result from its actual global bounds. Use `capture_view` with the `Bottom`, `Front`, `Top`, and `Isometric` orientations to catch accidental rotations.
+Always inspect the global `Shape.BoundBox` after rotating or placing an object. Primitive dimensions describe local geometry and may not describe the world-space envelope. Orient and place the final object deliberately, and confirm the result from its actual global bounds. Use one `capture_view` call in the default `overview` mode to catch accidental rotations: the sheet's panels are labeled with the document-axis orientations, and each panel reports its live camera direction and up in the `views` manifest.
 
 ## Attachment
 

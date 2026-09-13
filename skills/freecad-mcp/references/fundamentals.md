@@ -21,7 +21,7 @@ For MCP work:
 
 - Use `inspect_objects` to inspect application objects; request `detail: "full"` when serialized properties are useful.
 - Use the structured tools (`create_object`, `create_objects`, `edit_object`, `edit_objects`, `edit_parameters`, `delete_object`) for covered document mutations; use `run_script` for `FreeCAD`/`App` and `FreeCADGui`/`Gui` operations the tools do not cover.
-- Use `capture_view` for a screenshot rather than trying to treat a screenshot as geometry evidence. It needs an explicit orientation and a focus object and returns PNG image content.
+- Use `capture_view` for a screenshot rather than trying to treat a screenshot as geometry evidence. It needs only the document, chooses its composition from an inspection intent (`mode`: `overview` by default, or `detail`, `interior`, `fit`), and returns PNG image content with a self-describing panel manifest.
 - All document and GUI handlers run on the GUI thread. `run_fem`, `run_script`, `export`, and `measure` may detach under the Tasks extension; clients without that extension receive blocking results.
 
 ## Documents and object identity

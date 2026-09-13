@@ -1688,6 +1688,114 @@ def run_constraint_forms_default(runner: Runner) -> tuple[dict, bool, dict]:
     return {"outcome": payload.get("outcome", "?"), "forms": forms}, crashed, payload
 
 
+PROGRAM_VIEW_CAMERA = """
+import json as _json
+
+import FreeCAD as App
+import FreeCADGui as Gui
+
+from mcp_server.tools.view import _camera_axes
+from mcp_server.tools.view import (
+    _disable_navigation_animations,
+    _restore_navigation_animations,
+)
+
+doc = App.getDocument("@DOC@")
+probe = doc.addObject("Part::Box", "ViewCamProbe")
+probe.Length = 21.0
+probe.Width = 13.0
+probe.Height = 7.0
+doc.recompute()
+result = {"orientations": {}, "roundtrip": False, "outcome": "ok"}
+view = Gui.activeDocument().activeView()
+if view is None:
+    result["outcome"] = "no_active_view"
+else:
+    # Orientation changes animate when UseNavigationAnimations is on; the
+    # production capture path disables the animation preference around
+    # orientation changes for the same reason. Pump events after each
+    # change so the camera settles before the parser reads it.
+    animation_state = _disable_navigation_animations()
+    orientation_methods = [
+        ("Isometric", "viewIsometric"),
+        ("Front", "viewFront"),
+        ("Top", "viewTop"),
+        ("Right", "viewRight"),
+        ("Back", "viewRear"),
+        ("Left", "viewLeft"),
+        ("Bottom", "viewBottom"),
+        ("Dimetric", "viewDimetric"),
+        ("Trimetric", "viewTrimetric"),
+    ]
+    for name, method in orientation_methods:
+        try:
+            getattr(view, method)()
+            Gui.updateGui()
+            axes = _camera_axes(view)
+            if axes is None:
+                result["orientations"][name] = "parse_failed"
+                result["outcome"] = "parse_failed"
+            else:
+                result["orientations"][name] = {
+                    "direction": axes[0],
+                    "up": axes[1],
+                }
+        except Exception as exc:
+            result["orientations"][name] = "error: " + type(exc).__name__ + ": " + str(exc)
+            result["outcome"] = "parse_failed"
+    try:
+        camera = view.getCamera()
+        view.setCamera(camera)
+        result["roundtrip"] = str(view.getCamera()) == str(camera)
+    except Exception as exc:
+        result["roundtrip"] = False
+        result["roundtrip_error"] = type(exc).__name__ + ": " + str(exc)
+    _restore_navigation_animations(animation_state)
+doc.removeObject(probe.Name)
+doc.recompute()
+print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
+"""
+
+PROGRAM_VIEW_CLIPPING = """
+import json as _json
+
+import FreeCAD as App
+import FreeCADGui as Gui
+
+doc = App.getDocument("@DOC@")
+probe = doc.addObject("Part::Box", "ClipProbe")
+doc.recompute()
+result = {}
+view = Gui.activeDocument().activeView()
+before = bool(view.hasClippingPlane())
+result["before"] = before
+placement = App.Placement(
+    App.Vector(10.0, 10.0, 5.0),
+    App.Rotation(App.Vector(0.0, 0.0, 1.0), App.Vector(1.0, 0.0, 0.0)),
+)
+view.toggleClippingPlane(1, False, True, placement)
+result["after_enable"] = bool(view.hasClippingPlane())
+view.toggleClippingPlane(0)
+result["after_disable"] = bool(view.hasClippingPlane())
+transparency_before = int(probe.ViewObject.Transparency)
+probe.ViewObject.Transparency = 75
+transparency_set = int(probe.ViewObject.Transparency)
+probe.ViewObject.Transparency = transparency_before
+transparency_restored = int(probe.ViewObject.Transparency)
+result["transparency"] = [transparency_before, transparency_set, transparency_restored]
+doc.removeObject(probe.Name)
+doc.recompute()
+roundtrip_holds = (
+    not before
+    and result["after_enable"]
+    and not result["after_disable"]
+    and [transparency_before, transparency_set, transparency_restored] == [0, 75, 0]
+)
+result["outcome"] = "ok" if roundtrip_holds else "roundtrip_failed"
+print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
+"""
+
+
 def run_constraint_forms_sweep(runner: Runner, payloads: dict) -> None:
     """One step per candidate; aborts are observations through restarts."""
     matrix: dict[str, dict] = {}
@@ -1747,6 +1855,8 @@ def run_probe_sequence(runner: Runner, payloads: dict, sweep: bool) -> None:
         ("feature.scaled", PROGRAM_FEATURE_SCALED),
         ("feature.datum_point", PROGRAM_FEATURE_DATUMPOINT),
         ("hole.thread_enums", PROGRAM_HOLE_THREAD_ENUMS),
+        ("view.camera", PROGRAM_VIEW_CAMERA),
+        ("view.clipping", PROGRAM_VIEW_CLIPPING),
     ]
     for name, program in script_probes:
         payload, _crashed = runner.script_step(name, program)
