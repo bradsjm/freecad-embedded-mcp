@@ -37,8 +37,8 @@ default server exposes 25. Document tools return the actual sanitized
 | `inspect_objects` | List objects sorted by Name, or an explicit nonempty object selection; signed-cursor pagination | `document`; optional `objects`, `cursor`, `detail` (`compact`/`full`), `property_filter`, `limit` (default 32), `property_offset`, `property_limit` |
 | `create_object` | Create a supported Part/App type or a FEM object | `document`, `type`, `name`; optional `properties`, `expected_solids`, `expected_bounds`, `bounds_tolerance`, `response_detail` |
 | `create_objects` | Create 1–32 independent objects atomically; returns the requested-to-actual `nameMapping` | `document`, `entries`; optional `expectations` keyed by requested name, `response_detail` |
-| `edit_object` | Assign properties with full prevalidation; `Spreadsheet::Sheet` cell contents use `properties.cells`; returns before/after deltas | `document`, `object`, `properties`; optional `expected_solids`, `expected_bounds`, `bounds_tolerance`, `response_detail` |
-| `edit_objects` | Edit 1–32 objects atomically | `document`, `edits`; optional `expectations` per object, `response_detail` |
+| `edit_object` | Assign properties with full prevalidation; `Spreadsheet::Sheet` cell contents use `properties.cells`; returns before/after deltas | `document`, `object`, `properties`; optional `expected_generation`, `expected_solids`, `expected_bounds`, `bounds_tolerance`, `response_detail` |
+| `edit_objects` | Edit 1–32 objects atomically | `document`, `edits`; optional top-level `expected_generation`, `expectations` per object, `response_detail` |
 | `delete_object` | Delete one object; refuses objects with dependents | `document`, `object` |
 | `validate_geometry` | State, validity, solid count, volume, bounds, tolerance | `document`, `objects` (max 100); optional `expected_solids`, `expected_bounds`, `bounds_tolerance` |
 | `measure` | Distance, interference, section, or face measurement. Positive distance does not prove separation; zero common volume does not prove clearance. Combine modes for fit decisions (see [validation](validation.md)) | `document`, `a`, `mode`; optional `b`, `plane`; selectors accept names, bbox objects, or signed `{object, subelement}` references |
@@ -174,6 +174,8 @@ Discovery reports `capabilities.recoveryEnabled` so clients can read the active 
 ## Errors
 
 Application failures are complete tool results with `isError: true` and a structured `{code, message, details}` payload. Stable codes: `DOCUMENT_NOT_FOUND`, `OBJECT_NOT_FOUND`, `VALIDATION_FAILED`, `GUI_DISPATCH_FAILED`, `CONSENT_DENIED`, `PATH_NOT_ALLOWED`, `UNSUPPORTED_VIEW`, `SOLVER_FAILED`, `SERVER_BUSY`. Only protocol-level violations become JSON-RPC errors. Output-schema violations are infrastructure errors (`-32603`).
+
+`edit_object`, `edit_objects`, `edit_sketch`, and `edit_feature` accept an optional `expected_generation`. A mismatch fails with `VALIDATION_FAILED` and `reason: stale_generation` before any transaction opens, so nothing changes. The details carry `expectedGeneration`, `actualGeneration`, and the matching inspector (`inspect_objects` or `inspect_sketch`) as `nextTool`. On `edit_objects` the guard is top-level and refuses the whole batch.
 
 Read `details.nextTool` when present and call that tool next: its value is always the name of a tool this server exposes, so it is safe to call directly. `details.nextAction` is a plain-language instruction, never a tool name — for example `retry_from_original_state`, `inspect_target`, or `inspect_recovery_directory`. Do not pass a `nextAction` value as a tool name. `details.reason` is the stable machine token for the refusal; `details.suggestions` lists close matches when a name or a type was rejected.
 

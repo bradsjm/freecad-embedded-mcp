@@ -31,6 +31,7 @@ from ..protocol import (
     ProtocolError,
     ToolError,
     fingerprint,
+    stale_generation_details,
 )
 
 _MAX_LIMIT = 500
@@ -229,6 +230,13 @@ _NAME_FIELD = {"type": "string", "minLength": 1}
 _EXPECTED_SOLIDS = {"type": "integer", "minimum": 0}
 _PROPERTIES_MAP = {"type": "object", "additionalProperties": _INPUT_VALUE}
 _GENERATION = {"type": "integer", "minimum": 0}
+_EXPECTED_GENERATION = {
+    "type": ["integer", "null"],
+    "minimum": 0,
+    "description": (
+        "Optional guard: refuse when the document generation no longer matches the inspected value."
+    ),
+}
 _APPLIED = {"type": "array", "items": {"type": "string"}, "maxItems": 512}
 
 _GEOMETRY_REPORT = {
@@ -708,6 +716,7 @@ _EDIT_INPUT = {
         "document": _DOCUMENT_FIELD,
         "object": _NAME_FIELD,
         "properties": _PROPERTIES_MAP,
+        "expected_generation": _EXPECTED_GENERATION,
         "expected_solids": _EXPECTED_SOLIDS,
         "expected_bounds": _EXPECTED_BOUNDS,
         "bounds_tolerance": _BOUNDS_TOLERANCE,
@@ -737,6 +746,7 @@ _EDIT_OBJECTS_INPUT = {
             "minItems": 1,
             "maxItems": 32,
         },
+        "expected_generation": _EXPECTED_GENERATION,
         "expectations": {
             "type": "object",
             "additionalProperties": {
@@ -1020,7 +1030,9 @@ TOOL_DEFINITIONS = [
             "FuzzyTolerance is honored only when the feature actually "
             "exposes it. Optional expected_bounds (six document-space mm "
             "coordinates in xmin, ymin, zmin, xmax, ymax, zmax order plus "
-            "bounds_tolerance) gate the commit. Returns "
+            "bounds_tolerance) gate the commit. Optional expected_generation "
+            "refuses the edit when the document changed since inspection. "
+            "Returns "
             "before/after property values, geometry deltas, the dependent "
             "counts before and after, and post-recompute validation."
             'response_detail: "compact" omits before-state geometry '
@@ -1037,7 +1049,9 @@ TOOL_DEFINITIONS = [
             "properties} entries applied in request order inside one "
             "transaction and one recompute, with optional per-object "
             "expectations (expected_solids, expected_bounds, "
-            "bounds_tolerance) checked before commit. Duplicate object "
+            "bounds_tolerance) checked before commit. An optional top-level "
+            "expected_generation refuses the whole batch when the document "
+            "changed since inspection. Duplicate object "
             "names are rejected and every property is prevalidated before "
             "the transaction opens. A failing expectation or recompute "
             "rolls back the whole batch; the result reports actual "
@@ -1066,6 +1080,22 @@ TOOL_DEFINITIONS = [
 
 def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
+
+
+def _require_expected_generation(ctx: Any, doc: Any, arguments: dict) -> None:
+    """Refuse an edit planned against a stale document generation."""
+
+    expected = arguments.get("expected_generation")
+    if expected is None:
+        return
+    actual = int(ctx.document_generation(doc))
+    if expected == actual:
+        return
+    raise ToolError(
+        VALIDATION_FAILED,
+        "document changed since inspection; re-run inspect_objects",
+        stale_generation_details(expected, actual, "inspect_objects"),
+    )
 
 
 def _label(obj: Any) -> str:
@@ -2756,6 +2786,7 @@ def create_object(ctx: Any, args: dict) -> dict:
 def edit_object(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
     obj = ctx.require_object(doc, str(args["object"]))
+    _require_expected_generation(ctx, doc, args)
     properties = args["properties"]
     if not isinstance(properties, dict) or not properties:
         raise ToolError(VALIDATION_FAILED, "properties must be a non-empty object")
@@ -2893,6 +2924,7 @@ def delete_object(ctx: Any, args: dict) -> dict:
 
 def edit_objects(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
+    _require_expected_generation(ctx, doc, args)
     edits = args["edits"]
     detail = str(args.get("response_detail") or "full")
     if not isinstance(edits, list) or not (1 <= len(edits) <= 32):

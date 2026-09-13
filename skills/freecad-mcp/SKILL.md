@@ -105,7 +105,7 @@ The protocol also provides `server/discover`, `tools/list`, `tasks/get`, `tasks/
 - Use `edit_objects` for one atomic multi-object change.
 - Write spreadsheet cells only through `properties.cells` with address or alias keys.
 - Require `cellContentsPersisted: true` after a spreadsheet write.
-- Pass `expected_generation` on sketch or feature edits after an earlier inspection.
+- Pass `expected_generation` on object, sketch, or feature edits after an earlier inspection.
 - Pass `expected_solids` and `expected_bounds` when the design determines them.
 - Use canonical links: `{"object":"Name","subelement":"Face1"}`.
 - Use document-space bounds: `[xmin,ymin,zmin,xmax,ymax,zmax]`.

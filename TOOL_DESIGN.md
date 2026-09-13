@@ -36,7 +36,7 @@ All output floats are finite. JSON contains no `NaN` or `Infinity`. A model cann
 
 A model that read a document three turns ago may still believe what it read. The FreeCAD API would silently apply an edit against changed state. The tools refuse.
 
-Every mutation-sensitive read and write carries a document `generation` stamp. `edit_sketch` and `edit_feature` accept `expected_generation`; a mismatch fails with `VALIDATION_FAILED`, `reason: stale_generation`, `expectedGeneration`, `actualGeneration`, and `nextTool: inspect_sketch` before any transaction opens.
+Every mutation-sensitive read and write carries a document `generation` stamp. `edit_object`, `edit_objects`, `edit_sketch`, and `edit_feature` accept `expected_generation`; a mismatch fails with `VALIDATION_FAILED`, `reason: stale_generation`, `expectedGeneration`, `actualGeneration`, and the matching inspector (`inspect_objects` or `inspect_sketch`) as `nextTool` before any transaction opens.
 
 Topology references are stronger still. `inspect_topology` returns subelement references whose `subelement` value is an opaque HMAC token binding document identity, generation, object name, role, and index. `measure` and `capture_view` accept these tokens; a stale or tampered token is rejected with a named reason (`stale_generation`, `stale_cursor`, `malformed_cursor`). Numeric selectors such as `Face7` are accepted only for immediate, same-call use and are never valid as durable references, because native face indices move when upstream geometry changes.
 

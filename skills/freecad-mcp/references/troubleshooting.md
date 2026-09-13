@@ -52,6 +52,7 @@ Endpoint, modes, token, and path contract: [protocol-security.md](protocol-secur
 2. Use plain numbers for quantity properties and canonical `{"object", "subelement"}` links for references.
 3. For a `Spreadsheet::Sheet`, read the row's `spreadsheet` inventory and write address or alias keys through `edit_object` `properties.cells`.
 4. Send feature-specific assignments the mapper cannot express through `run_script`.
+5. `reason: stale_generation` means the document changed since your last read. Re-inspect with `inspect_objects`, then retry with the current `expected_generation`.
 
 Mapping rules: [mcp-tools.md](mcp-tools.md#property-mapping).
 
@@ -70,6 +71,7 @@ Current tool schemas reject unknown arguments. Do not probe schemas with deliber
 1. Treat the whole 1–32-entry `create_objects` or `edit_objects` batch as rolled back; the document is unchanged.
 2. Read the error details, correct the invalid entry, and retry from the original document state.
 3. `create_objects` does not resolve links inside the batch: create the entries, read `nameMapping`, then link them with `edit_objects`.
+4. `reason: stale_generation` means the document changed since your last read. Re-inspect with `inspect_objects`, then retry the batch with the current top-level `expected_generation`.
 
 ## Sketch edit failed
 
