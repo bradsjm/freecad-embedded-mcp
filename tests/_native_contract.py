@@ -40,6 +40,9 @@ REQUIRED: tuple[str, ...] = (
     "hole.thread_enums",
     "view.camera",
     "view.clipping",
+    "measure.difference",
+    "feature.delete_reroute",
+    "gui.edit_session",
     "doc.lifecycle",
 )
 

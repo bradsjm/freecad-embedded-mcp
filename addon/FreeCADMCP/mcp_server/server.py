@@ -1201,8 +1201,8 @@ class Server:
         One row per live document: the same lifetime generation the consent
         targets are bound to, the conservative dirty verdict owned by the
         documents tool (unknown state reads as dirty, never as clean), the
-        active document, a pending transaction, and the object currently
-        open in that document's GUI edit session.
+        active document, a pending transaction, and the object FreeCAD
+        reports as that document's active object.
         """
 
         # Sibling import of a private helper, mirroring the FEM probe: the
@@ -2614,11 +2614,16 @@ def _gui_health_snapshot() -> dict:
 
 
 def _active_edit_object(gui_document: Any) -> str | None:
-    """Name of the object a GUI document has in active edit, or None.
+    """Name of the document's active object (``ActiveObject``), or None.
 
     Null-safe probes only: no GUI document (headless, closed, or missing)
     and no active object both answer None, and a value provider is resolved
     through the document object it wraps when it exposes one.
+
+    This is ``App::Document::getActiveObject()`` — the object native
+    ``addObject(..., ActivateObject)`` last activated — not an edit session:
+    a session lives in ``Gui.Document.getInEdit()``, which only ``setEdit``
+    opens and ``resetEdit`` clears.
     """
 
     active = getattr(gui_document, "ActiveObject", None)
@@ -2753,9 +2758,10 @@ def _inspect_documents_definition() -> dict:
             "with its actual Name and Label, file path, object count, live "
             "change generation, conservative dirty verdict, whether it is the "
             "active document, whether a transaction is pending, and the object "
-            "currently open in that document's GUI edit session. Read-only: "
-            "nothing is recomputed or mutated, and activeDocument is null when "
-            "no listed document is active."
+            "FreeCAD reports as that document's active object (the last object "
+            "it activated, not an edit session). Read-only: nothing is "
+            "recomputed or mutated, and activeDocument is null when no listed "
+            "document is active."
         ),
         "inputSchema": {
             "type": "object",

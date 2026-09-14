@@ -82,7 +82,7 @@ Delete only an unneeded leaf object:
 {"document":"Bracket","object":"CutTool"}
 ```
 
-Use `delete_object`. If it reports dependents, repair the graph instead of cascading deletion.
+Use `delete_object`. A PartDesign dependent whose only link is the target's `BaseFeature` is rerouted by the native removal and reported in `rerouted` with its resulting link (null after the cleared link), so a mid-chain solid can be deleted in one call. If the tool instead reports dependents, repair the graph rather than cascading deletion.
 
 ## Create independent objects atomically
 
@@ -285,6 +285,14 @@ Check two mating objects with both modes:
 ```
 
 Use `measure`. Require the intended minimum distance and zero unintended common volume.
+
+To quantify material a change added or removed, use `difference` (`a.cut(b)`):
+
+```json
+{"document":"Bracket","a":"BracketFinal","b":"BracketBlank","mode":"difference"}
+```
+
+`difference_volume` is the material of `a` that `b` does not cover; a fully consumed `a` reports 0 with null bounds and no solids.
 
 ## Import a reference model
 

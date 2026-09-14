@@ -831,11 +831,23 @@ _MUTATED_OUTPUT = {
 _DELETE_OUTPUT = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["document", "generation", "removed", "applied"],
+    "required": ["document", "generation", "removed", "rerouted", "applied"],
     "properties": {
         "document": {"type": "string"},
         "generation": _GENERATION,
         "removed": {"$ref": "#/$defs/objectIdentity"},
+        "rerouted": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "feature": {"type": "string"},
+                    "baseFeature": {"type": ["string", "null"]},
+                },
+                "required": ["feature", "baseFeature"],
+            },
+        },
         "applied": _APPLIED,
     },
     "$defs": _MUTATION_OUTPUT_DEFS,
@@ -1068,9 +1080,13 @@ TOOL_DEFINITIONS = [
         "name": "delete_object",
         "description": (
             "Remove one object. Objects with dependents are refused "
-            "explicitly instead of being silently cascaded; otherwise the "
-            "removal and recompute run inside the shared mutation "
-            "transaction and abort on failure."
+            "explicitly instead of being silently cascaded, except PartDesign"
+            " dependents whose only link is the target's BaseFeature: the"
+            " native removal clears that link so the dependent falls back to"
+            " the previous solid feature, and each one is reported in"
+            "'rerouted' with its resulting BaseFeature (null after a cleared"
+            " link). Otherwise the removal and recompute run inside the"
+            " shared mutation transaction and abort on failure."
         ),
         "inputSchema": _DELETE_INPUT,
         "outputSchema": _DELETE_OUTPUT,
@@ -2880,30 +2896,58 @@ def _groups_the_target(dependent: Any, target: Any) -> bool:
     return any(member is target for member in members)
 
 
+def _reroutes_via_base_feature(dependent: Any, target: Any) -> bool:
+    """True when the native removal can reroute ``dependent`` off ``target``.
+
+    Native ``Body::removeObject`` clears the following feature's
+    ``BaseFeature`` link so that feature falls back to the previous solid
+    feature in the Body's history, and it repairs ``Tip`` (verified on
+    FreeCAD 1.1.3: the dependent's link reads back null and the Body still
+    validates as before). The mutation gate revalidates the recomputed chain
+    afterwards, so any reroute the native removal cannot complete — for
+    example one that leaves the Body with a different solid count — rolls the
+    deletion back. Every other dependent still blocks.
+    """
+
+    probe = getattr(dependent, "isDerivedFrom", None)
+    if not callable(probe):
+        return False
+    try:
+        if not probe("PartDesign::Feature"):
+            return False
+        return getattr(dependent, "BaseFeature", None) is target
+    except Exception:
+        return False
+
+
 def delete_object(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
     obj = ctx.require_object(doc, str(args["object"]))
     name = str(getattr(obj, "Name", ""))
-    dependents: list[str] = []
+    blocking: list[str] = []
+    reroute_candidates: list[str] = []
     try:
-        dependents = sorted(
-            {
-                str(getattr(dep, "Name", ""))
-                for dep in list(getattr(obj, "InList", ()) or ())
-                if getattr(dep, "Name", "") and not _groups_the_target(dep, obj)
-            }
-        )
+        for dep in list(getattr(obj, "InList", ()) or ()):
+            dep_name = str(getattr(dep, "Name", ""))
+            if not dep_name or _groups_the_target(dep, obj):
+                continue
+            if _reroutes_via_base_feature(dep, obj):
+                reroute_candidates.append(dep_name)
+            else:
+                blocking.append(dep_name)
     except Exception as exc:  # InList must be readable to refuse safely.
         raise ToolError(
             VALIDATION_FAILED,
             f"cannot enumerate dependents of '{name}': {_describe(exc)}",
         ) from exc
-    if dependents:
+    blocking = sorted(set(blocking))
+    reroute_candidates = sorted(set(reroute_candidates))
+    if blocking:
         raise ToolError(
             VALIDATION_FAILED,
             f"object '{name}' has dependents; refusing to delete it without "
             "them being removed first",
-            {"dependents": dependents[:_MAX_DEPENDENTS_LISTED]},
+            {"dependents": blocking[:_MAX_DEPENDENTS_LISTED]},
         )
     removed = {
         "name": name,
@@ -2914,10 +2958,20 @@ def delete_object(ctx: Any, args: dict) -> dict:
         doc.removeObject(name)
         if doc.getObject(name) is not None:
             raise ToolError(VALIDATION_FAILED, f"object '{name}' was not removed")
+    rerouted = []
+    for dep_name in reroute_candidates:
+        survivor = doc.getObject(dep_name)
+        if survivor is None:
+            continue
+        base = getattr(survivor, "BaseFeature", None)
+        rerouted.append(
+            {"feature": dep_name, "baseFeature": str(getattr(base, "Name", "")) or None}
+        )
     return {
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
         "removed": removed,
+        "rerouted": rerouted,
         "applied": applied,
     }
 

@@ -3,8 +3,9 @@
 ``validate_geometry`` reports per-object state, shape validity, solid count,
 volume, bounds, ``shape.check()`` diagnostics and ``shape.getTolerance(1)``
 without repairing anything; expected solids and expected bounds produce
-explicit verdicts. ``measure`` supports the distance/interference/section/faces
-modes over whole objects or subshapes selected by bounding box. Subshape
+explicit verdicts. ``measure`` supports the
+distance/interference/section/difference/faces modes over whole objects or
+subshapes selected by bounding box. Subshape
 results carry a canonical ``{object, subelement}`` reference whose subelement
 is an opaque HMAC-signed topology token (document identity, generation,
 object name, role, index) produced with the shared server signing key via
@@ -159,6 +160,28 @@ def _bbox(shape: Any) -> list[float] | None:
     if any(value is None for value in converted):
         return None
     return converted
+
+
+def _solid_count(shape: Any) -> int | None:
+    """Number of native solids in ``shape``; None when Solids is unreadable."""
+
+    try:
+        return len(shape.Solids)
+    except Exception:
+        return None
+
+
+def _inverted_bounds(bounds: list[float] | None) -> bool:
+    """True when a readable bounding box has no extent (``min`` past ``max``).
+
+    OCC reports the fully consumed ``shape.cut()`` result as a non-null shape
+    whose box is inverted (±DBL_MAX per axis), so an inverted box — not
+    ``isNull()`` — is the emptiness signal; an unreadable box (None) is not.
+    """
+
+    if bounds is None:
+        return False
+    return any(bounds[index] > bounds[index + 3] for index in range(3))
 
 
 def _subelement_label(role: str, index: int) -> str:
@@ -620,6 +643,58 @@ def _measure_interference(a_shape: Any, b_shape: Any, payload: dict) -> dict:
     return payload
 
 
+def _measure_difference(a_shape: Any, b_shape: Any, payload: dict) -> dict:
+    """Report the volume of ``a`` not covered by ``b`` (``a.cut(b)``).
+
+    An empty result means ``a`` is fully consumed by ``b``; it reports
+    ``difference_volume`` 0 with null bounds and no solids rather than a
+    missing volume, and OCC keeps such a shape non-null with an inverted
+    bounding box (observed live on 1.1.3), so that box is reported as null
+    instead of as its ±DBL_MAX coordinates. Volume, bounds and shape facts
+    are mode-conditional fields of the ``measure`` output, like
+    ``common_volume``.
+    """
+
+    try:
+        result = a_shape.cut(b_shape)
+    except Exception as exc:
+        raise ToolError(VALIDATION_FAILED, f"cut computation failed: {exc}") from exc
+    if shape_is_null(result):
+        payload["difference_volume"] = 0.0
+        payload["solid_count"] = 0
+        payload["bounds"] = None
+        payload["shape_valid"] = True
+        return payload
+    try:
+        raw_volume = getattr(result, "Volume", None)
+    except Exception as exc:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"difference-volume computation returned no readable volume: {exc}",
+            {"reason": "measurement_unavailable", "measurement": "difference_volume"},
+        ) from exc
+    volume = _finite(raw_volume)
+    if volume is None:
+        raise ToolError(
+            VALIDATION_FAILED,
+            "difference-volume computation returned no finite volume",
+            {"reason": "measurement_unavailable", "measurement": "difference_volume"},
+        )
+    bounds = _bbox(result)
+    payload["difference_volume"] = volume
+    payload["bounds"] = None if _inverted_bounds(bounds) else bounds
+    payload["solid_count"] = _solid_count(result)
+    validity = getattr(result, "isValid", None)
+    valid = True
+    if callable(validity):
+        try:
+            valid = bool(validity())
+        except Exception:
+            valid = True
+    payload["shape_valid"] = valid
+    return payload
+
+
 def _plane_vectors(
     plane: Mapping[str, Any],
 ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -833,7 +908,7 @@ def _handle_measure(ctx: Any, arguments: Mapping[str, Any]) -> dict:
                 "mode 'faces' requires a whole-object or face selector",
             )
         return _measure_faces(ctx, doc, a_obj, a_sel, payload)
-    if mode not in ("distance", "interference", "section"):
+    if mode not in ("distance", "interference", "section", "difference"):
         raise ToolError(VALIDATION_FAILED, f"unsupported measure mode {mode!r}")
     if mode == "section":
         if arguments.get("plane") is None:
@@ -858,7 +933,9 @@ def _handle_measure(ctx: Any, arguments: Mapping[str, Any]) -> dict:
         raise ToolError(VALIDATION_FAILED, f"object {b_obj.Name} has no shape")
     if mode == "distance":
         return _measure_distance(a_shape, b_shape, payload)
-    return _measure_interference(a_shape, b_shape, payload)
+    if mode == "interference":
+        return _measure_interference(a_shape, b_shape, payload)
+    return _measure_difference(a_shape, b_shape, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -1394,7 +1471,7 @@ _MEASURE_INPUT = {
     "properties": {
         "document": {"type": "string", "minLength": 1},
         "a": _SELECTOR_DEF,
-        "mode": {"enum": ["distance", "interference", "section", "faces"]},
+        "mode": {"enum": ["distance", "interference", "section", "difference", "faces"]},
         "b": _SELECTOR_DEF,
         "plane": _PLANE_DEF,
     },
@@ -1405,7 +1482,7 @@ _MEASURE_OUTPUT = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "mode": {"enum": ["distance", "interference", "section", "faces"]},
+        "mode": {"enum": ["distance", "interference", "section", "difference", "faces"]},
         "units": {"type": "object", "additionalProperties": {"type": "string"}},
         "a": {"$ref": "#/$defs/reference"},
         "b": {"$ref": "#/$defs/reference"},
@@ -1421,6 +1498,15 @@ _MEASURE_OUTPUT = {
         },
         "common_volume": {"type": "number"},
         "overlaps": {"type": "boolean"},
+        "difference_volume": {"type": "number"},
+        "solid_count": {"type": ["integer", "null"], "minimum": 0},
+        "bounds": {
+            "type": ["array", "null"],
+            "items": {"type": "number"},
+            "minItems": 6,
+            "maxItems": 6,
+        },
+        "shape_valid": {"type": "boolean"},
         "plane": {
             "type": "object",
             "additionalProperties": False,
@@ -1510,7 +1596,9 @@ TOOL_DEFINITIONS = [
             " document-space mm; a box selects the one face or edge whose"
             " bounds equal it within tolerance, so take exact bounds from"
             " inspect_topology): distance (distToShape), interference (common"
-            " volume), planar section curves (z plane or normal+point in"
+            " volume), difference (a.cut(b) volume — the material of a that b"
+            " does not cover; an empty result reports difference_volume 0 with"
+            " null bounds), planar section curves (z plane or normal+point in"
             " document space) or face areas with sampled normals. Semantics:"
             " distance is the raw distToShape value and a positive result"
             " does not prove separation (OCC can report a positive distance"

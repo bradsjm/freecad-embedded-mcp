@@ -38,7 +38,7 @@ print(doc.Name, doc.FileName)
 print([(obj.Name, obj.Label, obj.TypeId) for obj in doc.Objects])
 ```
 
-Use MCP `new_document` for a simple new document. Call `inspect_documents` to list the open documents: it takes no arguments and returns one row per document with its name, label, file path, object count, generation, dirty/active flags, transaction state, and the object under GUI edit, plus the `activeDocument`. Use `reload_document` only after an external process edited the associated file; it asks for consent when the document is dirty.
+Use MCP `new_document` for a simple new document. Call `inspect_documents` to list the open documents: it takes no arguments and returns one row per document with its name, label, file path, object count, generation, dirty/active flags, transaction state, and `editObject` (FreeCAD's active object for that document — the last object it activated, not an edit session), plus the `activeDocument`. Use `reload_document` only after an external process edited the associated file; it asks for consent when the document is dirty.
 
 Object `Name` is the internal identifier used for links and MCP follow-up calls. `Label` is display text and may change. FreeCAD sanitizes and de-duplicates names; every create response returns the actual name. Never assume the requested name survived unchanged.
 
@@ -83,7 +83,7 @@ A `Part::FeaturePython` object keeps a custom property such as `Side` across a s
 
 ## Dependency queries
 
-Use the dependency lists before a delete or a repair. `delete_object` refuses an object that has dependents. These queries show which objects those are.
+Use the dependency lists before a delete or a repair. `delete_object` refuses an object that has dependents, except a PartDesign dependent whose only link is the target's `BaseFeature`: the native removal reroutes that dependent (the link is cleared, so it falls back to the previous solid feature) and the response reports it in `rerouted`. These queries show which objects the remaining refusals name.
 
 ```python
 obj.OutList            # objects this object references

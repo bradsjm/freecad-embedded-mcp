@@ -39,9 +39,9 @@ default server exposes 25. Document tools return the actual sanitized
 | `create_objects` | Create 1–32 independent objects atomically; returns the requested-to-actual `nameMapping` | `document`, `entries`; optional `expectations` keyed by requested name, `response_detail` |
 | `edit_object` | Assign properties with full prevalidation; `Spreadsheet::Sheet` cell contents use `properties.cells`; returns before/after deltas | `document`, `object`, `properties`; optional `expected_generation`, `expected_solids`, `expected_bounds`, `bounds_tolerance`, `response_detail` |
 | `edit_objects` | Edit 1–32 objects atomically | `document`, `edits`; optional top-level `expected_generation`, `expectations` per object, `response_detail` |
-| `delete_object` | Delete one object; refuses objects with dependents | `document`, `object` |
+| `delete_object` | Delete one object; refuses objects with dependents, except PartDesign dependents whose only link is the target's `BaseFeature` (rerouted by the native removal and reported in `rerouted`) | `document`, `object` |
 | `validate_geometry` | State, validity, solid count, volume, bounds, tolerance | `document`, `objects` (max 100); optional `expected_solids`, `expected_bounds`, `bounds_tolerance` |
-| `measure` | Distance, interference, section, or face measurement. Positive distance does not prove separation; zero common volume does not prove clearance. Combine modes for fit decisions (see [validation](validation.md)) | `document`, `a`, `mode`; optional `b`, `plane`; selectors accept names, bbox objects, or signed `{object, subelement}` references |
+| `measure` | Distance, interference, difference (`a.cut(b)` volume: the added or removed material), section, or face measurement. Positive distance does not prove separation; zero common volume does not prove clearance. Combine modes for fit decisions (see [validation](validation.md)) | `document`, `a`, `mode`; optional `b`, `plane`; selectors accept names, bbox objects, or signed `{object, subelement}` references |
 | `inspect_topology` | Page through faces or edges with native indices and signed references | `document`, `object`, `role`; optional `cursor`, `indices`, `limit` (default 50, max 100), `detail` (`compact`/`full`) |
 | `edit_parameters` | Add/rename dynamic properties, bind expressions, clear expressions; reports `document`, `generation`, and `applied` | `document`, `object`; optional `add`, `rename`, `expressions`, `clear_expressions` |
 | `inspect_sketch` | Sketch geometry/constraint rows, solver summary, `state`, `statusText`, and `solver.solverStatus` | `document`, `sketch` |
@@ -66,7 +66,7 @@ clients can read the active policy without calling anything else.
 
 `discover_capabilities` with `detail: "compact"` (the default) returns `freecad`, `occ`, `exporters`, `fem`, `supportedTypesCount`, and `supportedTypesDocument`; `detail: "full"` returns the complete snapshot. `refresh: true` re-captures the snapshot through the GUI path.
 
-`inspect_documents` takes no arguments. It returns `documents[]` rows with `name`, `label`, `fileName`, `objectCount`, `generation`, `dirty`, `active`, `transactionOpen`, and `editObject`, plus `activeDocument`. Use it when the document name is unknown; it replaces document discovery through `run_script`.
+`inspect_documents` takes no arguments. It returns `documents[]` rows with `name`, `label`, `fileName`, `objectCount`, `generation`, `dirty`, `active`, `transactionOpen`, and `editObject` (FreeCAD's active object for that document: the last object it activated, not an edit session), plus `activeDocument`. Use it when the document name is unknown; it replaces document discovery through `run_script`.
 
 The registered tools cover CAD-side modeling, inspection, validation, export, and FEM operations. The server methods also expose document resources and task/resource subscriptions. Report anything outside these operations as outside this skill's boundary.
 

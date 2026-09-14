@@ -253,6 +253,7 @@ class FakeObj:
         is_body: bool = False,
         tip: Any = None,
         values: dict[str, Any] | None = None,
+        derived_from: tuple[str, ...] = (),
     ) -> None:
         object.__setattr__(self, "Name", name)
         object.__setattr__(self, "Label", label or name)
@@ -270,6 +271,7 @@ class FakeObj:
         object.__setattr__(self, "_is_body", is_body)
         object.__setattr__(self, "_tip", tip)
         object.__setattr__(self, "_values", dict(values or {}))
+        object.__setattr__(self, "_derived_from", tuple(derived_from))
         object.__setattr__(self, "_blocked", set())
         object.__setattr__(self, "history", [])
 
@@ -302,7 +304,7 @@ class FakeObj:
         return list(self._enums[prop])
 
     def isDerivedFrom(self, type_id: str) -> bool:
-        return type_id == "PartDesign::Body" and self._is_body
+        return (type_id == "PartDesign::Body" and self._is_body) or type_id in self._derived_from
 
     @property
     def Tip(self) -> Any:
@@ -434,6 +436,11 @@ class FakeDoc:
             raise RuntimeError(f"object {name} not found")
         self.Objects.remove(obj)
         self._by_name.pop(name, None)
+        # Native Body::removeObject reroutes a following feature's BaseFeature
+        # to the removed feature's own base so the chain stays connected.
+        for survivor in self.Objects:
+            if getattr(survivor, "BaseFeature", None) is obj:
+                survivor.BaseFeature = getattr(obj, "BaseFeature", None)
 
     def recompute(self) -> None:
         self.recompute_count += 1
@@ -1317,6 +1324,7 @@ def test_delete_without_dependents_removes_and_commits() -> None:
 
     assert result["removed"]["name"] == "Lonely"
     assert result["removed"]["typeId"] == "Part::Feature"
+    assert result["rerouted"] == []
     assert result["applied"] == ["Lonely"]
     assert doc.getObject("Lonely") is None
     assert ("commit", None) in doc.calls
@@ -1368,6 +1376,33 @@ def test_delete_still_refuses_a_feature_a_later_feature_uses() -> None:
 
     error = expect_tool_error(exc_info, VALIDATION_FAILED)
     assert error.details["dependents"] == ["Pocket"]
+
+
+def test_delete_reroutes_base_feature_dependent() -> None:
+    """A lone BaseFeature link is rerouted by the native removal."""
+
+    pad = box("Pad")
+    pocket = box(
+        "Pocket",
+        derived_from=("PartDesign::Feature",),
+    )
+    pocket.BaseFeature = pad
+    fillet = box(
+        "Fillet",
+        derived_from=("PartDesign::Feature",),
+    )
+    fillet.BaseFeature = pocket
+    pocket.InList.append(fillet)
+    doc = FakeDoc(objects=[pad, pocket, fillet])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.delete_object(ctx, {"document": doc.Name, "object": "Pocket"})
+
+    assert result["removed"]["name"] == "Pocket"
+    assert result["rerouted"] == [{"feature": "Fillet", "baseFeature": "Pad"}]
+    assert doc.getObject("Pocket") is None
+    assert fillet.BaseFeature is pad
+    validate_schema(result, _output_schema("delete_object"))
 
 
 # ---------------------------------------------------------------------------

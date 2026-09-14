@@ -108,6 +108,8 @@ class FakeShape:
         edges=(),
         check_results=(),
         tolerance=1e-7,
+        is_null=False,
+        valid=True,
     ):
         self.Volume = float(volume)
         self.BoundBox = FakeBoundBox(*bounds)
@@ -116,9 +118,12 @@ class FakeShape:
         self.Edges = list(edges)
         self._check = list(check_results)
         self._tolerance = float(tolerance)
+        self._is_null = bool(is_null)
+        self._valid = bool(valid)
         self._distance = None
         self._common = None
         self._section = None
+        self._cut = None
 
     def copy(self):
         copied = FakeShape(
@@ -136,18 +141,21 @@ class FakeShape:
             edges=list(self.Edges),
             check_results=list(self._check),
             tolerance=self._tolerance,
+            is_null=self._is_null,
+            valid=self._valid,
         )
         copied._distance = self._distance
         copied._common = self._common
         copied._section = self._section
+        copied._cut = self._cut
         return copied
 
     def isNull(self):
         # probes["shape.null_attributes"]: a real shape is not null.
-        return False
+        return self._is_null
 
     def isValid(self):
-        return True
+        return self._valid
 
     def check(self):
         return list(self._check)
@@ -166,6 +174,10 @@ class FakeShape:
     def section(self, other):
         assert self._section is not None, "unexpected section call"
         return self._section
+
+    def cut(self, other):
+        assert self._cut is not None, "unexpected cut call"
+        return self._cut
 
 
 class FakeFace:
@@ -521,7 +533,7 @@ def test_measure_distance_between_whole_objects():
 def test_measure_requires_b_for_distance_and_interference():
     box = FakeObject("Box", FakeShape())
     ctx = FakeCtx({"Box": box})
-    for mode in ("distance", "interference"):
+    for mode in ("distance", "interference", "difference"):
         with pytest.raises(protocol.ToolError) as excinfo:
             geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Box", "mode": mode})
         assert excinfo.value.code == protocol.VALIDATION_FAILED
@@ -564,6 +576,88 @@ def test_measure_interference_rejects_nonfinite_common_volume():
     assert excinfo.value.details == {
         "reason": "measurement_unavailable",
         "measurement": "common_volume",
+    }
+
+
+def test_measure_difference_volume_and_shape_facts():
+    box_a = FakeObject("BoxA", FakeShape())
+    box_b = FakeObject("BoxB", FakeShape())
+    box_a.Shape._cut = FakeShape(
+        volume=875.0,
+        solids=1,
+        bounds=(0.0, 0.0, 0.0, 10.0, 10.0, 10.0),
+    )
+    ctx = FakeCtx({"BoxA": box_a, "BoxB": box_b})
+    result = geometry.HANDLERS["measure"](
+        ctx, {"document": "Doc", "a": "BoxA", "mode": "difference", "b": "BoxB"}
+    )
+    assert result["mode"] == "difference"
+    assert result["difference_volume"] == 875.0
+    assert result["solid_count"] == 1
+    assert result["bounds"] == [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]
+    assert result["shape_valid"] is True
+    assert result["units"]["volume"] == "mm3"
+    _assert_output_schema(result, "measure")
+
+
+def test_measure_difference_empty_result():
+    box_a = FakeObject("BoxA", FakeShape())
+    box_b = FakeObject("BoxB", FakeShape())
+    box_a.Shape._cut = FakeShape(volume=0.0, solids=0, is_null=True)
+    ctx = FakeCtx({"BoxA": box_a, "BoxB": box_b})
+    result = geometry.HANDLERS["measure"](
+        ctx, {"document": "Doc", "a": "BoxA", "mode": "difference", "b": "BoxB"}
+    )
+    assert result["difference_volume"] == 0.0
+    assert result["solid_count"] == 0
+    assert result["bounds"] is None
+    assert result["shape_valid"] is True
+    _assert_output_schema(result, "measure")
+
+
+def test_measure_difference_reports_null_bounds_for_an_occ_empty_cut():
+    """OCC keeps a fully consumed cut non-null with an inverted bounding box.
+
+    Live 1.1.3 reports ``isNull() False``, ``Volume 0``, no solids and a box
+    of ±DBL_MAX for ``big.cut(small)``; reporting that box as bounds would
+    publish a nonsense extent instead of the documented empty result.
+    """
+
+    box_a = FakeObject("BoxA", FakeShape())
+    box_b = FakeObject("BoxB", FakeShape())
+    limit = sys.float_info.max
+    box_a.Shape._cut = FakeShape(
+        volume=0.0,
+        solids=0,
+        bounds=(limit, limit, limit, -limit, -limit, -limit),
+    )
+    ctx = FakeCtx({"BoxA": box_a, "BoxB": box_b})
+    result = geometry.HANDLERS["measure"](
+        ctx, {"document": "Doc", "a": "BoxA", "mode": "difference", "b": "BoxB"}
+    )
+    assert result["difference_volume"] == 0.0
+    assert result["solid_count"] == 0
+    assert result["bounds"] is None
+    _assert_output_schema(result, "measure")
+
+
+def test_measure_difference_rejects_nonfinite_volume():
+    box_a = FakeObject("BoxA", FakeShape())
+    box_b = FakeObject("BoxB", FakeShape())
+    # One solid with an unreadable volume: not the empty-result path.
+    box_a.Shape._cut = FakeShape(volume=float("nan"), solids=1)
+    ctx = FakeCtx({"BoxA": box_a, "BoxB": box_b})
+
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.HANDLERS["measure"](
+            ctx,
+            {"document": "Doc", "a": "BoxA", "mode": "difference", "b": "BoxB"},
+        )
+
+    assert excinfo.value.code == protocol.VALIDATION_FAILED
+    assert excinfo.value.details == {
+        "reason": "measurement_unavailable",
+        "measurement": "difference_volume",
     }
 
 

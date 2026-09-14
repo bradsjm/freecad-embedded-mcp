@@ -88,6 +88,7 @@ print({
 
 - `distance` returns the raw `distToShape` value. Treat a positive distance as necessary but not sufficient evidence of separation: OCC can report a positive distance while the shapes intersect (upstream issue: [distToShape returns positive value for intersecting parts](https://github.com/FreeCAD/FreeCAD/issues/25158)).
 - `interference` returns the common volume and reports `overlaps: true` only when that volume is positive. Surface-only, edge-only, or tangential contact has zero common volume and reports `overlaps: false`.
+- `difference` returns the volume of `a` that `b` does not cover (`a.cut(b)`), plus the result's `solid_count`, `bounds`, and `shape_valid`. Use it to quantify added or removed material, a protrusion, or a before/after delta. A fully consumed `a` reports `difference_volume` 0 with null bounds and no solids; the answer is a volume, not a clearance.
 - Use `distance` for clearance magnitude, `interference` for volumetric overlap, and both together with the stated tolerance for a fit decision. Report which modes a decision used.
 
 For an inherited assembly, measure the unmodified model first. Treat its interference as the baseline, not automatically as a defect.

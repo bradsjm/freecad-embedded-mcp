@@ -142,6 +142,7 @@ Require all applicable evidence:
 - The solid count matches the design.
 - The volume is positive when a solid is required.
 - The bounds match the design within a stated tolerance.
+- `measure(mode="difference")` reports the added or removed material when a change must be quantified (`difference_volume` is the material of `a` that `b` does not cover; an empty result reports `difference_volume` 0 with null bounds).
 - `measure(mode="distance")` confirms clearance magnitude.
 - `measure(mode="interference")` confirms no volumetric overlap.
 - `capture_view` in `overview` mode confirms the requested form and placement; `interior`/`fit` supplement where internal features matter.

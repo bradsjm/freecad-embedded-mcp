@@ -1664,6 +1664,194 @@ def server_version_payload(client: FreeCadMcpClient) -> dict:
     }
 
 
+def _create_object(
+    runner: Runner, doc: str, name: str, type_id: str, properties: dict | None = None
+) -> str:
+    """Create one object through ``create_object``; return its actual name."""
+
+    arguments: dict = {"document": doc, "type": type_id, "name": name}
+    if properties is not None:
+        arguments["properties"] = properties
+    created = runner.client.call_tool("create_object", arguments)
+    return str(created["object"]["name"])
+
+
+def _create_primitive_box(runner: Runner, doc: str, body: str, name: str, length: float) -> str:
+    """Create one additive 10 mm-wide box feature in ``body``; return its name."""
+
+    created = runner.client.call_tool(
+        "create_feature",
+        {
+            "document": doc,
+            "body": body,
+            "kind": "primitive",
+            "name": name,
+            "parameters": {
+                "shape": "box",
+                "mode": "additive",
+                "length": length,
+                "width": 10.0,
+                "height": 10.0,
+            },
+            "expected_solids": 1,
+        },
+    )
+    return str(created["object"]["name"])
+
+
+def _delete_objects(runner: Runner, doc: str, names: list[str]) -> list[str]:
+    """Delete each name; return one description per deletion that failed."""
+
+    failures: list[str] = []
+    for name in names:
+        try:
+            runner.client.call_tool("delete_object", {"document": doc, "object": name})
+        except (ToolFailure, ProtocolFailure) as exc:
+            failures.append(f"{name}: {exc!r}")
+    return failures
+
+
+def measure_difference_payload(runner: Runner) -> dict:
+    """``measure(mode="difference")`` over a 10 mm box and a nested 5 mm box."""
+
+    doc = runner.ensure_document()
+    big = _create_object(
+        runner, doc, "ContractDiffBig", "Part::Box", {"Length": 10.0, "Width": 10.0, "Height": 10.0}
+    )
+    small = _create_object(
+        runner, doc, "ContractDiffSmall", "Part::Box", {"Length": 5.0, "Width": 5.0, "Height": 5.0}
+    )
+    forward = runner.client.call_tool(
+        "measure", {"document": doc, "a": big, "mode": "difference", "b": small}
+    )
+    reverse = runner.client.call_tool(
+        "measure", {"document": doc, "a": small, "mode": "difference", "b": big}
+    )
+    cleanup_failures = _delete_objects(runner, doc, [big, small])
+    forward_volume = forward.get("difference_volume")
+    reverse_volume = reverse.get("difference_volume")
+    checks = {
+        "forward_volume_875": isinstance(forward_volume, (int, float))
+        and abs(float(forward_volume) - 875.0) <= 1e-6,
+        "forward_solid_count_1": forward.get("solid_count") == 1,
+        "forward_bounds_present": isinstance(forward.get("bounds"), list),
+        "reverse_volume_0": reverse_volume == 0.0,
+        "reverse_bounds_null": reverse.get("bounds") is None,
+        "cleanup": not cleanup_failures,
+    }
+    return {
+        "a": big,
+        "b": small,
+        "difference_volume": forward_volume,
+        "solid_count": forward.get("solid_count"),
+        "bounds": forward.get("bounds"),
+        "reverse_difference_volume": reverse_volume,
+        "reverse_bounds": reverse.get("bounds"),
+        "checks": checks,
+        "cleanup_failures": cleanup_failures,
+        "outcome": "ok" if all(checks.values()) else "mismatch",
+    }
+
+
+def delete_reroute_payload(runner: Runner) -> dict:
+    """Delete a mid-chain feature whose only dependent uses the BaseFeature link.
+
+    The native removal clears the dependent's ``BaseFeature`` link so the
+    feature falls back to the previous solid feature; the probe records the
+    resulting link and proves the Body result is unchanged.
+    """
+
+    doc = runner.ensure_document()
+    body = _create_object(runner, doc, "ContractRerouteBody", "PartDesign::Body")
+    features = [
+        _create_primitive_box(runner, doc, body, f"ContractReroute{index}", length)
+        for index, length in enumerate((10.0, 20.0, 30.0), 1)
+    ]
+    first, middle, third = features
+    before = runner.client.call_tool(
+        "inspect_objects",
+        {"document": doc, "detail": "full", "property_filter": ["BaseFeature"]},
+    )
+    link_before = {
+        row["name"]: (row.get("properties") or {}).get("BaseFeature")
+        for row in before["objects"]
+        if row["name"] == third
+    }
+    # A link property reads back as a canonical ``{object, subelement}``
+    # reference, and as null when the link is empty.
+    linked_to = (link_before.get(third) or {}).get("object")
+    body_before = runner.client.call_tool(
+        "validate_geometry", {"document": doc, "objects": [body]}
+    )["objects"][0]
+    deleted = runner.client.call_tool("delete_object", {"document": doc, "object": middle})
+    report = runner.client.call_tool("validate_geometry", {"document": doc, "objects": [body]})
+    entry = report["objects"][0]
+    rerouted = deleted.get("rerouted")
+    entries = rerouted if isinstance(rerouted, list) else []
+    checks = {
+        "dependent_was_linked": linked_to == middle,
+        "one_reroute_named": len(entries) == 1 and entries[0].get("feature") == third,
+        # The native removal clears the link; any other outcome is recorded,
+        # not assumed, so a build that repoints instead still reports "ok".
+        "link_cleared_or_repointed": entries and entries[0].get("baseFeature") in (None, first),
+        "body_valid": entry.get("valid") is True,
+        "body_solid_count_1": entry.get("solid_count") == 1,
+        "body_volume_unchanged": entry.get("volume") == body_before.get("volume"),
+    }
+    return {
+        "body": body,
+        "features": features,
+        "deleted": middle,
+        "dependentBaseFeatureBefore": link_before.get(third),
+        "dependentLinkedTo": linked_to,
+        "rerouted": rerouted,
+        "bodyVolumeBefore": body_before.get("volume"),
+        "bodyVolumeAfter": entry.get("volume"),
+        "body_valid": entry.get("valid"),
+        "body_solid_count": entry.get("solid_count"),
+        "checks": checks,
+        "outcome": "ok" if all(checks.values()) else "mismatch",
+    }
+
+
+def edit_session_payload(runner: Runner) -> dict:
+    """GUI state a feature creation leaves behind: no edit session at all.
+
+    ``Gui.Document.ActiveObject`` — what ``inspect_documents.editObject``
+    reports — maps to ``App::Document::getActiveObject()``, which native
+    ``addObject(..., ActivateObject)`` sets for every created object (a
+    ``run_script`` ``doc.addObject`` sets it too). It is not an edit session:
+    the session lives in ``getInEdit()``, which only ``setEdit`` opens and
+    ``resetEdit`` clears, and no add-on tool ever calls ``setEdit``.
+    """
+
+    doc = runner.ensure_document()
+    body = _create_object(runner, doc, "ContractEditBody", "PartDesign::Body")
+    feature = _create_primitive_box(runner, doc, body, "ContractEditBox", 10.0)
+    documents = runner.client.call_tool("inspect_documents", {})
+    row = next(
+        (entry for entry in documents.get("documents") or () if entry.get("name") == doc),
+        None,
+    )
+    edit_object = row.get("editObject") if isinstance(row, dict) else None
+    gui = runner.extract_payload(runner.run_program(PROGRAM_GUI_EDIT_STATE))
+    checks = {
+        "document_listed": row is not None,
+        "no_edit_session": gui.get("inEditName") is None,
+        "active_object_is_created_feature": edit_object == feature,
+        "gui_active_object_matches": gui.get("activeObject") == feature,
+    }
+    return {
+        "document": doc,
+        "createdFeature": feature,
+        "editObject": edit_object,
+        "inEditName": gui.get("inEditName"),
+        "guiActiveObject": gui.get("activeObject"),
+        "checks": checks,
+        "outcome": "ok" if all(checks.values()) else "mismatch",
+    }
+
+
 def run_constraint_forms_default(runner: Runner) -> tuple[dict, bool, dict]:
     """One verification step over the documented candidates."""
     program = DEFAULT_FORMS_PROGRAM.replace(
@@ -1795,6 +1983,27 @@ result["outcome"] = "ok" if roundtrip_holds else "roundtrip_failed"
 print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
 """
 
+# Distinguishes the two GUI states a caller can confuse: the object the
+# document reports as active (``ActiveObject``, native object activation) and
+# the object actually open in an edit session (``getInEdit``).
+PROGRAM_GUI_EDIT_STATE = """
+import json as _json
+
+import FreeCADGui as Gui
+
+gui_document = Gui.getDocument("@DOC@")
+getter = getattr(gui_document, "getInEdit", None)
+in_edit = getter() if callable(getter) else None
+active = getattr(gui_document, "ActiveObject", None)
+inner = getattr(active, "Object", active) if active is not None else None
+result = {
+    "inEditName": str(getattr(getattr(in_edit, "Object", in_edit), "Name", "")) or None,
+    "activeObject": str(getattr(inner, "Name", "")) or None,
+    "outcome": "ok",
+}
+print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
+"""
+
 
 def run_constraint_forms_sweep(runner: Runner, payloads: dict) -> None:
     """One step per candidate; aborts are observations through restarts."""
@@ -1861,6 +2070,30 @@ def run_probe_sequence(runner: Runner, payloads: dict, sweep: bool) -> None:
     for name, program in script_probes:
         payload, _crashed = runner.script_step(name, program)
         payloads[name] = payload
+
+    # Structured-tool probes: measure difference, delete reroute, and the GUI
+    # edit session a feature creation must not leave behind.
+    payloads["measure.difference"] = runner.step(
+        "measure.difference",
+        {
+            "tool": "measure",
+            "arguments": {"mode": "difference", "a": "<10mm box>", "b": "<5mm box>"},
+        },
+        lambda: measure_difference_payload(runner),
+    )[0]
+    payloads["feature.delete_reroute"] = runner.step(
+        "feature.delete_reroute",
+        {
+            "tool": "delete_object",
+            "arguments": {"object": "<middle primitive box of a three-box Body>"},
+        },
+        lambda: delete_reroute_payload(runner),
+    )[0]
+    payloads["gui.edit_session"] = runner.step(
+        "gui.edit_session",
+        {"tool": "inspect_documents", "arguments": {}},
+        lambda: edit_session_payload(runner),
+    )[0]
 
     # qt.signals: two run_script calls through one persistent session.
     qt_sent = {
