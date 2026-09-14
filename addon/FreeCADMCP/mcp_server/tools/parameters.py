@@ -40,7 +40,16 @@ from collections.abc import Callable
 from typing import Any
 
 from ..object_validation import geometry_report, mutation
-from ..protocol import VALIDATION_FAILED, ToolError, stale_generation_details
+from ..protocol import VALIDATION_FAILED, ToolError
+from ..tool_contracts import (
+    _BOUNDS_TOLERANCE,
+    _DEFAULT_BOUNDS_TOLERANCE,
+    _EXPECTED_BOUNDS,
+    _EXPECTED_GENERATION,
+    _EXPECTED_SOLIDS,
+    _GEOMETRY_REPORT,
+    require_expected_generation,
+)
 from .feature_contracts import check_workload
 
 # Property types accepted for ``add``; the FreeCAD-level
@@ -68,73 +77,6 @@ _DOC = "Added by freecad-mcp edit_parameters."
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# ---------------------------------------------------------------------------
-# Shared mutation-contract fragments.
-#
-# These mirror the fragments defined in tools/objects.py. They are copied
-# locally instead of imported because this module must stay importable — and
-# its documented host-only test suite must stay runnable — without FreeCAD,
-# while objects.py imports FreeCAD at module level.
-# ---------------------------------------------------------------------------
-
-_EXPECTED_GENERATION = {
-    "type": ["integer", "null"],
-    "minimum": 0,
-    "description": (
-        "Optional guard: refuse when the document generation no longer matches the inspected value."
-    ),
-}
-_EXPECTED_SOLIDS = {"type": "integer", "minimum": 0}
-_EXPECTED_BOUNDS = {
-    "type": "array",
-    "items": {"type": "number"},
-    "minItems": 6,
-    "maxItems": 6,
-}
-_BOUNDS_TOLERANCE = {
-    "type": "number",
-    "minimum": 0,
-    "maximum": 1000000,
-    "default": 0.000001,
-}
-_DEFAULT_BOUNDS_TOLERANCE = 0.000001
-
-_GEOMETRY_REPORT = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "name",
-        "state",
-        "object_valid",
-        "shape_valid",
-        "solid_count",
-        "volume",
-        "bounds",
-        "diagnostics",
-        "max_tolerance",
-        "ok",
-        "error",
-    ],
-    "properties": {
-        "name": {"type": "string"},
-        "state": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
-        "object_valid": {"type": "boolean"},
-        "shape_valid": {"type": ["boolean", "null"]},
-        "solid_count": {"type": ["integer", "null"], "minimum": 0},
-        "volume": {"type": ["number", "null"]},
-        "bounds": {
-            "type": ["array", "null"],
-            "items": {"type": "number"},
-            "minItems": 6,
-            "maxItems": 6,
-        },
-        "diagnostics": {"type": "array", "items": {"type": "string"}, "maxItems": 64},
-        "max_tolerance": {"type": ["number", "null"]},
-        "ok": {"type": "boolean"},
-        "error": {"type": ["string", "null"]},
-        "geometryUnavailable": {"type": "string", "minLength": 1},
-    },
-}
 _UNITS = {
     "type": "object",
     "additionalProperties": False,
@@ -570,31 +512,16 @@ def _validate_all(obj: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _require_expected_generation(ctx: Any, doc: Any, arguments: dict[str, Any]) -> None:
-    """Refuse a plan made against a stale document generation.
-
-    Mirrors the shared preflight in tools/objects.py, including its error
-    shape; kept local so the handler stays runnable on the host-only
-    FreeCAD doubles.
-    """
-
-    expected = arguments.get("expected_generation")
-    if expected is None:
-        return
-    actual = int(ctx.document_generation(doc))
-    if expected == actual:
-        return
-    raise ToolError(
-        VALIDATION_FAILED,
-        "document changed since inspection; re-run inspect_objects",
-        stale_generation_details(expected, actual, "inspect_objects"),
-    )
-
-
 def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     doc = ctx.require_document(arguments["document"])
     obj = ctx.require_object(doc, arguments["object"])
-    _require_expected_generation(ctx, doc, arguments)
+    require_expected_generation(
+        ctx,
+        doc,
+        arguments,
+        message="document changed since inspection; re-run inspect_objects",
+        next_tool="inspect_objects",
+    )
 
     plan = _validate_all(obj, arguments)
 

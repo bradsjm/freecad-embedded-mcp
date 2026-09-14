@@ -28,6 +28,7 @@ import MeshPart
 import Part
 
 from .. import protocol
+from ..gui_state import capture_selection_snapshot, restore_selection_snapshot
 from ..object_validation import geometry_report, shape_is_null
 from ..protocol import ToolError
 
@@ -604,8 +605,6 @@ def _verify_reopened_copy(doc: Any, reopened: Any) -> None:
 
 
 def _export_fcstd(ctx: Any, doc: Any, destination: str) -> dict[str, Any]:
-    from .view import _capture_selection_snapshot
-
     original_file_name = str(doc.FileName)
     original_modified = _modified_flag(doc)
     active_document_name: str | None = None
@@ -618,7 +617,7 @@ def _export_fcstd(ctx: Any, doc: Any, destination: str) -> dict[str, Any]:
     # opening the hidden verification copy can disturb the active document
     # and selection, so face/edge selections are captured as native
     # SelectionObjects and restored exactly, not as lossy name lists.
-    selection_snapshots = _capture_selection_snapshot(ctx)
+    selection_snapshots = capture_selection_snapshot(ctx)
 
     staged = _staged_path(destination, _EXTENSIONS["fcstd"])
     reopened = None
@@ -722,13 +721,12 @@ def _restore_presentation(
 ) -> list[dict[str, str]]:
     """Restore the caller's active document and selection; return failures.
 
-    ``selection_snapshots`` is the capture_view selection snapshot taken
-    before any GUI state changed; it restores subelement selections exactly.
+    ``selection_snapshots`` is the shared selection snapshot (``gui_state``)
+    taken before any GUI state changed; it restores subelement selections
+    exactly.
     Every restore step runs. The caller attaches failures to the primary
     export error when another failure already exists.
     """
-
-    from .view import _restore_selection_snapshot
 
     failures: list[dict[str, str]] = []
 
@@ -749,7 +747,7 @@ def _restore_presentation(
     if active_document_name is not None:
         _protect("active_document", _restore_active_document)
     if hasattr(ctx, "Gui"):
-        _protect("selection", lambda: _restore_selection_snapshot(ctx, selection_snapshots))
+        _protect("selection", lambda: restore_selection_snapshot(ctx, selection_snapshots))
     return failures
 
 

@@ -35,7 +35,8 @@ from itertools import pairwise
 from typing import Any
 
 from ..object_validation import mutation
-from ..protocol import VALIDATION_FAILED, ToolError, check_schema, stale_generation_details
+from ..protocol import VALIDATION_FAILED, ToolError, check_schema
+from ..tool_contracts import require_expected_generation
 
 _MAX_SKETCH_ROWS = 4096
 _MAX_STATE_NAMES = 32
@@ -505,6 +506,8 @@ _INSPECT_SKETCH_OUTPUT = {
         "geometryTruncated",
         "constraintsTruncated",
         "expressionBindingsTruncated",
+        "geometryUnavailable",
+        "constraintsUnavailable",
     ],
     "properties": {
         "document": {"type": "string"},
@@ -542,6 +545,8 @@ _INSPECT_SKETCH_OUTPUT = {
         "geometryTruncated": {"type": "boolean"},
         "constraintsTruncated": {"type": "boolean"},
         "expressionBindingsTruncated": {"type": "boolean"},
+        "geometryUnavailable": {"type": ["string", "null"], "maxLength": 256},
+        "constraintsUnavailable": {"type": ["string", "null"], "maxLength": 256},
     },
 }
 
@@ -707,6 +712,10 @@ TOOL_DEFINITIONS = [
             "opens an edit session, so solverStatus is null (edit_sketch "
             "reports the post-batch solve status). "
             "Unavailable native getters report null or empty fields. "
+            "geometryUnavailable and constraintsUnavailable carry the "
+            "reason when FreeCAD refuses to read that collection (null "
+            "when readable); a marked collection's rows and count are "
+            "placeholders, not verified empty data. "
             "geometry, constraints and expressionBindings cap at 4096 "
             "rows; the Count fields report full totals and the Truncated "
             "flags mark capping."
@@ -756,11 +765,33 @@ def _fail(message: str) -> ToolError:
     return ToolError(VALIDATION_FAILED, message)
 
 
+def _duplicate_index_details(operation: str, index: int) -> dict:
+    """Machine-readable refusal details for a repeated target index."""
+
+    return {"reason": "duplicate_index", "operation": operation, "index": index}
+
+
+def _collection_unavailable(collection: str, exc: BaseException) -> ToolError:
+    """Build a refusal for an unreadable native sketch collection."""
+
+    return ToolError(
+        VALIDATION_FAILED,
+        f"cannot read sketch {collection}; re-run inspect_sketch",
+        {
+            "reason": "collection_unavailable",
+            "collection": collection,
+            "error": f"{type(exc).__name__}: {exc}"[:256],
+            "nextTool": "inspect_sketch",
+        },
+    )
+
+
 def _reject_duplicate_indexes(indexes: list, operation: str) -> None:
     """Refuse a repeated index, which descending deletion would mis-target.
 
     Non-integer entries are skipped here: the per-index bounds check
-    reports the bad type with the existing message.
+    reports the bad type with the existing message. The refusal carries
+    stable ``duplicate_index`` details naming the operation and index.
     """
 
     seen: set = set()
@@ -768,7 +799,11 @@ def _reject_duplicate_indexes(indexes: list, operation: str) -> None:
         if isinstance(index, bool) or not isinstance(index, int):
             continue
         if index in seen:
-            raise _fail(f"{operation} lists index {index} more than once")
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"{operation} lists index {index} more than once",
+                _duplicate_index_details(operation, index),
+            )
         seen.add(index)
 
 
@@ -1004,25 +1039,50 @@ def _solver_summary(sketch: Any, run_solve: bool = False) -> dict:
     }
 
 
-def _geometry_rows(sketch: Any) -> tuple[list[dict], int]:
+def _geometry_rows(sketch: Any) -> tuple[list[dict], int, str | None]:
+    """Read geometry rows, or explain a collection FreeCAD refuses to read.
+
+    A native read failure returns empty rows and count zero together
+    with a bounded reason string, so an unreadable collection is never
+    published as verified empty data; a normal empty sketch reads as
+    empty with a null reason.
+    """
+
     try:
-        geometry = list(getattr(sketch, "Geometry", ()) or ())
-    except Exception:
-        return [], 0
-    return [
-        _geometry_row(index, geo, sketch) for index, geo in enumerate(geometry[:_MAX_SKETCH_ROWS])
-    ], len(geometry)
+        geometry = list(sketch.Geometry or ())
+    except Exception as exc:
+        return [], 0, f"reading Geometry failed: {type(exc).__name__}: {exc}"[:256]
+    return (
+        [
+            _geometry_row(index, geo, sketch)
+            for index, geo in enumerate(geometry[:_MAX_SKETCH_ROWS])
+        ],
+        len(geometry),
+        None,
+    )
 
 
-def _constraint_rows(sketch: Any) -> tuple[list[dict], int]:
+def _constraint_rows(sketch: Any) -> tuple[list[dict], int, str | None]:
+    """Read constraint rows, or explain a collection FreeCAD refuses to read.
+
+    A native read failure returns empty rows and count zero together
+    with a bounded reason string, so an unreadable collection is never
+    published as verified empty data; a normal empty sketch reads as
+    empty with a null reason.
+    """
+
     try:
-        constraints = list(getattr(sketch, "Constraints", ()) or ())
-    except Exception:
-        return [], 0
-    return [
-        _constraint_row(index, constraint)
-        for index, constraint in enumerate(constraints[:_MAX_SKETCH_ROWS])
-    ], len(constraints)
+        constraints = list(sketch.Constraints or ())
+    except Exception as exc:
+        return [], 0, f"reading Constraints failed: {type(exc).__name__}: {exc}"[:256]
+    return (
+        [
+            _constraint_row(index, constraint)
+            for index, constraint in enumerate(constraints[:_MAX_SKETCH_ROWS])
+        ],
+        len(constraints),
+        None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1628,13 +1688,13 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
     """Validate every operation against a simulated index state."""
 
     try:
-        geometry_count = len(list(getattr(sketch, "Geometry", ()) or ()))
-    except Exception:
-        geometry_count = 0
+        geometry_count = len(list(sketch.Geometry or ()))
+    except Exception as exc:
+        raise _collection_unavailable("Geometry", exc) from exc
     try:
-        constraint_count = len(list(getattr(sketch, "Constraints", ()) or ()))
-    except Exception:
-        constraint_count = 0
+        constraint_count = len(list(sketch.Constraints or ()))
+    except Exception as exc:
+        raise _collection_unavailable("Constraints", exc) from exc
 
     delete_geometry = arguments.get("deleteGeometry") or []
     delete_constraints = arguments.get("deleteConstraints") or []
@@ -1820,9 +1880,21 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
                 f"final constraint state of {final_constraint_count} constraints"
             )
         if index in expression_indexes:
-            raise _fail(f"setExpressions[{position}] duplicates constraint index {index}")
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"setExpressions[{position}] duplicates constraint index {index}",
+                _duplicate_index_details("setExpressions", index),
+            )
         if index in datum_indexes:
-            raise _fail(f"constraint index {index} cannot receive both a datum and an expression")
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"constraint index {index} cannot receive both a datum and an expression",
+                {
+                    "reason": "conflicting_constraint_edit",
+                    "operation": "setExpressions",
+                    "index": index,
+                },
+            )
         expression = entry.get("expression")
         if expression is not None:
             target_type = final_types[index] if index < len(final_types) else None
@@ -1904,8 +1976,8 @@ def _inspect_sketch(ctx: Any, arguments: dict) -> dict:
     doc = ctx.require_document(arguments["document"])
     sketch = ctx.require_object(doc, arguments["sketch"])
     _require_sketch(sketch)
-    geometry, geometry_count = _geometry_rows(sketch)
-    constraints, constraints_count = _constraint_rows(sketch)
+    geometry, geometry_count, geometry_unavailable = _geometry_rows(sketch)
+    constraints, constraints_count, constraints_unavailable = _constraint_rows(sketch)
     bindings_all = _expression_bindings_all(sketch)
     return {
         "document": str(getattr(doc, "Name", "")),
@@ -1923,30 +1995,22 @@ def _inspect_sketch(ctx: Any, arguments: dict) -> dict:
         "geometryTruncated": geometry_count > _MAX_SKETCH_ROWS,
         "constraintsTruncated": constraints_count > _MAX_SKETCH_ROWS,
         "expressionBindingsTruncated": len(bindings_all) > _MAX_SKETCH_ROWS,
+        "geometryUnavailable": geometry_unavailable,
+        "constraintsUnavailable": constraints_unavailable,
     }
-
-
-def _require_expected_generation(ctx: Any, doc: Any, arguments: dict) -> None:
-    """Refuse a batch planned against a stale document generation."""
-
-    expected = arguments.get("expected_generation")
-    if expected is None:
-        return
-    actual = int(ctx.document_generation(doc))
-    if expected == actual:
-        return
-    raise ToolError(
-        VALIDATION_FAILED,
-        "sketch changed since inspection; re-run inspect_sketch",
-        stale_generation_details(expected, actual, "inspect_sketch"),
-    )
 
 
 def _edit_sketch(ctx: Any, arguments: dict) -> dict:
     doc = ctx.require_document(arguments["document"])
     sketch = ctx.require_object(doc, arguments["sketch"])
     _require_sketch(sketch)
-    _require_expected_generation(ctx, doc, arguments)
+    require_expected_generation(
+        ctx,
+        doc,
+        arguments,
+        message="sketch changed since inspection; re-run inspect_sketch",
+        next_tool="inspect_sketch",
+    )
     plan = _plan_sketch_edit(sketch, arguments)
 
     with mutation(ctx, doc, f"edit_sketch:{sketch.Name}", [sketch], expected_solids=0):

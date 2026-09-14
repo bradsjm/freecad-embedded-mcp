@@ -22,6 +22,17 @@ under :func:`_require_approved`; a mismatch is a CONSENT_DENIED
 ``target_changed`` tool error that mutates nothing and makes the client
 request fresh consent.
 
+Generations
+-----------
+
+Every live-document lifecycle result carries a nonnegative ``generation``
+read through ``ctx.document_generation`` while the document is live.
+``close_document`` captures it immediately before the native close, so the
+result reports the final known generation of the closed instance;
+``save_document`` reports the generation of the saved document after the
+write. Output schemas require the field, so registration validation and
+runtime payloads stay aligned.
+
 Dirty-state detection
 ---------------------
 
@@ -214,11 +225,19 @@ def _document_consent_target(ctx: Any, doc: Any, *, purpose: str, message: str) 
     }
 
 
-def _document_payload(doc: Any, *, path: str | None = None) -> dict[str, Any]:
+def _document_payload(ctx: Any, doc: Any, *, path: str | None = None) -> dict[str, Any]:
+    """Identity fields of one live document plus its current generation.
+
+    ``generation`` is the server's monotonic per-name counter read while
+    ``doc`` is live, so callers can detect staleness after lifecycle
+    effects. ``path`` is included only when the caller passes it.
+    """
+
     payload: dict[str, Any] = {
         "name": str(doc.Name),
         "label": str(doc.Label),
         "objectCount": len(getattr(doc, "Objects", None) or ()),
+        "generation": int(ctx.document_generation(doc)),
     }
     if path is not None:
         payload["path"] = str(path)
@@ -323,9 +342,10 @@ _DOCUMENT_COUNT_PROPERTIES = {
     "name": {"type": "string", "minLength": 1},
     "label": {"type": "string"},
     "objectCount": {"type": "integer", "minimum": 0},
+    "generation": {"type": "integer", "minimum": 0},
 }
 
-_DOCUMENT_COUNT_REQUIRED = ["name", "label", "objectCount"]
+_DOCUMENT_COUNT_REQUIRED = ["name", "label", "objectCount", "generation"]
 
 
 def _definition(
@@ -358,9 +378,9 @@ TOOL_DEFINITIONS = [
     _definition(
         "new_document",
         "Create a new empty FreeCAD document and return its actual sanitized "
-        "Name, Label and object count. The requested name is sanitized and "
-        "de-duplicated by FreeCAD; only the returned Name is a valid "
-        "document identity for later calls.",
+        "Name, Label, object count and current generation. The requested name "
+        "is sanitized and de-duplicated by FreeCAD; only the returned Name is "
+        "a valid document identity for later calls.",
         {
             "name": {
                 "type": "string",
@@ -376,7 +396,8 @@ TOOL_DEFINITIONS = [
     _definition(
         "open_document",
         "Open an existing .FCStd document from an allowed root and return its "
-        "actual Name, Label, object count and file path. Untrusted opens "
+        "actual Name, Label, object count, file path and current generation. "
+        "Untrusted opens "
         "(the default) require MRTR consent first, because loading an FCStd "
         "file can execute embedded Python; a granted consent never certifies "
         "the file safe. A failed load removes only documents the failure "
@@ -406,7 +427,8 @@ TOOL_DEFINITIONS = [
         "``path`` is an actionable error. An explicit ``path`` performs a "
         "native save-as: saving to the document's own current file is normal "
         "behavior, while saving over a different existing file requires "
-        "overwrite consent first.",
+        "overwrite consent first. The result reports the saved path and the "
+        "document's generation after the write.",
         {
             "document": _DOCUMENT_SCHEMA,
             "path": {
@@ -419,32 +441,35 @@ TOOL_DEFINITIONS = [
         {
             "document": {"type": "string", "minLength": 1},
             "path": {"type": "string", "minLength": 1},
+            "generation": {"type": "integer", "minimum": 0},
         },
-        ["document", "path"],
+        ["document", "path", "generation"],
     ),
     _definition(
         "close_document",
         "Close exactly one document. A dirty or unsaved nonempty document "
         "requires MRTR consent first; unsaved changes are then discarded. "
-        "Only the named document is closed. The result reports the path and "
-        "whether the pre-close state discarded unsaved changes.",
+        "Only the named document is closed. The result reports the path, "
+        "whether the pre-close state discarded unsaved changes, and the "
+        "document's final known generation.",
         {"document": _DOCUMENT_SCHEMA},
         ["document"],
         {
             "document": {"type": "string", "minLength": 1},
             "path": {"type": ["string", "null"]},
             "discardedChanges": {"type": "boolean"},
+            "generation": {"type": "integer", "minimum": 0},
         },
-        ["document", "path", "discardedChanges"],
+        ["document", "path", "discardedChanges", "generation"],
     ),
     _definition(
         "reload_document",
         "Reload a document from its saved .FCStd file: requires a saved "
         "existing path, asks for dirty-discard consent when the document is "
         "dirty, then closes and reopens it. Returns the actual reopened "
-        "Name, Label, object count and file path. If reopening fails after "
-        "the close, the error says so truthfully; no rollback is claimed "
-        "because the old in-memory document is already gone.",
+        "Name, Label, object count, file path and generation. If reopening "
+        "fails after the close, the error says so truthfully; no rollback is "
+        "claimed because the old in-memory document is already gone.",
         {"document": _DOCUMENT_SCHEMA},
         ["document"],
         {
@@ -470,7 +495,7 @@ def _new_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         raise ToolError(
             VALIDATION_FAILED, f"creating document '{name}' failed: {_describe(exc)}"
         ) from exc
-    return _document_payload(doc)
+    return _document_payload(ctx, doc)
 
 
 def _open_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -512,7 +537,7 @@ def _open_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             f"failed to open '{canonical}': {_describe(exc)}",
             details,
         ) from exc
-    payload = _document_payload(doc, path=doc.FileName)
+    payload = _document_payload(ctx, doc, path=doc.FileName)
     # FreeCAD returns the already-open document for a path that is open
     # instead of re-reading the file. Say so: the in-memory document may
     # hold unsaved changes the caller did not expect to see.
@@ -561,7 +586,11 @@ def _save_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             VALIDATION_FAILED,
             f"saving document '{doc.Name}' left it without a file path",
         )
-    return {"document": doc.Name, "path": saved_path}
+    return {
+        "document": doc.Name,
+        "path": saved_path,
+        "generation": int(ctx.document_generation(doc)),
+    }
 
 
 def _close_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -572,6 +601,9 @@ def _close_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         _require_approved(ctx, _close_preflight(ctx, arguments))
     name = str(doc.Name)
     path = str(getattr(doc, "FileName", "")) or None
+    # Read while the document is still live; reported as the result's final
+    # known generation of the closed document.
+    generation = int(ctx.document_generation(doc))
     try:
         ctx.App.closeDocument(name)
     except Exception as exc:
@@ -583,6 +615,7 @@ def _close_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         "document": name,
         "path": path,
         "discardedChanges": discarded_changes,
+        "generation": generation,
     }
 
 
@@ -610,7 +643,7 @@ def _reload_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             f"document '{name}' was closed, but reopening '{path}' failed: "
             f"{_describe(exc)}; the document is no longer open",
         ) from exc
-    return _document_payload(reopened, path=reopened.FileName)
+    return _document_payload(ctx, reopened, path=reopened.FileName)
 
 
 HANDLERS = {

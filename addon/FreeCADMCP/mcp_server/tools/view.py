@@ -56,6 +56,7 @@ import FreeCAD
 
 from .. import topology_query as tq
 from ..gui_dispatch import _flush_gui_events
+from ..gui_state import capture_selection_snapshot, restore_selection_snapshot
 from ..protocol import VALIDATION_FAILED, ToolError
 
 # Orientation names accepted for capture_view, mapped to the View3DInventor
@@ -1099,46 +1100,6 @@ def _gui_document(ctx: Any, document: str) -> Any:
     return gui_doc
 
 
-def _capture_selection_snapshot(ctx: Any) -> list[dict[str, Any]]:
-    """Subelement-preserving selection snapshot across all documents.
-
-    ``clearSelection`` wipes the selection of every document, so the
-    caller's selection — including face/edge subelement selections that
-    plain object lists lose — is captured as per-document
-    ``SelectionObject`` snapshots and restored exactly.
-    """
-
-    snapshots: list[dict[str, Any]] = []
-    try:
-        documents = list(ctx.App.listDocuments().values())
-    except Exception:
-        documents = []
-    for doc in documents:
-        try:
-            selection_ex = ctx.Gui.Selection.getSelectionEx(str(doc.Name))
-        except Exception:
-            continue
-        for selected in selection_ex:
-            obj = getattr(selected, "Object", None)
-            if obj is None:
-                continue
-            subelements = [str(sub) for sub in (selected.SubElementNames or [])]
-            snapshots.append({"object": obj, "subelements": subelements})
-    return snapshots
-
-
-def _restore_selection_snapshot(ctx: Any, snapshots: list[dict[str, Any]]) -> None:
-    ctx.Gui.Selection.clearSelection()
-    for snapshot in snapshots:
-        obj = snapshot["object"]
-        subelements = snapshot["subelements"]
-        if subelements:
-            for subelement in subelements:
-                ctx.Gui.Selection.addSelection(obj, subelement)
-        else:
-            ctx.Gui.Selection.addSelection(obj)
-
-
 def _native_subelement_label(selection: Mapping | None) -> str | None:
     """The native FaceN/EdgeN label for a resolved subshape, or None.
 
@@ -1368,7 +1329,7 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     active_doc = ctx.App.ActiveDocument
     if active_doc is not None:
         previous_active = str(active_doc.Name)
-    previous_selection = _capture_selection_snapshot(ctx)
+    previous_selection = capture_selection_snapshot(ctx)
 
     # Navigation animations are disabled around the orientation changes
     # and framing so saveImage never captures a mid-animation stale camera
@@ -1447,7 +1408,7 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             ) from exc
     finally:
         guard = _RestoreGuard()
-        guard.protect("selection", lambda: _restore_selection_snapshot(ctx, previous_selection))
+        guard.protect("selection", lambda: restore_selection_snapshot(ctx, previous_selection))
         if previous_active is not None:
 
             def restore_active_documents() -> None:
@@ -1608,7 +1569,7 @@ def _capture_single_view(
     size: tuple[int, int],
     apply_camera: Any = None,
 ) -> tuple[bytes, list[dict[str, Any]], int, int]:
-    """One single-panel capture (legacy single view or detail mode).
+    """Capture one detail panel with the resolved camera and target.
 
     ``size`` was resolved by the caller before the session opened, so a
     size refusal never touches view state. The manifest reports one entry

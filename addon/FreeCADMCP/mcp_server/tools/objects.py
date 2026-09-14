@@ -33,11 +33,18 @@ from ..protocol import (
     ProtocolError,
     ToolError,
     fingerprint,
-    stale_generation_details,
     validate_schema,
 )
+from ..tool_contracts import (
+    _BOUNDS_TOLERANCE,
+    _DEFAULT_BOUNDS_TOLERANCE,
+    _EXPECTED_BOUNDS,
+    _EXPECTED_GENERATION,
+    _EXPECTED_SOLIDS,
+    _GEOMETRY_REPORT,
+    require_expected_generation,
+)
 
-_MAX_LIMIT = 500
 _MAX_LINKS = 64
 _MAX_FILTER = 64
 _MAX_PROPERTY_PAGE = 64
@@ -249,56 +256,9 @@ _XYZ = {
 #: decided by the resolver, not by this schema union.
 _CANONICAL_REF = {"$ref": "#/$defs/topologyTarget"}
 
-_DOCUMENT_FIELD = {"type": "string", "minLength": 1}
-_NAME_FIELD = {"type": "string", "minLength": 1}
-_EXPECTED_SOLIDS = {"type": "integer", "minimum": 0}
 _PROPERTIES_MAP = {"type": "object", "additionalProperties": _INPUT_PROPERTY_VALUE}
 _GENERATION = {"type": "integer", "minimum": 0}
-_EXPECTED_GENERATION = {
-    "type": ["integer", "null"],
-    "minimum": 0,
-    "description": (
-        "Optional guard: refuse when the document generation no longer matches the inspected value."
-    ),
-}
 _APPLIED = {"type": "array", "items": {"type": "string"}, "maxItems": 512}
-
-_GEOMETRY_REPORT = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "name",
-        "state",
-        "object_valid",
-        "shape_valid",
-        "solid_count",
-        "volume",
-        "bounds",
-        "diagnostics",
-        "max_tolerance",
-        "ok",
-        "error",
-    ],
-    "properties": {
-        "name": {"type": "string"},
-        "state": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
-        "object_valid": {"type": "boolean"},
-        "shape_valid": {"type": ["boolean", "null"]},
-        "solid_count": {"type": ["integer", "null"], "minimum": 0},
-        "volume": {"type": ["number", "null"]},
-        "bounds": {
-            "type": ["array", "null"],
-            "items": {"type": "number"},
-            "minItems": 6,
-            "maxItems": 6,
-        },
-        "geometryUnavailable": {"type": "string", "minLength": 1},
-        "diagnostics": {"type": "array", "items": {"type": "string"}, "maxItems": 16},
-        "max_tolerance": {"type": ["number", "null"]},
-        "ok": {"type": "boolean"},
-        "error": {"type": ["string", "null"]},
-    },
-}
 
 _OBJECT_IDENTITY = {
     "type": "object",
@@ -710,19 +670,6 @@ _MUTATION_OUTPUT_DEFS = {
 
 _DOCUMENT_FIELD = {"type": "string", "minLength": 1}
 _NAME_FIELD = {"type": "string", "minLength": 1}
-_EXPECTED_SOLIDS = {"type": "integer", "minimum": 0}
-_EXPECTED_BOUNDS = {
-    "type": "array",
-    "items": {"type": "number"},
-    "minItems": 6,
-    "maxItems": 6,
-}
-_BOUNDS_TOLERANCE = {
-    "type": "number",
-    "minimum": 0,
-    "maximum": 1000000,
-    "default": 0.000001,
-}
 _RESPONSE_DETAIL = {
     "type": "string",
     "enum": ["compact", "full"],
@@ -842,6 +789,7 @@ _DELETE_INPUT = {
     "properties": {
         "document": _DOCUMENT_FIELD,
         "object": _NAME_FIELD,
+        "expected_generation": _EXPECTED_GENERATION,
     },
 }
 
@@ -1165,22 +1113,6 @@ TOOL_DEFINITIONS = [
 
 def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
-
-
-def _require_expected_generation(ctx: Any, doc: Any, arguments: dict) -> None:
-    """Refuse an edit planned against a stale document generation."""
-
-    expected = arguments.get("expected_generation")
-    if expected is None:
-        return
-    actual = int(ctx.document_generation(doc))
-    if expected == actual:
-        return
-    raise ToolError(
-        VALIDATION_FAILED,
-        "document changed since inspection; re-run inspect_objects",
-        stale_generation_details(expected, actual, "inspect_objects"),
-    )
 
 
 def _label(obj: Any) -> str:
@@ -3183,9 +3115,6 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
     }
 
 
-_DEFAULT_BOUNDS_TOLERANCE = 0.000001
-
-
 def _snapshot_requested(
     obj: Any, properties: dict, *, ctx: Any = None, doc: Any = None
 ) -> list[tuple[str, Any]]:
@@ -3375,7 +3304,13 @@ def create_object(ctx: Any, args: dict) -> dict:
 def edit_object(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
     obj = ctx.require_object(doc, str(args["object"]))
-    _require_expected_generation(ctx, doc, args)
+    require_expected_generation(
+        ctx,
+        doc,
+        args,
+        message="document changed since inspection; re-run inspect_objects",
+        next_tool="inspect_objects",
+    )
     properties = args["properties"]
     if not isinstance(properties, dict) or not properties:
         raise ToolError(VALIDATION_FAILED, "properties must be a non-empty object")
@@ -3500,6 +3435,13 @@ def _reroutes_via_base_feature(dependent: Any, target: Any) -> bool:
 def delete_object(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
     obj = ctx.require_object(doc, str(args["object"]))
+    require_expected_generation(
+        ctx,
+        doc,
+        args,
+        message="document changed since inspection; re-run inspect_objects",
+        next_tool="inspect_objects",
+    )
     name = str(getattr(obj, "Name", ""))
     blocking: list[str] = []
     reroute_candidates: list[str] = []
@@ -3555,7 +3497,13 @@ def delete_object(ctx: Any, args: dict) -> dict:
 
 def edit_objects(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
-    _require_expected_generation(ctx, doc, args)
+    require_expected_generation(
+        ctx,
+        doc,
+        args,
+        message="document changed since inspection; re-run inspect_objects",
+        next_tool="inspect_objects",
+    )
     edits = args["edits"]
     detail = str(args.get("response_detail") or "compact")
     queries = _PreparedQueries(ctx, doc)

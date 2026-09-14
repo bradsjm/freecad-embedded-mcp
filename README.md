@@ -304,7 +304,7 @@ The server registers 26 tools. `run_script` is hidden unless the
 
 `App::PropertyPlacement` values use `{"position": [x, y, z], "axis": [x, y, z], "angle_deg": n}`. The legacy `{"Base": ..., "Rotation": ...}` form is also accepted. Object bounds and `expected_bounds` use document-space `[xmin, ymin, zmin, xmax, ymax, zmax]` order.
 
-Document creation, opening, and reloading return `name`, `label`, and `objectCount`. Use the returned `name` as the `document` argument in later calls.
+Document lifecycle results carry a `generation`; creation, opening, and reloading also return `name`, `label`, and `objectCount`. Use the returned `name` as the `document` argument and the `generation` as freshness evidence for later calls.
 
 Structured object, parameter, sketch, and feature edits use MCP-owned transactions and refuse to nest inside a user's active transaction. A failed edit aborts and recomputes the restored document; rollback failures are reported separately. New volumetric geometry defaults to one solid unless `expected_solids` specifies otherwise. Existing valid dependent solid counts are preserved when their inputs change.
 

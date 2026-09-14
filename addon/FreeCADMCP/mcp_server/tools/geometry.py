@@ -42,8 +42,8 @@ from ..protocol import (
     fingerprint,
     stale_generation_details,
 )
+from ..tool_contracts import _DEFAULT_BOUNDS_TOLERANCE
 
-_DEFAULT_BOUNDS_TOLERANCE = 0.000001
 _MAX_CARDINALITY_CANDIDATES = 16
 _MAX_CURVES = 32
 _MAX_FACES = 64
@@ -2023,7 +2023,7 @@ def fingerprints_match(expected: Any, fresh: Any) -> bool:
     """Strict same-index correspondence between two subshape fingerprints.
 
     True only when both fingerprints are complete (no
-    :func:`_fingerprint_gaps`) and agree exactly on the discrete fields
+    (``_fingerprint_gaps``) and agree exactly on the discrete fields
     (role, mapped type, closed status) and within ``_DEFAULT_BOUNDS_TOLERANCE``
     on every geometric field. A geometric field readable in only one of the
     two is a mismatch, while fields neither one carries (an inapplicable

@@ -580,6 +580,7 @@ def test_close_document_clean_closes_without_consent(tmp_path):
         "document": "clean",
         "path": clean.FileName,
         "discardedChanges": False,
+        "generation": 1,
     }
     assert "clean" not in ctx.App.documents
 

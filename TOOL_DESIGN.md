@@ -68,7 +68,7 @@ Refusals carry the reason a model needs to proceed: `details.reason` as a stable
 
 Application failures are complete tool results with `isError: true` and a structured `{code, message, details}` payload. Only protocol-level violations become JSON-RPC errors. A model never parses a traceback; it reads `code`, `reason`, and `details`.
 
-The codes are a closed set: `DOCUMENT_NOT_FOUND`, `OBJECT_NOT_FOUND`, `VALIDATION_FAILED`, `GUI_DISPATCH_FAILED`, `CONSENT_DENIED`, `PATH_NOT_ALLOWED`, `UNSUPPORTED_VIEW`, `SOLVER_FAILED`, `SERVER_BUSY`.
+The codes are a closed set: `DOCUMENT_NOT_FOUND`, `OBJECT_NOT_FOUND`, `VALIDATION_FAILED`, `GUI_DISPATCH_FAILED`, `GUI_DISPATCH_STUCK`, `CONSENT_DENIED`, `PATH_NOT_ALLOWED`, `UNSUPPORTED_VIEW`, `SOLVER_FAILED`, `SERVER_BUSY`.
 
 **Two fields make errors recoverable rather than terminal**:
 
@@ -108,9 +108,10 @@ Expensive feature operations first write a verified recovery copy (`checkpoint`)
 
 ### 9. Danger is explicit and consented
 
-Some operations touch the world outside the document graph: reading an untrusted file, overwriting a file, discarding unsaved work. The tools make these operations possible but never silent.
+Some operations touch the world outside the document graph: reading an untrusted file, overwriting a file, discarding unsaved work. The tools make these operations possible but never silent when the client supports the consent form contract.
 
 - Consent targets: untrusted document open, STEP/STL import, overwrite-style save, dirty or unsaved close, dirty reload, export overwrite. Consent is a round trip: the server returns `InputRequired`, the client answers, and the retry carries an HMAC-signed single-use `requestState` that binds principal, method, arguments, and target fingerprints. A model cannot obtain consent for target A and spend it on target B.
+- Clients without `elicitation.form` use the documented 1.0 compatibility fallback and proceed without the prompt. This is an intentional capability downgrade, not a second consent protocol; the host records each bypass in the Report view.
 - `allowed_roots` contains every file-touching tool and the FEM working directory. A path outside containment fails in preflight, before any file effect. `run_script` is the documented exception: it is full local code execution with the user's privileges, which is why it is opt-in, hidden by default, and answered with `METHOD_NOT_FOUND` before schema validation when disabled.
 - Discovery reports `scriptingEnabled` and `recoveryEnabled`, so a model reads the active policy instead of probing for it.
 
@@ -199,6 +200,6 @@ Apply these tests before adding a tool, a parameter, or a behavior. A capability
 5. **Writes carry expectations.** Any tool that changes geometry accepts `expected_solids` / `expected_bounds` / `expected_generation` as applicable, and reports `operationState` honestly.
 6. **Results self-identify.** New results carry `document` and `generation` where state matters, report actual names, and validate against an `outputSchema`.
 7. **Bound the payload.** Choose a limit from the design space, not the native maximum, and add pagination or a `detail` switch before the payload can crowd a context window.
-8. **Make danger explicit.** New file effects join the consent targets and the `allowed_roots` preflight. New expensive operations join the checkpoint list. Nothing risky ships silent.
+8. **Make danger explicit.** New file effects join the consent targets and the `allowed_roots` preflight. New expensive operations join the checkpoint list. Nothing risky ships silent when the client supports the consent contract; documented legacy fallback remains explicit.
 
 The one-sentence version: surface the model's intent as closed parameters, return the server's effect as self-describing evidence, refuse what cannot be proven safe before it runs, and make every failure the first step of recovery.
