@@ -523,10 +523,11 @@ def test_geometry_report_bounds_use_the_document_space_reading() -> None:
     assert report["ok"] is True
 
 
-def test_geometry_report_falls_back_to_local_bounds_when_unplaceable() -> None:
+def test_geometry_report_marks_document_bounds_unavailable_when_unplaceable() -> None:
     report = geometry_report(_CurvedObject(placeable=False))
 
-    assert report["bounds"] == [-2.9988, -2.9997, 0.0, 3.0, 2.9997, 20.0]
+    assert report["bounds"] is None
+    assert report["geometryUnavailable"] == "document-space bounds unavailable"
 
 
 def test_failed_commit_reports_may_have_changed_with_inspect_action() -> None:

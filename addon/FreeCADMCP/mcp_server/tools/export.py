@@ -5,9 +5,12 @@ shape copies of the selected objects (one collective bed translation, never
 per-object alignment), while ``fcstd`` exports the entire native document
 through ``saveCopy`` and rejects meshing/bed options. Every format is written
 to a sibling temporary file with the intended extension, verified by
-readback, and only then published: exclusive no-clobber ``os.link`` for a
-new destination, fingerprint-rechecked ``os.replace`` for an approved
-overwrite. A failed readback never touches the destination.
+readback, and only then published: an exclusive ``O_CREAT | O_EXCL``
+reservation whose verified bytes are copied, flushed and fsynced for a new
+destination, fingerprint-rechecked ``os.replace`` for an approved
+overwrite. A failed readback never touches the destination. Every result
+identifies the source document, its generation and — for mesh formats —
+the applied deflections.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import errno
 import math
 import os
+import shutil
 import tempfile
 from typing import Any
 
@@ -119,6 +123,28 @@ def _remove_own_temp(path: str) -> None:
         pass
 
 
+def _discard_partial(destination: str) -> dict[str, Any] | None:
+    """Best-effort removal of a partially written reserved destination.
+
+    Returns ``None`` when the file is gone, else a bounded, truthful
+    detail so the caller can report that the partial destination may
+    remain instead of claiming a removal that did not happen.
+    """
+
+    try:
+        os.unlink(destination)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return {
+            "reason": "cleanup_failed",
+            "path": destination,
+            "partialDestinationMayRemain": True,
+            "osError": f"{type(exc).__name__}: {exc}"[:200],
+        }
+    return None
+
+
 def _recheck_destination_parent(ctx: Any, destination: str) -> None:
     """Recheck the canonical parent immediately before publishing."""
 
@@ -157,10 +183,12 @@ def _fingerprint_of(value: Any) -> str:
 def publish(ctx: Any, staged: str, destination: str) -> None:
     """Publish the verified staged file; never clobber without consent.
 
-    New destination: exclusive ``os.link`` — a file appearing meanwhile fails
-    with a fresh-consent-required error instead of overwriting it. Approved
-    replacement: the consented fingerprint is rechecked, then ``os.replace``
-    publishes. Either way the staged name is removed afterwards.
+    New destination: an exclusive ``O_CREAT | O_EXCL`` reservation — a file
+    appearing meanwhile fails with a fresh-consent-required error instead of
+    overwriting it, and the verified staged bytes are then copied, flushed
+    and fsynced into the reserved file. Approved replacement: the consented
+    fingerprint is rechecked, then ``os.replace`` publishes. Either way the
+    staged name is removed afterwards.
     """
 
     _recheck_destination_parent(ctx, destination)
@@ -174,24 +202,7 @@ def publish(ctx: Any, staged: str, destination: str) -> None:
                 "destination appeared while exporting; request fresh consent before overwriting it",
                 {"reason": "target_changed", "path": destination},
             )
-        try:
-            os.link(staged, destination)
-        except OSError as exc:
-            if exc.errno in (errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR):
-                raise ToolError(
-                    "CONSENT_DENIED",
-                    "destination appeared while exporting; request fresh "
-                    "consent before overwriting it",
-                    {"reason": "target_changed", "path": destination},
-                ) from exc
-            raise ToolError(
-                "VALIDATION_FAILED",
-                "this filesystem does not support exclusive publication with "
-                f"hard links ({os.strerror(exc.errno) if exc.errno else exc}); "
-                "the destination was not written",
-                {"path": destination},
-            ) from exc
-        _remove_own_temp(staged)
+        _publish_exclusive_copy(staged, destination)
         return
 
     current = ctx.file_fingerprint(destination)
@@ -202,6 +213,94 @@ def publish(ctx: Any, staged: str, destination: str) -> None:
             {"reason": "target_changed", "path": destination},
         )
     os.replace(staged, destination)
+
+
+def _publish_exclusive_copy(staged: str, destination: str) -> None:
+    """Reserve ``destination`` exclusively, then copy the staged bytes in.
+
+    ``O_CREAT | O_EXCL`` makes the no-clobber race impossible on every
+    filesystem — no hard-link requirement. The verified staged bytes are
+    copied, flushed and fsynced; any copy failure unlinks the reserved file
+    so a partial destination never survives. When that unlink itself fails,
+    the reported error says the partial destination may remain — it never
+    claims a removal that did not happen. The file mode is the process
+    umask applied to ``0o666``, not the stage file's ``0600`` mode.
+    """
+
+    try:
+        fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    except OSError as exc:
+        if exc.errno in (errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR):
+            raise ToolError(
+                "CONSENT_DENIED",
+                "destination appeared while exporting; request fresh consent before overwriting it",
+                {"reason": "target_changed", "path": destination},
+            ) from exc
+        raise ToolError(
+            "VALIDATION_FAILED",
+            "the destination could not be reserved for publication; "
+            "the destination was not written",
+            {"reason": "publication_unavailable", "path": destination},
+        ) from exc
+    try:
+        sink = os.fdopen(fd, "wb")
+    except BaseException as exc:
+        os.close(fd)
+        # No wire result is produced here, so nothing can falsely claim
+        # the cleanup succeeded; record a stranded reservation on the
+        # original failure instead of replacing it.
+        if _discard_partial(destination) is not None:
+            exc.add_note(
+                f"partial export destination could not be removed and may remain: {destination}"
+            )
+        raise
+    try:
+        source_fd: int | None = None
+        try:
+            source_fd = os.open(staged, os.O_RDONLY)
+            source = os.fdopen(source_fd, "rb")
+            source_fd = None
+        except BaseException as exc:
+            if source_fd is not None:
+                os.close(source_fd)
+            sink.close()
+            if _discard_partial(destination) is not None:
+                exc.add_note(
+                    f"partial export destination could not be removed and may remain: {destination}"
+                )
+            raise
+        with source, sink:
+            shutil.copyfileobj(source, sink, length=1 << 20)
+            sink.flush()
+            os.fsync(sink.fileno())
+    except OSError as exc:
+        cleanup = _discard_partial(destination)
+        if cleanup is None:
+            raise ToolError(
+                "VALIDATION_FAILED",
+                "the verified staged bytes could not be copied to the "
+                "destination; the partial destination was removed",
+                {"reason": "publication_unavailable", "path": destination},
+            ) from exc
+        raise ToolError(
+            "VALIDATION_FAILED",
+            "the verified staged bytes could not be copied to the "
+            "destination; the partial destination could not be removed "
+            "and may remain",
+            {
+                "reason": "publication_unavailable",
+                "path": destination,
+                "partialDestinationMayRemain": True,
+                "cleanupError": f"{exc}; cleanup: {cleanup['osError']}",
+            },
+        ) from exc
+    except BaseException as exc:
+        if _discard_partial(destination) is not None:
+            exc.add_note(
+                f"partial export destination could not be removed and may remain: {destination}"
+            )
+        raise
+    _remove_own_temp(staged)
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +456,12 @@ def _export_mesh(
     return {
         "format": fmt,
         "path": destination,
+        "document": str(getattr(doc, "Name", "")),
+        "generation": int(ctx.document_generation(doc)),
         "objects": [name for name, _ in copies],
+        "size": os.path.getsize(destination),
+        "linear_deflection": linear_deflection,
+        "angular_deflection": angular_deflection,
         "mesh": readback,
     }
 
@@ -407,11 +511,8 @@ def _export_step(
     doc: Any,
     object_names: list[str],
     destination: str,
-    bed_align: bool,
 ) -> dict[str, Any]:
     copies = _placed_shape_copies(ctx, doc, object_names)
-    if bed_align:
-        _collective_bed_alignment(copies)
 
     compound = Part.Compound([shape for _, shape in copies])
     staged = _staged_path(destination, _EXTENSIONS["step"])
@@ -432,7 +533,10 @@ def _export_step(
     return {
         "format": "step",
         "path": destination,
+        "document": str(getattr(doc, "Name", "")),
+        "generation": int(ctx.document_generation(doc)),
         "objects": [name for name, _ in copies],
+        "size": os.path.getsize(destination),
         "step": readback,
     }
 
@@ -500,25 +604,30 @@ def _verify_reopened_copy(doc: Any, reopened: Any) -> None:
 
 
 def _export_fcstd(ctx: Any, doc: Any, destination: str) -> dict[str, Any]:
+    from .view import _capture_selection_snapshot
+
     original_file_name = str(doc.FileName)
     original_modified = _modified_flag(doc)
-    active_document_name = None
-    selection_captured = False
-    selected_names: list[str] = []
+    active_document_name: str | None = None
     try:
-        import FreeCADGui
-
         if FreeCAD.ActiveDocument is not None:
             active_document_name = str(FreeCAD.ActiveDocument.Name)
-        selected_names = [
-            str(getattr(obj, "Name", "")) for obj in (FreeCADGui.Selection.getSelection() or ())
-        ]
-        selection_captured = True
     except Exception:
-        selection_captured = False
+        active_document_name = None
+    # Subelement-preserving selection snapshot shared with capture_view:
+    # opening the hidden verification copy can disturb the active document
+    # and selection, so face/edge selections are captured as native
+    # SelectionObjects and restored exactly, not as lossy name lists.
+    selection_snapshots = _capture_selection_snapshot(ctx)
 
     staged = _staged_path(destination, _EXTENSIONS["fcstd"])
     reopened = None
+    # One primary failure drives the result: verification/publication is
+    # preferred, and the saveCopy/identity/openDocument refusals funnel
+    # into the same slot so close and restoration can never mask them.
+    primary: BaseException | None = None
+    close_error: str | None = None
+    restoration_failures: list[dict[str, str]] = []
     try:
         try:
             doc.saveCopy(staged)
@@ -549,65 +658,99 @@ def _export_fcstd(ctx: Any, doc: Any, destination: str) -> dict[str, Any]:
         try:
             _verify_reopened_copy(doc, reopened)
             publish(ctx, staged, destination)
-        finally:
-            if reopened is not None:
-                try:
-                    FreeCAD.closeDocument(str(reopened.Name))
-                except Exception as close_exc:
-                    raise ToolError(
-                        "VALIDATION_FAILED",
-                        "FCStd export verification copy could not be closed; "
-                        "it remains open in the document tree",
-                        {"path": staged},
-                    ) from close_exc
+        except BaseException as exc:
+            primary = exc
+    except BaseException as exc:
+        primary = exc
     finally:
         _remove_own_temp(staged)
-        _restore_presentation(active_document_name, selected_names if selection_captured else None)
+        if reopened is not None:
+            try:
+                FreeCAD.closeDocument(str(reopened.Name))
+            except Exception as close_exc:
+                close_error = f"{type(close_exc).__name__}: {close_exc}"[:512]
+        restoration_failures = _restore_presentation(ctx, active_document_name, selection_snapshots)
+
+    # Decision point, after the reopened copy is closed and the caller's
+    # presentation is restored: the primary verification/publication error
+    # wins and carries bounded close/restoration evidence; only an
+    # otherwise-successful export raises a close failure alone, and only a
+    # fully successful verification raises restoration failures alone.
+    if primary is not None:
+        if isinstance(primary, ToolError):
+            error = primary
+        else:
+            error = ToolError(
+                "VALIDATION_FAILED",
+                f"FCStd export failed: {type(primary).__name__}: {primary}",
+                {"path": destination},
+            )
+        details = dict(error.details or {})
+        if close_error is not None:
+            details["closeError"] = close_error
+        if restoration_failures:
+            details["restorationFailed"] = True
+            details["restoration"] = restoration_failures[:16]
+        raise ToolError(error.code, error.message, details) from primary
+    if close_error is not None:
+        raise ToolError(
+            "VALIDATION_FAILED",
+            "FCStd export verification copy could not be closed; "
+            "it remains open in the document tree",
+            {"path": staged, "closeError": close_error},
+        )
+    if restoration_failures:
+        raise ToolError(
+            "GUI_DISPATCH_FAILED",
+            "export succeeded but restoring the caller's view state failed",
+            {"reason": "restoration_failed", "restoration": restoration_failures[:16]},
+        )
 
     return {
         "format": "fcstd",
         "path": destination,
+        "size": os.path.getsize(destination),
+        "document": str(getattr(doc, "Name", "")),
+        "generation": int(ctx.document_generation(doc)),
         "objects": [],
         "objectCount": len(doc.Objects),
     }
 
 
 def _restore_presentation(
-    active_document_name: str | None, selected_names: list[str] | None
-) -> None:
-    """Restore the caller's active document and selection; never raise.
+    ctx: Any, active_document_name: str | None, selection_snapshots: list[dict[str, Any]]
+) -> list[dict[str, str]]:
+    """Restore the caller's active document and selection; return failures.
 
-    ``selected_names`` is ``None`` when the selection could not be captured,
-    in which case it is left untouched; an empty list restores an empty
-    selection.
+    ``selection_snapshots`` is the capture_view selection snapshot taken
+    before any GUI state changed; it restores subelement selections exactly.
+    Every restore step runs. The caller attaches failures to the primary
+    export error when another failure already exists.
     """
 
-    try:
-        import FreeCADGui
+    from .view import _restore_selection_snapshot
 
+    failures: list[dict[str, str]] = []
+
+    def _protect(item: str, restore: Any) -> None:
+        try:
+            restore()
+        except Exception as exc:
+            failures.append({"item": item, "error": f"{type(exc).__name__}: {exc}"[:256]})
+
+    def _restore_active_document() -> None:
         if (
             active_document_name is not None
             and getattr(FreeCAD.ActiveDocument, "Name", None) != active_document_name
             and active_document_name in FreeCAD.listDocuments()
         ):
             FreeCAD.setActiveDocument(active_document_name)
-        gui_document = (
-            FreeCADGui.getDocument(active_document_name) if active_document_name else None
-        )
-        if gui_document is None or selected_names is None:
-            return
-        if selected_names:
-            FreeCADGui.Selection.setSelection(
-                [
-                    gui_document.getObject(name)
-                    for name in selected_names
-                    if gui_document.getObject(name)
-                ]
-            )
-        else:
-            FreeCADGui.Selection.clearSelection()
-    except Exception:
-        pass
+
+    if active_document_name is not None:
+        _protect("active_document", _restore_active_document)
+    if hasattr(ctx, "Gui"):
+        _protect("selection", lambda: _restore_selection_snapshot(ctx, selection_snapshots))
+    return failures
 
 
 def _modified_flag(doc: Any) -> bool | None:
@@ -631,21 +774,24 @@ def export(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     destination = ctx.canonical_path(arguments.get("path"))
     object_names = [str(name) for name in (arguments.get("objects") or [])]
 
-    if fmt == "fcstd":
-        if object_names:
-            raise ToolError(
-                "VALIDATION_FAILED",
-                "fcstd export serializes the entire native document; pass an empty object list",
-                {"format": "fcstd"},
-            )
+    if fmt == "fcstd" and object_names:
+        raise ToolError(
+            "VALIDATION_FAILED",
+            "fcstd export serializes the entire native document; pass an empty object list",
+            {"format": "fcstd"},
+        )
+    if fmt in ("fcstd", "step"):
+        # Deflection and bed options are meshing concerns: refusing them for
+        # STEP and FCStd keeps an accepted-but-ignored input from implying
+        # an effect it never had.
         for key in ("linear_deflection", "angular_deflection", "bed_align"):
             if key in arguments:
                 raise ToolError(
                     "VALIDATION_FAILED",
-                    f"{key} is not accepted for fcstd export",
-                    {"format": "fcstd", "option": key},
+                    f"{key} is not accepted for {fmt} export",
+                    {"format": fmt, "option": key},
                 )
-    elif not object_names:
+    if fmt != "fcstd" and not object_names:
         raise ToolError(
             "VALIDATION_FAILED",
             f"{fmt} export requires a nonempty object list",
@@ -656,13 +802,7 @@ def export(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         if fmt == "fcstd":
             return _export_fcstd(ctx, doc, destination)
         if fmt == "step":
-            return _export_step(
-                ctx,
-                doc,
-                object_names,
-                destination,
-                _bed_align(arguments),
-            )
+            return _export_step(ctx, doc, object_names, destination)
         return _export_mesh(
             ctx,
             doc,
@@ -733,11 +873,13 @@ _TOOL_INPUT_SCHEMA = {
             "type": "number",
             "exclusiveMinimum": 0,
             "maximum": MAX_LINEAR_DEFLECTION,
+            "default": DEFAULT_LINEAR_DEFLECTION,
         },
         "angular_deflection": {
             "type": "number",
             "exclusiveMinimum": 0,
             "maximum": MAX_ANGULAR_DEFLECTION,
+            "default": DEFAULT_ANGULAR_DEFLECTION,
         },
         "bed_align": {"type": "boolean"},
     },
@@ -755,16 +897,29 @@ _TOOL_OUTPUT_SCHEMA = {
     "properties": {
         "format": {"type": "string", "enum": list(FORMATS)},
         "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "document": {"type": "string", "minLength": 1, "maxLength": 256},
+        "generation": {"type": "integer", "minimum": 0},
+        "size": {"type": "integer", "minimum": 0},
         "objects": {
             "type": "array",
             "items": {"type": "string", "minLength": 1, "maxLength": 256},
             "maxItems": 1024,
         },
+        "linear_deflection": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": MAX_LINEAR_DEFLECTION,
+        },
+        "angular_deflection": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": MAX_ANGULAR_DEFLECTION,
+        },
         "mesh": {"$ref": "#/$defs/meshReadback"},
         "step": {"$ref": "#/$defs/stepReadback"},
         "objectCount": {"type": "integer", "minimum": 0},
     },
-    "required": ["format", "path", "objects"],
+    "required": ["format", "path", "document", "generation", "objects"],
     "additionalProperties": False,
 }
 
@@ -775,7 +930,9 @@ TOOL_DEFINITIONS = [
             "Export objects to STL, STEP or 3MF, or the entire document to a "
             "native FCStd copy. Writes to a temporary sibling file, verifies "
             "the result by readback, then publishes; overwriting an existing "
-            "destination requires consent."
+            "destination requires consent. Results identify the source "
+            "document, its generation and the applied mesh deflections; "
+            "deflection and bed options are refused for STEP and FCStd."
         ),
         "inputSchema": _TOOL_INPUT_SCHEMA,
         "outputSchema": _TOOL_OUTPUT_SCHEMA,

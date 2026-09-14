@@ -825,6 +825,37 @@ def test_prepare_failure_raises_before_registration(tmp_path: Path) -> None:
         assert ctx.finished_ops == []
 
 
+def test_prepare_tool_error_after_solver_creation_reports_changed_state(tmp_path: Path) -> None:
+    with load_fem() as fem:
+        ctx = FakeCtx(FakeDocument(), tmp_path)
+        operation = fem._FemSolve(
+            ctx,
+            doc=ctx._doc,
+            analysis=ctx._analysis,
+            solver=FakeSolver(),
+            working_dir=str(tmp_path),
+            created_solver=True,
+        )
+
+        original_prepare = FakeCalculiXToolsBase.prepare
+
+        def failing_prepare(self: Any) -> None:
+            raise ToolError("VALIDATION_FAILED", "native checks failed", {"checks": "bad"})
+
+        FakeCalculiXToolsBase.prepare = failing_prepare
+        try:
+            with pytest.raises(ToolError) as excinfo:
+                operation.start()
+        finally:
+            FakeCalculiXToolsBase.prepare = original_prepare
+
+        assert excinfo.value.code == "VALIDATION_FAILED"
+        assert excinfo.value.details == {
+            "checks": "bad",
+            "operationState": "may_have_changed",
+        }
+
+
 def test_cancel_event_marks_requested_without_touching_the_result(
     tmp_path: Path,
 ) -> None:

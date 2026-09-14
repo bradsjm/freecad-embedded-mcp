@@ -23,9 +23,11 @@ if str(ADDON_DIR) not in sys.path:
 from mcp_server import topology_query as tq
 from mcp_server.protocol import (
     DOCUMENT_NOT_FOUND,
+    INVALID_PARAMS,
     OBJECT_NOT_FOUND,
     VALIDATION_FAILED,
     ConsentSigner,
+    ProtocolError,
     ToolError,
     validate_schema,
 )
@@ -321,6 +323,7 @@ _STUB_GEOMETRY.make_reference = _stub_make_reference
 _STUB_GEOMETRY.whole_reference = _stub_whole_reference
 _STUB_GEOMETRY.resolve_query = _stub_resolve_query
 _STUB_GEOMETRY._cardinality_error = _stub_cardinality_error
+_STUB_GEOMETRY.cardinality_error = _stub_cardinality_error
 
 
 def _stub_placed_shape(obj: Any) -> Any:
@@ -1932,9 +1935,10 @@ def test_inspect_default_page_limit_is_32() -> None:
 
 
 def test_large_selection_pages_through_all_requested_objects() -> None:
-    doc = FakeDoc(objects=[box(f"Obj{index:03d}") for index in range(70)])
+    # 64 is the advertised selection bound: two full pages, no third page.
+    doc = FakeDoc(objects=[box(f"Obj{index:03d}") for index in range(64)])
     ctx = FakeCtx(doc)
-    selection = [f"Obj{index:03d}" for index in range(70)]
+    selection = [f"Obj{index:03d}" for index in range(64)]
     request = {"document": doc.Name, "objects": selection, "limit": 32}
     validate_schema(request, objects_mod.TOOL_DEFINITIONS[0]["inputSchema"])
 
@@ -1947,19 +1951,92 @@ def test_large_selection_pages_through_all_requested_objects() -> None:
         {"document": doc.Name, "objects": selection, "limit": 32, "cursor": first["nextCursor"]},
     )
     assert second["count"] == 32
-    assert second["nextCursor"] is not None
+    assert second["nextCursor"] is None
+    assert second["total"] == 64
+    names = [row["name"] for row in first["objects"] + second["objects"]]
+    assert len(names) == 64
+    assert len(set(names)) == 64
+    validate_schema(second, objects_mod.TOOL_DEFINITIONS[0]["outputSchema"])
 
-    third = objects_mod.inspect_objects(
-        ctx,
-        {"document": doc.Name, "objects": selection, "limit": 32, "cursor": second["nextCursor"]},
+
+def test_input_schema_rejects_selection_and_limit_over_the_handler_page_bound() -> None:
+    """The wire schema carries the handler's real bound, not the 500 cap.
+
+    Dispatch validates before the handler runs, so an over-bound selection
+    or page size is refused as invalid parameters; the exact bound itself
+    stays usable.
+    """
+
+    schema = objects_mod.TOOL_DEFINITIONS[0]["inputSchema"]
+    with pytest.raises(ProtocolError) as too_many_names:
+        validate_schema(
+            {"document": "Doc", "objects": [f"Obj{index:03d}" for index in range(65)]},
+            schema,
+        )
+    assert too_many_names.value.code == INVALID_PARAMS
+    with pytest.raises(ProtocolError) as too_large_limit:
+        validate_schema({"document": "Doc", "limit": 65}, schema)
+    assert too_large_limit.value.code == INVALID_PARAMS
+    validate_schema(
+        {
+            "document": "Doc",
+            "objects": [f"Obj{index:03d}" for index in range(64)],
+            "limit": 64,
+        },
+        schema,
     )
-    assert third["count"] == 6
-    assert third["nextCursor"] is None
-    assert third["total"] == 70
-    names = [row["name"] for row in first["objects"] + second["objects"] + third["objects"]]
-    assert len(names) == 70
-    assert len(set(names)) == 70
-    validate_schema(third, objects_mod.TOOL_DEFINITIONS[0]["outputSchema"])
+
+
+def test_create_objects_reports_per_target_dependent_counts() -> None:
+    """Each created row reports its own post-commit dependent closure.
+
+    The mutation gate's outcome carries only the batch-wide closure union,
+    so a row must never fall back to that aggregate: a preexisting
+    dependent linked to exactly one created target shows up in that
+    target's count alone.
+    """
+
+    fan = FakeObj("Fan", shape=None)
+    in_lists: dict[str, list[Any]] = {"Hub1": [fan]}
+
+    class _LinkedDoc(FakeDoc):
+        def addObject(self, type_id: str, name: str) -> FakeObj:
+            actual = name
+            if any(obj.Name == actual for obj in self.Objects):
+                actual = f"{name}001"
+            obj = box(actual)
+            obj.InList = list(in_lists.get(name, ()))
+            obj.Document = self
+            self.Objects.append(obj)
+            self._by_name[obj.Name] = obj
+            return obj
+
+    doc = _LinkedDoc(objects=[fan])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.create_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "response_detail": "full",
+            "entries": [
+                {"type": "Part::Box", "name": "Hub1"},
+                {"type": "Part::Box", "name": "Hub2"},
+            ],
+        },
+    )
+
+    counts = {
+        row["actual"]: change["dependentCount"]
+        for row, change in zip(result["nameMapping"], result["changes"], strict=True)
+    }
+    assert counts == {"Hub1": 1, "Hub2": 0}
+    assert {change["dependentCountBefore"] for change in result["changes"]} == {0}
+    assert [call[0] for call in doc.calls] == ["open", "commit"]
+    definition = next(
+        entry for entry in objects_mod.TOOL_DEFINITIONS if entry["name"] == "create_objects"
+    )
+    validate_schema(result, definition["outputSchema"])
 
 
 def test_inspect_pagination_walks_all_objects() -> None:
@@ -2280,7 +2357,6 @@ def test_large_property_filter_pages_via_property_offset() -> None:
     request = {
         "document": doc.Name,
         "detail": "full",
-        "property_filter": names,
         "property_limit": 130,
     }
     validate_schema(request, objects_mod.TOOL_DEFINITIONS[0]["inputSchema"])
@@ -2297,7 +2373,6 @@ def test_large_property_filter_pages_via_property_offset() -> None:
         {
             "document": doc.Name,
             "detail": "full",
-            "property_filter": names,
             "property_limit": 130,
             "property_offset": 64,
         },
@@ -3030,6 +3105,30 @@ def test_edit_objects_per_target_expectations_pass_and_commit() -> None:
         entry for entry in objects_mod.TOOL_DEFINITIONS if entry["name"] == "edit_objects"
     )
     validate_schema(result, definition["outputSchema"])
+
+
+def test_edit_objects_reports_dependency_counts_per_target() -> None:
+    first_dependent = FakeObj("FirstDep")
+    second_dependent = FakeObj("SecondDep")
+    first = box("First", values={"Length": 1.0}, in_list=(first_dependent,))
+    second = box("Second", values={"Length": 2.0}, in_list=())
+    doc = FakeDoc(objects=[first, second, first_dependent, second_dependent])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.edit_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "edits": [
+                {"object": "First", "properties": {"Length": 10}},
+                {"object": "Second", "properties": {"Length": 20}},
+            ],
+            "response_detail": "full",
+        },
+    )
+
+    assert result["changes"][0]["dependentCount"] == 1
+    assert result["changes"][1]["dependentCount"] == 0
 
 
 # ---------------------------------------------------------------------------

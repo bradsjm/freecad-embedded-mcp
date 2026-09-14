@@ -88,6 +88,8 @@ DOCUMENT_NOT_FOUND = "DOCUMENT_NOT_FOUND"
 OBJECT_NOT_FOUND = "OBJECT_NOT_FOUND"
 VALIDATION_FAILED = "VALIDATION_FAILED"
 GUI_DISPATCH_FAILED = "GUI_DISPATCH_FAILED"
+GUI_DISPATCH_STUCK = "GUI_DISPATCH_STUCK"
+SERVER_BUSY = "SERVER_BUSY"
 CONSENT_DENIED = "CONSENT_DENIED"
 PATH_NOT_ALLOWED = "PATH_NOT_ALLOWED"
 UNSUPPORTED_VIEW = "UNSUPPORTED_VIEW"
@@ -244,34 +246,65 @@ def tool_result(payload: Any, *, is_error: bool = False) -> dict:
     return _finish_result("complete", result)
 
 
+#: Detail keys rendered into the bounded human-readable error text, in
+#: priority order. Whole keys are selected until the budget is reached:
+#: serialized JSON is never truncated mid-token.
+_ESSENTIAL_DETAIL_KEYS = (
+    "reason",
+    "nextTool",
+    "nextAction",
+    "operationState",
+    "expectedGeneration",
+    "actualGeneration",
+    "acceptedArgumentCounts",
+    "path",
+    "suggestions",
+    "rollbackStage",
+    "checkpoint",
+)
+
+#: Only the appended rendering is capped: the code and message are the
+#: payload's substance and are never truncated away.
+_MAX_ERROR_TEXT_SUFFIX_CHARS = 4096
+
+
+def _json_safe(value: Any) -> bool:
+    """True when ``value`` round-trips canonical JSON (finite, serializable)."""
+
+    try:
+        canonical_json(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def tool_error_result(error: ToolError) -> dict:
     """Convert a :class:`ToolError` into its complete isError tool result."""
 
     structured: dict = {"code": error.code, "message": error.message}
     text = f"{error.code}: {error.message}"
     if error.details is not None:
-        structured["details"] = error.details
-        if isinstance(error.details, Mapping):
-            essential = {
-                key: error.details[key]
-                for key in (
-                    "operationState",
-                    "nextAction",
-                    "nextTool",
-                    "reason",
-                    "suggestions",
-                    "rollbackStage",
-                    "checkpoint",
-                )
-                if key in error.details
-            }
+        details = error.details
+        if not _json_safe(details):
+            # Non-finite or non-JSON details must never sink the wire
+            # result at serialization time: report their omission instead.
+            details = {"reason": "unrenderable_details"}
+        structured["details"] = details
+        if isinstance(details, Mapping):
+            essential: dict = {}
+            for key in _ESSENTIAL_DETAIL_KEYS:
+                if key not in details:
+                    continue
+                candidate = dict(essential)
+                candidate[key] = details[key]
+                rendered = json.dumps(candidate, ensure_ascii=False, allow_nan=False)
+                if len(rendered) > _MAX_ERROR_TEXT_SUFFIX_CHARS:
+                    # One oversized key must not suppress later bounded
+                    # evidence: skip it whole and keep selecting.
+                    continue
+                essential = candidate
             if essential:
-                suffix = json.dumps(essential, ensure_ascii=False, allow_nan=False)
-                # Only the appended rendering is capped: the code and message
-                # are the payload's substance and are never truncated away.
-                if len(suffix) > 4096:
-                    suffix = suffix[:4096] + '"[details truncated]"'
-                text = f"{text} {suffix}"
+                text = f"{text} {json.dumps(essential, ensure_ascii=False, allow_nan=False)}"
     return tool_result(
         [{"type": "text", "text": text}],
         is_error=True,
@@ -327,12 +360,6 @@ def error_response(error: Any, request_id: Any = None) -> dict:
     if request_id is not None:
         response["id"] = request_id
     return response
-
-
-def parse_error_response() -> dict:
-    """Response for a body that is not valid JSON (-32700); id is omitted."""
-
-    return error_response(ProtocolError(PARSE_ERROR, "invalid JSON"))
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +779,7 @@ _SUPPORTED_SCHEMA_KEYWORDS = frozenset(
         "maxLength",
         "minItems",
         "maxItems",
+        "maxProperties",
         "properties",
         "required",
         "additionalProperties",
@@ -798,7 +826,7 @@ def check_schema(
     """Reject any schema construct this server does not emit.
 
     Supported: finite types (a single name or a non-empty array), enum/const,
-    numeric and string/array bounds, properties/required/
+    numeric and string/array/object-property bounds, properties/required/
     additionalProperties(false or schema), items(schema), bounded ``anyOf``
     composition and local ``$defs``/``$ref``. oneOf/allOf/not, conditionals,
     patterns, remote refs and recursion are unsupported and raise
@@ -838,7 +866,7 @@ def check_schema(
     for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
         if key in schema:
             _finite_number(schema[key], f"{path}.{key}")
-    for key in ("minLength", "maxLength", "minItems", "maxItems"):
+    for key in ("minLength", "maxLength", "minItems", "maxItems", "maxProperties"):
         if key in schema:
             _nonnegative_int(schema[key], f"{path}.{key}")
 
@@ -889,6 +917,22 @@ def check_schema(
         for name, sub in defs.items():
             check_schema(sub, schema, f"{path}->$defs.{name}", refs | {name})
 
+    # Validate schema example values after the structure is known. An invalid
+    # default or enum would otherwise register successfully but could never
+    # match the schema at runtime.
+    for keyword in ("default", "enum"):
+        if keyword not in schema:
+            continue
+        values = [schema[keyword]] if keyword == "default" else schema[keyword]
+        for index, value in enumerate(values):
+            value_path = f"{path}.{keyword}"
+            if keyword == "enum":
+                value_path = f"{value_path}[{index}]"
+            try:
+                validate_schema(value, schema, root)
+            except ProtocolError as exc:
+                raise ValueError(f"{value_path}: {exc.message}") from exc
+
 
 def _same_json(value: Any, candidate: Any) -> bool:
     if value is candidate:
@@ -896,12 +940,14 @@ def _same_json(value: Any, candidate: Any) -> bool:
     return type(value) is type(candidate) and value == candidate
 
 
-def _resolve_ref(
-    schema: Mapping[str, Any], root: Mapping[str, Any], depth: int
-) -> Mapping[str, Any]:
-    if depth > 32:  # check_schema rejects recursion; this is defense in depth.
-        raise ProtocolError(INTERNAL_ERROR, "schema $ref depth exceeded")
+def _resolve_ref(schema: Mapping[str, Any], root: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Resolve a bounded chain of local references without counting data depth."""
+
+    ref_depth = 0
     while isinstance(schema, Mapping) and "$ref" in schema:
+        if ref_depth >= 32:  # check_schema rejects recursion; this is defense in depth.
+            raise ProtocolError(INTERNAL_ERROR, "schema $ref depth exceeded")
+        ref_depth += 1
         ref = schema["$ref"]
         name = ref[len("#/$defs/") :] if isinstance(ref, str) else None
         defs = root.get("$defs") if isinstance(root, Mapping) else None
@@ -949,7 +995,7 @@ def validate_schema(
         root = schema
     if _depth == 0:
         _ensure_finite(value, path)
-    schema = _resolve_ref(schema, root, _depth)
+    schema = _resolve_ref(schema, root)
     if not isinstance(schema, Mapping):
         raise ProtocolError(INTERNAL_ERROR, "registered schema must be an object")
 
@@ -1022,6 +1068,8 @@ def validate_schema(
                 validate_schema(item, items, root, f"{path}[{index}]", _depth + 1)
 
     if isinstance(value, dict):
+        if "maxProperties" in schema and len(value) > schema["maxProperties"]:
+            fail(f"must have at most {schema['maxProperties']} properties")
         properties = schema.get("properties") or {}
         if not isinstance(properties, Mapping):  # check_schema rejects first.
             properties = {}

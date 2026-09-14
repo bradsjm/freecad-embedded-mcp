@@ -60,11 +60,12 @@ MAX_NTH_INDEX = 4095
 # tolerance, never a manufacturing fit tolerance.
 SELECTOR_TOLERANCE = 0.0001
 
-# Analytic type names accepted after ``%``, uppercased: the union of the
-# CadQuery face and edge geom-type tables. Applicability (a face is never
-# LINE) is decided at evaluation, exactly like the source TypeSelector.
+# Analytic type names accepted after ``%``, uppercased. ``OTHER`` remains a
+# valid token so records whose native class is unavailable fail at evaluation
+# with selector evidence instead of becoming a syntax error.
 _SELECTOR_TYPES = frozenset(
     {
+        "OTHER",
         "PLANE",
         "CYLINDER",
         "CONE",
@@ -75,7 +76,6 @@ _SELECTOR_TYPES = frozenset(
         "REVOLUTION",
         "EXTRUSION",
         "OFFSET",
-        "OTHER",
         "LINE",
         "CIRCLE",
         "ELLIPSE",
@@ -393,18 +393,6 @@ def _parse_index(text: str, position: int) -> tuple[int | None, int]:
     return value, offset + 1
 
 
-class _Tokens:
-    """Bounded token stream with parse-position tracking."""
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-        self.items: list[tuple[str, Any, int]] = []
-        self.position = 0
-
-    def error(self, expected: list[str], message: str) -> ToolError:
-        return _syntax_error(self.position, expected, message)
-
-
 def _tokenize(text: str) -> list[tuple[str, Any, int]]:
     """Tokenize one selector string into ``(kind, value, position)`` tuples.
 
@@ -638,29 +626,6 @@ def _record_direction(record: Mapping) -> tuple[float, float, float] | None:
     return (float(direction[0]), float(direction[1]), float(direction[2]))
 
 
-def _require_direction(record: Mapping) -> tuple[float, float, float]:
-    """Return the record's direction, refusing eligible-but-unreadable rows.
-
-    Directional operators are defined only for planar faces and linear
-    edges. A record whose type says it is eligible but whose direction
-    could not be read must fail the selector rather than silently drop the
-    candidate.
-    """
-
-    direction = _record_direction(record)
-    if direction is not None:
-        return direction
-    if record.get("type") in ("PLANE", "LINE"):
-        raise _geometry_unavailable_error(
-            f"{record.get('role', 'subshape')} {record.get('index')} is "
-            f"{record.get('type')} but its direction could not be read"
-        )
-    raise _geometry_unavailable_error(
-        f"{record.get('role', 'subshape')} {record.get('index')} has no "
-        "directional evidence for this operator"
-    )
-
-
 def _require_center(record: Mapping) -> tuple[float, float, float]:
     center = record.get("center")
     if center is not None:
@@ -673,13 +638,6 @@ def _require_center(record: Mapping) -> tuple[float, float, float]:
 def _type_matches(record: Mapping, name: str) -> bool:
     status = record.get("typeStatus", "ok")
     if status != "ok":
-        if name == "OTHER":
-            # An unclassified record may or may not be "other" geometry;
-            # refusing beats a false zero-match.
-            raise _geometry_unavailable_error(
-                f"{record.get('role', 'subshape')} {record.get('index')} could "
-                "not be classified, so %OTHER cannot be decided"
-            )
         if status == "unreadable":
             raise _geometry_unavailable_error(
                 f"{record.get('role', 'subshape')} {record.get('index')} could "
@@ -841,12 +799,25 @@ def normalize_query_step(step: Mapping, what: str) -> dict:
     if selector is not None:
         parse_selector(selector)  # refuse malformed syntax before any native access
     radius = step.get("radius")
-    if radius is not None and radius.get("min") is None and radius.get("max") is None:
-        raise ToolError(
-            VALIDATION_FAILED,
-            f"{what}.radius requires at least one of min or max",
-            {"parameter": what, "reason": "empty_radius_range", "nextTool": "inspect_topology"},
-        )
+    if radius is not None:
+        minimum = radius.get("min")
+        maximum = radius.get("max")
+        if minimum is None and maximum is None:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"{what}.radius requires at least one of min or max",
+                {"parameter": what, "reason": "empty_radius_range", "nextTool": "inspect_topology"},
+            )
+        if minimum is not None and maximum is not None and float(minimum) > float(maximum):
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"{what}.radius has min greater than max",
+                {
+                    "parameter": what,
+                    "reason": "invalid_radius_range",
+                    "nextTool": "inspect_topology",
+                },
+            )
     axis = step.get("axis")
     if axis is not None:
         direction = [float(value) for value in axis["direction"]]

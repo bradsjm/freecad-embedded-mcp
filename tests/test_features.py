@@ -1882,6 +1882,58 @@ def test_hole_counterbore_requires_its_diameter_pretransaction() -> None:
         assert doc.transactions == []
 
 
+def test_hole_counterdrill_requires_its_complete_cut_form() -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="hole",
+                name="Hole",
+                profile="Sketch",
+                parameters={
+                    "diameter": 4,
+                    "depth": 10,
+                    "cut": "counterdrill",
+                    "countersink_diameter": 8,
+                    "counterbore_depth": 5,
+                },
+            )
+
+        assert "countersink_angle" in excinfo.value.message
+        assert doc.transactions == []
+
+
+def test_hole_partial_cut_field_without_cut_is_rejected() -> None:
+    with load_features() as module:
+        hole = FakeFeature(
+            "Hole",
+            "PartDesign::Hole",
+            properties=("HoleCutType", "HoleCutDiameter", "HoleCutDepth"),
+            shape=FakeShape(),
+        )
+        body = FakeBody(members=[hole], shape=FakeShape())
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.append(hole)
+
+        with pytest.raises(ToolError) as excinfo:
+            module.HANDLERS["edit_feature"](
+                FakeCtx(doc),
+                {
+                    "document": "Doc",
+                    "body": "Body",
+                    "object": "Hole",
+                    "parameters": {"counterbore_depth": 5},
+                },
+            )
+
+        assert excinfo.value.details["reason"] == "invalid_feature_parameters"
+        assert "not applicable to hole cut 'none'" in excinfo.value.message
+        assert doc.transactions == []
+
+
 def test_hole_countersink_writes_native_cut_values() -> None:
     with load_features() as module:
         _body, doc = make_body_and_doc(shape=FakeShape())

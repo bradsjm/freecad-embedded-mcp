@@ -1,14 +1,25 @@
 """run_fem — modern CalculiX solve lifecycle (PLAN §5 item 16, §6).
 
 The handler runs on the GUI thread. It performs every synchronous step
-(prerequisite probes, solver selection or creation, the native analysis
-checks, unique working-directory setup and ``prepare()``), then starts the
-native QProcess-backed ``CalculiXTools`` run and returns a
+document-idle check, prerequisite probes, solver classification, the
+native analysis checks and solver creation), then starts the native
+QProcess-backed ``CalculiXTools`` run and returns a
 :class:`concurrent.futures.Future` for the server to retain. The Future
 resolves with the structured result payload — or fails with
 :class:`ToolError` — only after the native ``update_properties`` result
 loading has actually run. The GUI thread is never blocked on the solver and
 the solver process is never waited on or killed.
+
+Preparation is atomic before the process launches: the native analysis
+checks run before any solver is created, and a missing solver is created
+inside one transaction that also runs the checks before commit, so any
+pre-launch failure removes a solver this call introduced while solvers
+that existed before the call are never altered. The working directory is
+created only after every document mutation has committed. Failures after
+that commit (tool construction, ``prepare()``) cannot be rolled back and
+are reported truthfully: ``details.operationState`` is
+``"may_have_changed"`` exactly when a committed new solver remains, and
+omitted when the document was never mutated.
 
 The local ``CalculiXTools`` subclass overrides ``update_properties`` so the
 document identity/generation guard runs BEFORE the native loader mutates a
@@ -29,14 +40,11 @@ from typing import Any
 from mcp_server.protocol import (
     OBJECT_NOT_FOUND,
     PATH_NOT_ALLOWED,
+    SERVER_BUSY,
     SOLVER_FAILED,
     VALIDATION_FAILED,
     ToolError,
 )
-
-# Agreed with ServerIntegration: the busy rejection code shared with
-# ctx.check_document_idle (not yet a protocol.py constant).
-SERVER_BUSY = "SERVER_BUSY"
 
 _ANALYSIS_TYPE = "Fem::FemAnalysis"
 _MODERN_SOLVER_TYPE = "Fem::SolverCalculiX"
@@ -44,6 +52,47 @@ _LEGACY_SOLVER_TYPE = "Fem::SolverCcxTools"
 _PIPELINE_TYPE = "Fem::FemPostPipeline"
 
 _CANCEL_POLL_MS = 500
+
+# Hard caps for the returned result summary. Traversal keeps cheap total
+# counters for every block and file it walks, but per-block array evidence
+# is only collected while a cap has room; the truncation counters make any
+# cap honest instead of silent.
+MAX_RESULT_FILES = 256
+MAX_RESULT_BLOCKS = 256
+MAX_RESULT_FIELDS = 128
+
+# Every capability ``unavailable``/``reason`` string on the wire is
+# schema-bounded at 512 characters, but raw exception text is not. All
+# producers funnel through one head-truncating renderer here so no
+# exception type or message can push a reason past its schema limit; the
+# server's capability probes import it instead of re-implementing the cut.
+MAX_REASON_LENGTH = 512
+_REASON_TRUNCATED = "...[truncated]"
+
+
+def bounded_reason(text: str, *, limit: int = MAX_REASON_LENGTH) -> str:
+    """Bound one reason string to ``limit`` characters.
+
+    Truncation is deterministic: the string is cut from the head and the
+    explicit ``...[truncated]`` suffix marks any cut, so a reader never
+    mistakes bounded text for complete text.
+    """
+
+    if len(text) <= limit:
+        return text
+    if len(_REASON_TRUNCATED) >= limit:
+        # Degenerate limit: only a hard cut preserves the bound.
+        return text[:limit]
+    return text[: limit - len(_REASON_TRUNCATED)] + _REASON_TRUNCATED
+
+
+def bounded_exception_reason(
+    exc: BaseException, prefix: str = "", *, limit: int = MAX_REASON_LENGTH
+) -> str:
+    """Render ``prefix + "ExceptionType: message"`` within ``limit`` chars."""
+
+    return bounded_reason(f"{prefix}{type(exc).__name__}: {exc}", limit=limit)
+
 
 # ---------------------------------------------------------------------------
 # Tool definition.
@@ -65,15 +114,38 @@ _BLOCK_SCHEMA: dict[str, Any] = {
         "block": {"type": "integer", "minimum": 0},
         "points": {"type": "integer", "minimum": 0},
         "cells": {"type": "integer", "minimum": 0},
-        "scalars": {"type": "object", "additionalProperties": _RANGE_SCHEMA},
-        "vectors": {"type": "object", "additionalProperties": _RANGE_SCHEMA},
+        "scalars": {
+            "type": "object",
+            "additionalProperties": _RANGE_SCHEMA,
+            "maxProperties": MAX_RESULT_FIELDS,
+        },
+        "vectors": {
+            "type": "object",
+            "additionalProperties": _RANGE_SCHEMA,
+            "maxProperties": MAX_RESULT_FIELDS,
+        },
+        "scalar_count": {"type": "integer", "minimum": 0},
+        "scalars_truncated": {"type": "boolean"},
+        "vector_count": {"type": "integer", "minimum": 0},
+        "vectors_truncated": {"type": "boolean"},
     },
-    "required": ["block", "points", "cells", "scalars", "vectors"],
+    "required": [
+        "block",
+        "points",
+        "cells",
+        "scalars",
+        "vectors",
+        "scalar_count",
+        "scalars_truncated",
+        "vector_count",
+        "vectors_truncated",
+    ],
     "additionalProperties": False,
 }
 
 _AGGREGATES_SCHEMA: dict[str, Any] = {
-    # Explicitly sums over the returned blocks, not deduplicated nodes.
+    # Sums over every traversed block, not only the returned ones, and
+    # not deduplicated nodes.
     "type": "object",
     "properties": {
         "block_count": {"type": "integer", "minimum": 0},
@@ -90,15 +162,18 @@ _RUN_FEM_DEFINITION: dict[str, Any] = {
         "Run the CalculiX solver of a FEM analysis through the modern "
         "Fem::SolverCalculiX pipeline and return the loaded VTK result "
         "summary (.vtm plus referenced .vtu files, per-block point/cell "
-        "counts and finite scalar/vector-magnitude ranges). Asynchronous: "
-        "the result arrives when the solver process and the native result "
-        "loading finish; the solver is never killed on timeout or cancel."
+        "counts and finite scalar/vector-magnitude ranges). The summary is "
+        "bounded: vtu files, blocks and per-block scalar/vector fields are "
+        "capped, with *_count and *_truncated counters reporting what was "
+        "traversed. Asynchronous: the result arrives when the solver "
+        "process and the native result loading finish; the solver is never "
+        "killed on timeout or cancel."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
-            "document": {"type": "string", "minLength": 1},
-            "analysis": {"type": "string", "minLength": 1},
+            "document": {"type": "string", "minLength": 1, "maxLength": 256},
+            "analysis": {"type": "string", "minLength": 1, "maxLength": 256},
             "timeout_s": {
                 "type": "integer",
                 "minimum": 1,
@@ -122,8 +197,16 @@ _RUN_FEM_DEFINITION: dict[str, Any] = {
             "solver": {"type": "string"},
             "working_dir": {"type": "string"},
             "vtk_path": {"type": "string"},
-            "vtu_files": {"type": "array", "items": {"type": "string"}},
+            "vtu_files": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": MAX_RESULT_FILES,
+            },
+            "vtu_file_count": {"type": "integer", "minimum": 0},
+            "vtu_files_truncated": {"type": "boolean"},
             "blocks": {"type": "array", "items": {"$ref": "#/$defs/block"}},
+            "block_count": {"type": "integer", "minimum": 0},
+            "blocks_truncated": {"type": "boolean"},
             "aggregates": {"$ref": "#/$defs/aggregates"},
             "cancellation_requested": {"type": "boolean"},
         },
@@ -134,7 +217,11 @@ _RUN_FEM_DEFINITION: dict[str, Any] = {
             "working_dir",
             "vtk_path",
             "vtu_files",
+            "vtu_file_count",
+            "vtu_files_truncated",
             "blocks",
+            "block_count",
+            "blocks_truncated",
             "aggregates",
             "cancellation_requested",
         ],
@@ -163,7 +250,7 @@ def availability() -> dict[str, Any]:
     try:
         import Fem
     except Exception as exc:  # FreeCAD runtime always provides Fem.
-        info["reason"] = f"Fem module unavailable: {exc}"
+        info["reason"] = bounded_exception_reason(exc, "Fem module unavailable: ")
         return info
     info["has_frd_to_vtk"] = hasattr(Fem, "frdToVTK")
     if not info["has_frd_to_vtk"]:
@@ -174,7 +261,7 @@ def availability() -> dict[str, Any]:
 
         binary = fem_settings.get_binary("Calculix", silent=True)
     except Exception as exc:
-        info["reason"] = f"CalculiX solver settings unavailable: {exc}"
+        info["reason"] = bounded_exception_reason(exc, "CalculiX solver settings unavailable: ")
         return info
     if not binary or not os.path.isfile(binary):
         info["reason"] = (
@@ -186,7 +273,7 @@ def availability() -> dict[str, Any]:
     try:
         import femsolver.calculix.calculixtools  # noqa: F401  pulls vtk/numpy
     except Exception as exc:
-        info["reason"] = f"VTK result support unavailable: {exc}"
+        info["reason"] = bounded_exception_reason(exc, "VTK result support unavailable: ")
         return info
     info["vtk_support"] = True
     info["available"] = True
@@ -215,14 +302,19 @@ def run_fem(ctx: Any, arguments: dict[str, Any]) -> Any:
             },
         )
 
-    identity = ctx.document_identity(doc)
-    existing = ctx.active_solves.get(identity)
-    if existing is not None:
-        raise ToolError(
-            SERVER_BUSY,
-            "a solve is already running on this document",
-            details={"document": identity, "operation": "run_fem"},
-        )
+    # The shared gate is the one busy rejection for real contexts; plain
+    # handler fakes without the method keep the historical inline check.
+    check_idle = getattr(ctx, "check_document_idle", None)
+    if callable(check_idle):
+        check_idle(doc)
+    else:
+        identity = ctx.document_identity(doc)
+        if identity in (getattr(ctx, "active_solves", None) or {}):
+            raise ToolError(
+                SERVER_BUSY,
+                "a solve is already running on this document",
+                details={"document": identity, "operation": "run_fem"},
+            )
 
     prereq = availability()
     if not prereq["available"]:
@@ -232,22 +324,35 @@ def run_fem(ctx: Any, arguments: dict[str, Any]) -> Any:
             details=prereq,
         )
 
-    solver = _select_solver(ctx, doc, analysis)
-    _run_analysis_checks(analysis, solver)
+    solver, created_solver = _prepare_solver(ctx, doc, analysis)
+
+    # The working directory exists only after every document mutation has
+    # committed, so a rolled-back preparation never leaves it behind. A
+    # failure here is a post-commit failure: when this call created the
+    # solver, it remains committed, so the error reports may_have_changed.
+    try:
+        working_dir = _create_working_directory(ctx)
+    except ToolError as exc:
+        if created_solver:
+            details = dict(exc.details or {})
+            details["operationState"] = "may_have_changed"
+            exc.details = details
+        raise
 
     operation = _FemSolve(
         ctx,
         doc=doc,
         analysis=analysis,
         solver=solver,
-        working_dir=_create_working_directory(ctx),
+        working_dir=working_dir,
+        created_solver=created_solver,
     )
     operation.start()
     return operation.future
 
 
-def _select_solver(ctx: Any, doc: Any, analysis: Any) -> Any:
-    """Pick the single modern CalculiX solver, or create one; never convert."""
+def _find_modern_solver(analysis: Any) -> Any | None:
+    """Return the single modern CalculiX solver, or ``None``; never convert."""
     modern: list[Any] = []
     legacy: list[Any] = []
     for member in list(getattr(analysis, "Group", None) or []):
@@ -284,11 +389,79 @@ def _select_solver(ctx: Any, doc: Any, analysis: Any) -> Any:
             "deletes existing solvers",
             details={"legacy_solvers": _names(legacy)},
         )
-    return _create_modern_solver(ctx, doc, analysis)
+    return None
 
 
-def _create_modern_solver(ctx: Any, doc: Any, analysis: Any) -> Any:
-    """Create one modern solver inside the shared mutation gate."""
+def _prepare_solver(ctx: Any, doc: Any, analysis: Any) -> tuple[Any, bool]:
+    """Run the native checks and create a missing solver atomically.
+
+    Returns ``(solver, created_solver)``. The checks run before any solver
+    is created; a missing solver is created inside one transaction that
+    also runs the checks before commit, so a failure aborts the
+    transaction and removes the new solver. A solver that existed before
+    the call is returned unchanged.
+    """
+    existing = _find_modern_solver(analysis)
+    if existing is not None:
+        _run_analysis_checks(analysis, existing)
+        return existing, False
+
+    mesh = _analysis_mesh(analysis)
+    if _check_api_accepts_none_solver(analysis, mesh):
+        # Full no-solver validation runs before any mutation: a check
+        # failure raises here without creating anything. (The probe below
+        # already ran this check; rerunning keeps the message conversion
+        # in one place.)
+        _check_analysis_members(analysis, None, mesh)
+        return _create_modern_solver(ctx, doc, analysis), True
+    # The released check API requires a solver: create it and validate it
+    # inside one transaction so any check failure aborts and removes the
+    # new solver.
+    return _create_modern_solver(ctx, doc, analysis, with_checks=True), True
+
+
+def _check_api_accepts_none_solver(analysis: Any, mesh: Any) -> bool:
+    """True when the native per-member check runs without a solver.
+
+    The probe calls the released ``femtools`` function directly: its first
+    statement dereferences solver attributes, so the released API raises
+    ``AttributeError`` and this returns ``False``. The wrapping helpers
+    convert every failure into ``ToolError``, which would hide exactly
+    this distinction, so the probe must bypass them.
+    """
+    from femtools import membertools
+    from femtools.checksanalysis import check_member_for_solver_calculix
+
+    try:
+        member = membertools.AnalysisMember(analysis)
+    except Exception as exc:
+        # An analysis the member scan cannot read is a genuine check
+        # failure, not an API incompatibility; report it through the same
+        # structured path as the checked run instead of masking it.
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"running the native analysis checks failed: {exc}",
+            details={"traceback": traceback.format_exc()},
+        ) from exc
+    try:
+        check_member_for_solver_calculix(analysis, None, mesh, member)
+    except AttributeError:
+        # Released femtools dereferences solver attributes in its first
+        # statement, so this is the unsupported no-solver case. An
+        # unrelated internal AttributeError would be retried inside the
+        # create-and-check mutation, fail there the same way, and surface
+        # as a structured wrapped error after a clean abort.
+        return False
+    return True
+
+
+def _create_modern_solver(ctx: Any, doc: Any, analysis: Any, *, with_checks: bool = False) -> Any:
+    """Create one modern solver inside the shared mutation gate.
+
+    ``with_checks`` runs the native analysis checks before the commit, so
+    a failed check aborts the transaction and the abort removes the new
+    solver; used when the check API cannot run without a solver.
+    """
     import ObjectsFem
 
     from mcp_server.object_validation import mutation
@@ -304,21 +477,31 @@ def _create_modern_solver(ctx: Any, doc: Any, analysis: Any) -> Any:
             analysis.addObject(solver)
             created.append(solver)
             doc.recompute()
+            if with_checks:
+                _run_analysis_checks(analysis, solver)
     except ToolError:
         raise
     except Exception as exc:
+        details: dict[str, Any] = {"traceback": traceback.format_exc()}
+        if created:
+            # The transaction abort removed the solver this call created.
+            details["operationState"] = "rolled_back"
         raise ToolError(
             SOLVER_FAILED,
             f"creating the modern CalculiX solver failed: {exc}",
-            details={"traceback": traceback.format_exc()},
+            details=details,
         ) from exc
     return solver
 
 
 def _run_analysis_checks(analysis: Any, solver: Any) -> None:
     """Honor the native analysis checks that prepare() would ignore."""
+    _check_analysis_members(analysis, solver, _analysis_mesh(analysis))
+
+
+def _analysis_mesh(analysis: Any) -> Any:
+    """Collect the single mesh to solve; raises before any mutation."""
     from femtools import membertools
-    from femtools.checksanalysis import check_member_for_solver_calculix
 
     try:
         mesh, mesh_message = membertools.get_mesh_to_solve(analysis)
@@ -334,6 +517,14 @@ def _run_analysis_checks(analysis: Any, solver: Any) -> None:
             "FEM analysis checks failed",
             details={"checks": mesh_message.strip()},
         )
+    return mesh
+
+
+def _check_analysis_members(analysis: Any, solver: Any, mesh: Any) -> None:
+    """Run the native per-member checks against one solver (may be ``None``)."""
+    from femtools import membertools
+    from femtools.checksanalysis import check_member_for_solver_calculix
+
     try:
         member = membertools.AnalysisMember(analysis)
         message = check_member_for_solver_calculix(analysis, solver, mesh, member)
@@ -352,10 +543,12 @@ def _run_analysis_checks(analysis: Any, solver: Any) -> None:
 
 
 def _create_working_directory(ctx: Any) -> str:
-    """Unique empty working directory under the first allowed root.
+    """Unique empty working directory under the first allowed root that works.
 
     Created before ``CalculiXTools`` construction so the native working
-    directory preference logic keeps it.
+    directory preference logic keeps it. Runs only after every document
+    mutation has committed, so a rolled-back preparation never leaves a
+    directory behind.
     """
     roots = list((getattr(ctx, "settings", None) or {}).get("allowed_roots") or [])
     if not roots:
@@ -363,13 +556,21 @@ def _create_working_directory(ctx: Any) -> str:
             PATH_NOT_ALLOWED,
             "no allowed_roots configured for FEM working directories",
         )
-    try:
-        return tempfile.mkdtemp(prefix="fem_mcp_", dir=roots[0])
-    except OSError as exc:
-        raise ToolError(
-            PATH_NOT_ALLOWED,
-            f"cannot create the FEM working directory under {roots[0]}: {exc}",
-        ) from exc
+    last_error: OSError | None = None
+    for root in roots:
+        try:
+            return tempfile.mkdtemp(prefix="fem_mcp_", dir=root)
+        except OSError as exc:
+            last_error = exc
+    raise ToolError(
+        VALIDATION_FAILED,
+        f"cannot create the FEM working directory under any of the "
+        f"{len(roots)} configured allowed roots",
+        details={
+            "reason": "working_directory_unavailable",
+            "os_error": str(last_error),
+        },
+    ) from last_error
 
 
 # ---------------------------------------------------------------------------
@@ -388,12 +589,14 @@ class _FemSolve:
         analysis: Any,
         solver: Any,
         working_dir: str,
+        created_solver: bool = False,
     ) -> None:
         self.ctx = ctx
         self.doc = doc
         self.analysis = analysis
         self.solver = solver
         self.working_dir = working_dir
+        self.created_solver = created_solver
         self.identity: str | None = None
         self.generation: int | None = None
         self.future: concurrent.futures.Future = concurrent.futures.Future()
@@ -406,23 +609,41 @@ class _FemSolve:
 
     def start(self) -> None:
         """Build the tool, prepare, register, then start the QProcess."""
-        # The unique allowed-root directory is assigned BEFORE construction
-        # so the native working-directory preference logic keeps it.
-        self.solver.WorkingDirectory = self.working_dir
-        tool_class = _tool_class()
-        self.tool = tool_class(self.solver, self)
+        original_working_directory = getattr(self.solver, "WorkingDirectory", None)
         try:
+            # The unique allowed-root directory is assigned BEFORE
+            # construction so the native working-directory preference logic
+            # keeps it. All three post-commit steps report structured
+            # failures; none may escape as a raw GUI exception.
+            self.solver.WorkingDirectory = self.working_dir
+            tool_class = _tool_class()
+            self.tool = tool_class(self.solver, self)
             self.tool.prepare()
-        except ToolError:
-            raise
+        except ToolError as exc:
+            try:
+                if original_working_directory is not None:
+                    self.solver.WorkingDirectory = original_working_directory
+            except Exception:
+                pass
+            if not self.created_solver:
+                raise
+            details = dict(exc.details) if isinstance(exc.details, dict) else {}
+            details["operationState"] = "may_have_changed"
+            raise ToolError(exc.code, exc.message, details) from exc
         except Exception as exc:
+            restored = True
+            try:
+                if original_working_directory is not None:
+                    self.solver.WorkingDirectory = original_working_directory
+            except Exception:
+                restored = False
+            details = self._launch_failure_details(traceback_text=traceback.format_exc())
+            if not restored:
+                details["operationState"] = "may_have_changed"
             raise ToolError(
                 SOLVER_FAILED,
                 f"preparing the CalculiX run failed: {exc}",
-                details={
-                    "working_dir": self.working_dir,
-                    "traceback": traceback.format_exc(),
-                },
+                details=details,
             ) from exc
 
         # Captured after prepare, before compute; the operation's own
@@ -442,12 +663,24 @@ class _FemSolve:
                 error=ToolError(
                     SOLVER_FAILED,
                     f"starting the CalculiX process failed: {exc}",
-                    details={
-                        "working_dir": self.working_dir,
-                        "traceback": traceback.format_exc(),
-                    },
+                    details=self._launch_failure_details(traceback_text=traceback.format_exc()),
                 )
             )
+
+    def _launch_failure_details(self, *, traceback_text: str) -> dict[str, Any]:
+        """Details for a failure after the preparation transaction committed.
+
+        A committed new solver from this call remains in the document, so
+        the state is truthfully ``may_have_changed``; without one the
+        document was never mutated and no ``operationState`` is claimed.
+        """
+        details: dict[str, Any] = {
+            "working_dir": self.working_dir,
+            "traceback": traceback_text,
+        }
+        if self.created_solver:
+            details["operationState"] = "may_have_changed"
+        return details
 
     def _cancel_requested(self) -> bool:
         """True through any shared route: direct request or the ctx Event.
@@ -675,8 +908,8 @@ class _FemSolve:
 
     def _result_payload(self) -> dict[str, Any]:
         pipeline = self._pipeline()
-        blocks = _summarize_pipeline(pipeline)
-        vtk_path, vtu_files = _result_files(self.working_dir)
+        blocks, totals = _summarize_pipeline(pipeline)
+        vtk_path, vtu_files, vtu_count, vtu_truncated = _result_files(self.working_dir)
         return {
             "pipeline": getattr(pipeline, "Name", ""),
             "analysis": getattr(self.analysis, "Name", ""),
@@ -684,12 +917,17 @@ class _FemSolve:
             "working_dir": self.working_dir,
             "vtk_path": vtk_path,
             "vtu_files": vtu_files,
+            "vtu_file_count": vtu_count,
+            "vtu_files_truncated": vtu_truncated,
             "blocks": blocks,
+            "block_count": totals["block_count"],
+            "blocks_truncated": totals["block_count"] > len(blocks),
             "aggregates": {
-                # Sums over the returned blocks, not deduplicated nodes.
-                "block_count": len(blocks),
-                "point_count_sum": sum(block["points"] for block in blocks),
-                "cell_count_sum": sum(block["cells"] for block in blocks),
+                # Totals over every traversed block, not only the returned
+                # ones, and not deduplicated nodes.
+                "block_count": totals["block_count"],
+                "point_count_sum": totals["point_count_sum"],
+                "cell_count_sum": totals["cell_count_sum"],
             },
             "cancellation_requested": self._cancel_requested(),
         }
@@ -766,33 +1004,46 @@ def _tool_class() -> type:
 # ---------------------------------------------------------------------------
 
 
-def _summarize_pipeline(pipeline: Any) -> list[dict[str, Any]]:
+def _summarize_pipeline(pipeline: Any) -> tuple[list[dict[str, Any]], dict[str, int]]:
     data = getattr(pipeline, "Data", None)
     blocks: list[dict[str, Any]] = []
+    totals = {"block_count": 0, "point_count_sum": 0, "cell_count_sum": 0}
     if data is None:
-        return blocks
-    _collect_blocks(data, blocks)
-    return blocks
+        return blocks, totals
+    _collect_blocks(data, blocks, totals)
+    return blocks, totals
 
 
-def _collect_blocks(node: Any, blocks: list[dict[str, Any]]) -> None:
+def _collect_blocks(node: Any, blocks: list[dict[str, Any]], totals: dict[str, int]) -> None:
     if hasattr(node, "GetNumberOfBlocks") and hasattr(node, "GetBlock"):
         for index in range(node.GetNumberOfBlocks()):
             child = node.GetBlock(index)
             if child is None:
                 continue
-            _collect_blocks(child, blocks)
+            _collect_blocks(child, blocks, totals)
         return
     points = node.GetNumberOfPoints()
     if not points:
         return  # nonempty leaves only
+    totals["block_count"] += 1
+    totals["point_count_sum"] += int(points)
     get_cells = getattr(node, "GetNumberOfCells", None)
+    cells = int(get_cells()) if callable(get_cells) else 0
+    totals["cell_count_sum"] += cells
+    if len(blocks) >= MAX_RESULT_BLOCKS:
+        # The returned summaries are capped; only the cheap totals keep
+        # counting past the cap.
+        return
     block = {
         "block": len(blocks),
         "points": int(points),
-        "cells": int(get_cells()) if callable(get_cells) else 0,
+        "cells": cells,
         "scalars": {},
         "vectors": {},
+        "scalar_count": 0,
+        "scalars_truncated": False,
+        "vector_count": 0,
+        "vectors_truncated": False,
     }
     get_point_data = getattr(node, "GetPointData", None)
     if callable(get_point_data):
@@ -806,7 +1057,16 @@ def _collect_blocks(node: Any, blocks: list[dict[str, Any]]) -> None:
             if summary is None:
                 continue
             kind, (low, high) = summary
-            target = block["vectors"] if kind == "vector" else block["scalars"]
+            if kind == "vector":
+                target = block["vectors"]
+                count_key, cap_key = "vector_count", "vectors_truncated"
+            else:
+                target = block["scalars"]
+                count_key, cap_key = "scalar_count", "scalars_truncated"
+            block[count_key] += 1
+            if len(target) >= MAX_RESULT_FIELDS:
+                block[cap_key] = True
+                continue
             target[name] = {"min": low, "max": high}
     blocks.append(block)
 
@@ -845,8 +1105,8 @@ def _array_range(array: Any) -> tuple[str, tuple[float, float]] | None:
         return None
 
 
-def _result_files(working_dir: str) -> tuple[str, list[str]]:
-    """The generated .vtm path (never renamed to .vtk) and its .vtu files."""
+def _result_files(working_dir: str) -> tuple[str, list[str], int, bool]:
+    """The .vtm path plus the bounded .vtu list with its total count."""
     vtm_candidates: list[tuple[float, str]] = []
     vtu_files: list[str] = []
     for root, _dirs, files in os.walk(working_dir):
@@ -867,7 +1127,10 @@ def _result_files(working_dir: str) -> tuple[str, list[str]]:
             details={"working_dir": working_dir},
         )
     vtm_candidates.sort()
-    return vtm_candidates[-1][1], sorted(vtu_files)
+    vtu_files.sort()
+    vtu_count = len(vtu_files)
+    truncated = vtu_count > MAX_RESULT_FILES
+    return vtm_candidates[-1][1], vtu_files[:MAX_RESULT_FILES], vtu_count, truncated
 
 
 def _process_text(process: Any, method_name: str) -> str:
@@ -876,11 +1139,11 @@ def _process_text(process: Any, method_name: str) -> str:
         return ""
     try:
         data = reader()
+        raw = data.data() if hasattr(data, "data") else data
     except Exception:
         return ""
     if data is None:
         return ""
-    raw = data.data() if hasattr(data, "data") else data
     try:
         return bytes(raw).decode("utf-8", errors="replace")
     except Exception:

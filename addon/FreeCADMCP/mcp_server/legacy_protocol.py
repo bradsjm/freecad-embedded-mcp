@@ -52,6 +52,7 @@ from mcp_server.protocol import (
     META_PROTOCOL_VERSION,
     META_SERVER_INFO,
     METHOD_NOT_FOUND,
+    SERVER_BUSY,
     SERVER_INFO,
     ProtocolError,
     ToolError,
@@ -73,9 +74,6 @@ LATEST_LEGACY_PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSIONS[-1]
 
 #: Only this revision's transport defines JSON-RPC batch requests.
 BATCH_REVISION = "2025-03-26"
-
-#: Application tool code shared with ``server.py`` (never a JSON-RPC code).
-SERVER_BUSY = "SERVER_BUSY"
 
 MAX_LEGACY_SESSIONS = 32
 MAX_INFLIGHT_LEGACY_REQUESTS = 32

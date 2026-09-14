@@ -39,8 +39,9 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from ..object_validation import mutation
-from ..protocol import VALIDATION_FAILED, ToolError
+from ..object_validation import geometry_report, mutation
+from ..protocol import VALIDATION_FAILED, ToolError, stale_generation_details
+from .feature_contracts import check_workload
 
 # Property types accepted for ``add``; the FreeCAD-level
 # ``supportedProperties()`` check below additionally guards at runtime.
@@ -66,6 +67,84 @@ _GROUP = "Parameters"
 _DOC = "Added by freecad-mcp edit_parameters."
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# ---------------------------------------------------------------------------
+# Shared mutation-contract fragments.
+#
+# These mirror the fragments defined in tools/objects.py. They are copied
+# locally instead of imported because this module must stay importable — and
+# its documented host-only test suite must stay runnable — without FreeCAD,
+# while objects.py imports FreeCAD at module level.
+# ---------------------------------------------------------------------------
+
+_EXPECTED_GENERATION = {
+    "type": ["integer", "null"],
+    "minimum": 0,
+    "description": (
+        "Optional guard: refuse when the document generation no longer matches the inspected value."
+    ),
+}
+_EXPECTED_SOLIDS = {"type": "integer", "minimum": 0}
+_EXPECTED_BOUNDS = {
+    "type": "array",
+    "items": {"type": "number"},
+    "minItems": 6,
+    "maxItems": 6,
+}
+_BOUNDS_TOLERANCE = {
+    "type": "number",
+    "minimum": 0,
+    "maximum": 1000000,
+    "default": 0.000001,
+}
+_DEFAULT_BOUNDS_TOLERANCE = 0.000001
+
+_GEOMETRY_REPORT = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "name",
+        "state",
+        "object_valid",
+        "shape_valid",
+        "solid_count",
+        "volume",
+        "bounds",
+        "diagnostics",
+        "max_tolerance",
+        "ok",
+        "error",
+    ],
+    "properties": {
+        "name": {"type": "string"},
+        "state": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
+        "object_valid": {"type": "boolean"},
+        "shape_valid": {"type": ["boolean", "null"]},
+        "solid_count": {"type": ["integer", "null"], "minimum": 0},
+        "volume": {"type": ["number", "null"]},
+        "bounds": {
+            "type": ["array", "null"],
+            "items": {"type": "number"},
+            "minItems": 6,
+            "maxItems": 6,
+        },
+        "diagnostics": {"type": "array", "items": {"type": "string"}, "maxItems": 64},
+        "max_tolerance": {"type": ["number", "null"]},
+        "ok": {"type": "boolean"},
+        "error": {"type": ["string", "null"]},
+        "geometryUnavailable": {"type": "string", "minLength": 1},
+    },
+}
+_UNITS = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["length", "volume", "tolerance"],
+    "properties": {
+        "length": {"type": "string"},
+        "volume": {"type": "string"},
+        "tolerance": {"type": "string"},
+    },
+}
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = []
 HANDLERS: dict[str, Callable[[Any, dict[str, Any]], Any]] = {}
@@ -120,7 +199,13 @@ def _definition() -> dict[str, Any]:
             "recompute, a failed property operation or an invalid expression "
             "reference rolls the whole operation back. Expression keys and "
             "clear_expressions names are final (post-rename) property names. "
-            "Recomputed dependents are validated, not just the edited object."
+            "Recomputed dependents are validated, not just the edited object. "
+            'response_detail defaults to "compact"; "full" also returns '
+            "the pre-edit geometry report. Every result includes the post-edit "
+            "bodyReport and units in millimetres, cubic millimetres, and millimetres."
+            " Pass expected_generation to refuse a plan made against a stale"
+            " document, and expected_solids/expected_bounds/bounds_tolerance"
+            " to state the post-edit contract."
         ),
         "inputSchema": {
             "type": "object",
@@ -128,6 +213,15 @@ def _definition() -> dict[str, Any]:
             "properties": {
                 "document": {"type": "string", "minLength": 1},
                 "object": {"type": "string", "minLength": 1},
+                "response_detail": {
+                    "type": "string",
+                    "enum": ["compact", "full"],
+                    "default": "compact",
+                },
+                "expected_generation": _EXPECTED_GENERATION,
+                "expected_solids": _EXPECTED_SOLIDS,
+                "expected_bounds": _EXPECTED_BOUNDS,
+                "bounds_tolerance": _BOUNDS_TOLERANCE,
                 "expressions": {
                     "type": "object",
                     "additionalProperties": {"type": "string", "minLength": 1},
@@ -164,7 +258,9 @@ def _definition() -> dict[str, Any]:
                     },
                     "required": ["from", "to"],
                     "additionalProperties": False,
-                }
+                },
+                "geometryReport": _GEOMETRY_REPORT,
+                "units": _UNITS,
             },
             "properties": {
                 "document": {"type": "string", "minLength": 1},
@@ -181,16 +277,9 @@ def _definition() -> dict[str, Any]:
                     "items": {"type": "string"},
                 },
                 "applied": {"type": "array", "items": {"type": "string"}},
-                "checkpoint": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["path", "document", "generation"],
-                    "properties": {
-                        "path": {"type": "string", "minLength": 1},
-                        "document": {"type": "string", "minLength": 1},
-                        "generation": {"type": "integer", "minimum": 0},
-                    },
-                },
+                "bodyReport": {"$ref": "#/$defs/geometryReport"},
+                "beforeReport": {"$ref": "#/$defs/geometryReport"},
+                "units": {"$ref": "#/$defs/units"},
             },
             "required": [
                 "document",
@@ -201,6 +290,8 @@ def _definition() -> dict[str, Any]:
                 "expressions",
                 "clearedExpressions",
                 "applied",
+                "bodyReport",
+                "units",
             ],
             "additionalProperties": False,
         },
@@ -479,18 +570,61 @@ def _validate_all(obj: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Handler (GUI thread).
-# ---------------------------------------------------------------------------
+def _require_expected_generation(ctx: Any, doc: Any, arguments: dict[str, Any]) -> None:
+    """Refuse a plan made against a stale document generation.
+
+    Mirrors the shared preflight in tools/objects.py, including its error
+    shape; kept local so the handler stays runnable on the host-only
+    FreeCAD doubles.
+    """
+
+    expected = arguments.get("expected_generation")
+    if expected is None:
+        return
+    actual = int(ctx.document_generation(doc))
+    if expected == actual:
+        return
+    raise ToolError(
+        VALIDATION_FAILED,
+        "document changed since inspection; re-run inspect_objects",
+        stale_generation_details(expected, actual, "inspect_objects"),
+    )
 
 
 def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     doc = ctx.require_document(arguments["document"])
     obj = ctx.require_object(doc, arguments["object"])
+    _require_expected_generation(ctx, doc, arguments)
 
     plan = _validate_all(obj, arguments)
 
-    with mutation(ctx, doc, "edit_parameters", [obj]) as applied:
+    expected_solids = arguments.get("expected_solids")
+    expected_bounds = arguments.get("expected_bounds")
+    bounds_tolerance = arguments.get("bounds_tolerance")
+    if bounds_tolerance is None:
+        bounds_tolerance = _DEFAULT_BOUNDS_TOLERANCE
+
+    before_report: dict[str, Any] = {}
+
+    def capture_baseline() -> int | None:
+        """Capture the pre-edit report after the mutation idle gate."""
+
+        report = geometry_report(obj)
+        before_report.update(report)
+        return report["solid_count"] if expected_solids is None else expected_solids
+
+    outcome: dict[str, Any] = {}
+    with mutation(
+        ctx,
+        doc,
+        "edit_parameters",
+        [obj],
+        expected_solids=capture_baseline,
+        expected_bounds=expected_bounds,
+        bounds_tolerance=float(bounds_tolerance),
+        outcome=outcome,
+        check_workload=check_workload,
+    ) as applied:
         for entry in plan["added_entries"]:
             obj.addProperty(entry["type"], entry["name"], _GROUP, _DOC)
             applied.append(f"add:{entry['name']}")
@@ -507,7 +641,7 @@ def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             obj.setExpression(prop, expression)
             applied.append(f"expression:{prop}")
 
-    return {
+    result = {
         "document": str(doc.Name),
         "generation": int(ctx.document_generation(doc)),
         "object": str(obj.Name),
@@ -516,7 +650,12 @@ def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         "expressions": [prop for prop, _expression in plan["expressions"]],
         "clearedExpressions": list(plan["clears"]),
         "applied": list(applied),
+        "bodyReport": outcome["reports"][str(obj.Name)],
+        "units": {"length": "mm", "volume": "mm3", "tolerance": "mm"},
     }
+    if str(arguments.get("response_detail") or "compact") == "full":
+        result["beforeReport"] = before_report
+    return result
 
 
 HANDLERS = {"edit_parameters": _edit_parameters}

@@ -76,6 +76,8 @@ def test_success_captures_stdout_and_persists_the_namespace() -> None:
             "stdoutTruncated": False,
             "stderrTruncated": False,
             "executed": True,
+            "cancellation_requested": False,
+            "deadline_exceeded": False,
         }
         namespace = ctx.script_namespaces["default"]
         assert namespace["App"] is ctx.App
@@ -175,6 +177,8 @@ def test_cancelled_before_execution_never_runs_the_code() -> None:
             "stdoutTruncated": False,
             "stderrTruncated": False,
             "executed": False,
+            "cancellation_requested": True,
+            "deadline_exceeded": False,
         }
         # A cancelled call allocates no session at all.
         assert ctx.script_namespaces == {}
@@ -245,6 +249,21 @@ def test_failure_details_are_capped_and_report_may_have_changed() -> None:
         # The mutation before the raise really happened; the state is
         # reported truthfully as may-have-changed, not rolled back.
         assert ctx.script_namespaces["default"]["partial_marker"] == 1
+
+
+def test_damaged_stdout_stream_returns_structured_failure() -> None:
+    with load_script() as script:
+        ctx = FakeCtx()
+
+        with pytest.raises(ToolError) as excinfo:
+            call(script, "import sys\nsys.stdout.close()\nprint('unreachable')", ctx=ctx)
+
+        error = excinfo.value
+        assert error.code == "VALIDATION_FAILED"
+        assert error.message == "ValueError: I/O operation on closed file"
+        assert error.details["operationState"] == "may_have_changed"
+        assert error.details["stdout"] == ""
+        assert error.details["stderr"] == ""
 
 
 def test_traceback_is_streamed_into_the_capped_tail(

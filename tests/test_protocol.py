@@ -550,6 +550,33 @@ class TestFiniteSchemas:
         with pytest.raises(ValueError):
             protocol.check_schema(schema)
 
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {"type": "integer", "default": "bad"},
+            {"type": "integer", "enum": ["bad"]},
+            {"type": "number", "enum": [float("nan")]},
+        ],
+    )
+    def test_schema_examples_match_their_declared_type(self, schema):
+        with pytest.raises(ValueError):
+            protocol.check_schema(schema)
+
+    def test_deep_non_reference_schema_does_not_consume_reference_budget(self):
+        schema = {"type": "string"}
+        value = "leaf"
+        for _ in range(40):
+            schema = {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["next"],
+                "properties": {"next": schema},
+            }
+            value = {"next": value}
+
+        protocol.check_schema(schema)
+        protocol.validate_schema(value, schema)
+
     def test_validate_schema_accepts_valid_nested_payload(self):
         protocol.validate_schema(
             {
@@ -780,11 +807,6 @@ class TestBuilders:
         assert response["error"]["code"] == -32601
         with pytest.raises(TypeError):
             protocol.error_response({"message": "no code"})
-
-    def test_parse_error_response(self):
-        response = protocol.parse_error_response()
-        assert response["error"]["code"] == protocol.PARSE_ERROR
-        assert "id" not in response
 
     def test_capability_helpers(self):
         protocol.require_client_capabilities(

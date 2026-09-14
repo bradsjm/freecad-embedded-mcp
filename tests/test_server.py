@@ -12,12 +12,15 @@ No sockets: requests are driven through ``protocol.validate_request`` +
 ``Server.dispatch`` exactly as the HTTP layer does.
 """
 
+import base64
 import json
 import queue
+import struct
 import sys
 import threading
 import time
 import types
+import zlib
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -285,6 +288,20 @@ def _install_tool_modules() -> None:
         "calculix_binary": None,
         "reason": "stub",
     }
+
+    # server.py's capability probes consume the FEM module's shared
+    # bounded-reason renderer lazily; the stub mirrors its wire contract
+    # (512-char bound, head cut, explicit truncation suffix).
+    def _stub_bounded_reason(text, *, limit=512):
+        if len(text) <= limit:
+            return text
+        return text[: limit - len("...[truncated]")] + "...[truncated]"
+
+    def _stub_bounded_exception_reason(exc, prefix="", *, limit=512):
+        return _stub_bounded_reason(f"{prefix}{type(exc).__name__}: {exc}", limit=limit)
+
+    sys.modules["mcp_server.tools.fem"].bounded_reason = _stub_bounded_reason
+    sys.modules["mcp_server.tools.fem"].bounded_exception_reason = _stub_bounded_exception_reason
     _module("script", _OTHER_TOOLS["script"], None)
 
 
@@ -738,11 +755,7 @@ def test_discover_capabilities_tool_never_touches_the_gui():
     gui_dispatch.dispatch_to_gui = _forbid
     try:
         server = make_server()
-        server._static_capabilities = {
-            "freecad": {"version": [1, 1, 3]},
-            "workbenches": {"Part": {}},
-            "paths": {"home": "/fc"},
-        }
+        server._static_capabilities = _capability_snapshot_fixture()
         response = dispatch(
             server,
             "tools/call",
@@ -756,9 +769,36 @@ def test_discover_capabilities_tool_never_touches_the_gui():
     # Compact by default: the summary blocks plus the supported-types
     # summary; workbenches/paths/supportedTypes need detail "full".
     assert result["structuredContent"]["capabilities"] == {
-        "freecad": {"version": [1, 1, 3]},
-        "supportedTypesCount": None,
-        "supportedTypesDocument": None,
+        "freecad": {"version": [1, 1, 3], "full": ["1", "1", "3", "dev"]},
+        "occ": {"version": "7.8.0"},
+        "exporters": {
+            "mesh": True,
+            "meshPart": True,
+            "part": True,
+            "step": True,
+            "fem": True,
+        },
+        "fem": {
+            "module": True,
+            "objectsFem": True,
+            "femsolver": True,
+            "readiness": {
+                "available": True,
+                "has_frd_to_vtk": True,
+                "vtk_support": True,
+                "calculix_binary": "/usr/bin/ccx",
+                "reason": None,
+            },
+        },
+        "geometryQueries": {
+            "syntax": "cadquery-string-v1",
+            "roles": ["face", "edge"],
+            "maxSteps": 8,
+            "maxSelectorLength": 256,
+            "maxCandidates": 256,
+        },
+        "supportedTypesCount": 2,
+        "supportedTypesDocument": "Alpha",
         "scriptingEnabled": True,
         "recoveryEnabled": False,
     }
@@ -969,14 +1009,159 @@ def test_blocked_running_deadline_reports_still_running_then_completes():
         assert started.wait(timeout=5.0)
         events = drain_stream(response, 2, timeout=5.0)
         result = events[0]["result"]
-        assert result["structuredContent"]["error"]["code"] == "SERVER_BUSY"
+        assert result["structuredContent"]["error"]["code"] == "GUI_DISPATCH_STUCK"
         assert result["structuredContent"]["error"]["details"]["stillRunning"] is True
         # Truthful: the operation is still tracked until it actually ends.
         assert server.has_pending_operations()
+        follow_up = dispatch(
+            server,
+            "tools/call",
+            {"name": "inspect_objects", "arguments": {}},
+            rpc_id=12,
+        )
+        follow_up_events = drain_stream(follow_up, 2, timeout=5.0)
+        follow_up_error = follow_up_events[0]["result"]["structuredContent"]["error"]
+        assert follow_up_error["code"] == "GUI_DISPATCH_STUCK"
+        assert follow_up_error["details"]["reason"] == "dispatcher_stuck"
+        assert follow_up_error["details"]["started"] is False
         release.set()
         assert wait_until(lambda: not server.has_pending_operations())
     finally:
         server_module.DEFAULT_DEADLINE_S = original_deadline
+
+
+def test_capture_view_publishes_png_data_only_in_image_content():
+    server = make_server()
+    raw_schema = {
+        "type": "object",
+        "properties": {
+            "mimeType": {"type": "string", "enum": ["image/png"]},
+            "data": {"type": "string", "minLength": 1},
+            "width": {"type": "integer", "minimum": 1},
+            "height": {"type": "integer", "minimum": 1},
+        },
+        "required": ["mimeType", "data", "width", "height"],
+        "additionalProperties": False,
+    }
+    server._raw_output_schemas["capture_view"] = raw_schema
+    server._definitions["capture_view"]["outputSchema"] = {
+        "type": "object",
+        "properties": {
+            "mimeType": {"type": "string", "enum": ["image/png"]},
+            "width": {"type": "integer", "minimum": 1},
+            "height": {"type": "integer", "minimum": 1},
+        },
+        "required": ["mimeType", "width", "height"],
+        "additionalProperties": False,
+    }
+    data = base64.b64encode(b"\x89PNG\r\n").decode("ascii")
+
+    result = server._validated_tool_result(
+        "capture_view",
+        {"mimeType": "image/png", "data": data, "width": 8, "height": 6},
+    )
+
+    assert result["content"] == [{"type": "image", "mimeType": "image/png", "data": data}]
+    assert result["structuredContent"] == {
+        "mimeType": "image/png",
+        "width": 8,
+        "height": 6,
+    }
+
+
+def _minimal_png(width: int = 4, height: int = 3) -> bytes:
+    """Build a structurally valid grayscale PNG with stdlib only."""
+
+    def _chunk(ctype: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + ctype
+            + payload
+            + struct.pack(">I", zlib.crc32(ctype + payload) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    scanlines = b"".join(b"\x00" + b"\xff" * width for _ in range(height))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", zlib.compress(scanlines))
+        + _chunk(b"IEND", b"")
+    )
+
+
+def _assert_decodable_png(raw: bytes, width: int, height: int) -> None:
+    """Decode the PNG stream: signature, CRC-checked chunks, IHDR dims."""
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+    offset = 8
+    seen_ihdr = False
+    terminated = False
+    while offset + 12 <= len(raw):
+        length, ctype = struct.unpack(">I4s", raw[offset : offset + 8])
+        end = offset + 8 + length
+        payload = raw[offset + 8 : end]
+        assert len(payload) == length, "PNG chunk is truncated"
+        (crc,) = struct.unpack(">I", raw[end : end + 4])
+        assert crc == zlib.crc32(ctype + payload) & 0xFFFFFFFF
+        if ctype == b"IHDR":
+            assert struct.unpack(">IIBBBBB", payload)[:2] == (width, height)
+            seen_ihdr = True
+        if ctype == b"IEND":
+            assert end + 4 == len(raw)
+            terminated = True
+            break
+        offset = end + 4
+    assert terminated, "PNG stream is truncated"
+    assert seen_ihdr, "PNG stream has no IHDR"
+
+
+def test_capture_image_content_carries_decodable_png_exactly_once():
+    """The validated capture path publishes the PNG exactly once: the image
+    content block holds the decodable bytes, and ``structuredContent`` keeps
+    metadata only, with no ``data`` key anywhere else on the wire."""
+    server = make_server()
+    raw_schema = {
+        "type": "object",
+        "properties": {
+            "mimeType": {"type": "string", "enum": ["image/png"]},
+            "data": {"type": "string", "minLength": 1},
+            "width": {"type": "integer", "minimum": 1},
+            "height": {"type": "integer", "minimum": 1},
+        },
+        "required": ["mimeType", "data", "width", "height"],
+        "additionalProperties": False,
+    }
+    server._raw_output_schemas["capture_view"] = raw_schema
+    server._definitions["capture_view"]["outputSchema"] = {
+        "type": "object",
+        "properties": {
+            "mimeType": {"type": "string", "enum": ["image/png"]},
+            "width": {"type": "integer", "minimum": 1},
+            "height": {"type": "integer", "minimum": 1},
+        },
+        "required": ["mimeType", "width", "height"],
+        "additionalProperties": False,
+    }
+    png = _minimal_png(width=4, height=3)
+    data = base64.b64encode(png).decode("ascii")
+
+    result = server._validated_tool_result(
+        "capture_view",
+        {"mimeType": "image/png", "data": data, "width": 4, "height": 3},
+    )
+
+    assert result["content"] == [{"type": "image", "mimeType": "image/png", "data": data}]
+    decoded = base64.b64decode(result["content"][0]["data"], validate=True)
+    assert decoded == png
+    _assert_decodable_png(decoded, width=4, height=3)
+    assert result["structuredContent"] == {
+        "mimeType": "image/png",
+        "width": 4,
+        "height": 3,
+    }
+    assert "data" not in result["structuredContent"]
+    # One wire copy of the bytes: duplication in any other field fails here.
+    assert json.dumps(result).count(data) == 1
 
 
 def test_queued_deadline_cancels_before_execution():
@@ -2326,14 +2511,44 @@ def test_discover_refresh_error_does_not_publish_late_results():
 
 def _capability_snapshot_fixture() -> dict:
     return {
-        "freecad": {"version": [1, 1, 3]},
+        "freecad": {"version": [1, 1, 3], "full": ["1", "1", "3", "dev"]},
         "occ": {"version": "7.8.0"},
-        "workbenches": {"Part": {}, "Mesh": {}},
+        "workbenches": ["Mesh", "Part"],
         "supportedTypes": ["Mesh::Mesh", "Part::Feature"],
-        "exporters": {"part": True},
-        "fem": {"module": True},
+        "exporters": {
+            "mesh": True,
+            "meshPart": True,
+            "part": True,
+            "step": True,
+            "fem": True,
+        },
+        "fem": {
+            "module": True,
+            "objectsFem": True,
+            "femsolver": True,
+            "readiness": {
+                "available": True,
+                "has_frd_to_vtk": True,
+                "vtk_support": True,
+                "calculix_binary": "/usr/bin/ccx",
+                "reason": None,
+            },
+        },
         "supportedTypesDocument": "Alpha",
-        "paths": {"home": "/fc"},
+        "geometryQueries": {
+            "syntax": "cadquery-string-v1",
+            "roles": ["face", "edge"],
+            "maxSteps": 8,
+            "maxSelectorLength": 256,
+            "maxCandidates": 256,
+        },
+        "paths": {
+            "home": "/fc",
+            "userAppData": "/fc/app",
+            "userMacro": "/fc/macro",
+            "temp": "/tmp",
+            "resource": "/fc/resource",
+        },
     }
 
 
@@ -2359,13 +2574,14 @@ def test_discover_capabilities_compact_default_omits_heavy_arrays():
         "occ",
         "exporters",
         "fem",
+        "geometryQueries",
         "supportedTypesCount",
         "supportedTypesDocument",
         "scriptingEnabled",
         "recoveryEnabled",
     }
-    assert capabilities["freecad"] == {"version": [1, 1, 3]}
-    assert capabilities["exporters"] == {"part": True}
+    assert capabilities["freecad"] == {"version": [1, 1, 3], "full": ["1", "1", "3", "dev"]}
+    assert capabilities["exporters"]["part"] is True
     assert capabilities["supportedTypesCount"] == 2
     assert capabilities["supportedTypesDocument"] == "Alpha"
     # The heavy arrays are only available through detail "full".
@@ -2390,9 +2606,15 @@ def test_discover_capabilities_full_detail_returns_complete_snapshot():
         "scriptingEnabled": True,
         "recoveryEnabled": False,
     }
-    assert capabilities["workbenches"] == {"Part": {}, "Mesh": {}}
+    assert capabilities["workbenches"] == ["Mesh", "Part"]
     assert capabilities["supportedTypes"] == ["Mesh::Mesh", "Part::Feature"]
-    assert capabilities["paths"] == {"home": "/fc"}
+    assert capabilities["paths"] == {
+        "home": "/fc",
+        "userAppData": "/fc/app",
+        "userMacro": "/fc/macro",
+        "temp": "/tmp",
+        "resource": "/fc/resource",
+    }
     # Nothing was refreshed: the cached snapshot is returned unchanged.
     assert server._static_capabilities == snapshot
 
@@ -2431,6 +2653,38 @@ def test_discover_capabilities_refresh_publishes_through_blocking_path():
         lambda: (server._static_capabilities or {}).get("supportedTypesDocument") == "Alpha"
     )
     assert server._capability_snapshot()["supportedTypes"] == ["Mesh::Mesh", "Part::Feature"]
+
+
+def test_capability_probe_long_exception_stays_schema_bounded(monkeypatch):
+    """A capability probe raising >512-char text cannot break discovery.
+
+    Every ``unavailable`` reason is schema-bounded at 512 characters; the
+    bounded renderer must cut a long exception deterministically so the
+    schema-validated ``discover_capabilities`` result stays complete
+    instead of collapsing into -32603.
+    """
+
+    def exploding(*_args, **_kwargs):
+        raise RuntimeError("x" * 600)
+
+    monkeypatch.setattr(server_module.FreeCAD, "getHomePath", exploding)
+    server = make_server()
+    server._capture_static_capabilities()
+    full = dispatch(
+        server,
+        "tools/call",
+        {"name": "discover_capabilities", "arguments": {"detail": "full"}},
+        rpc_id=30,
+    )
+    assert "error" not in full  # a >512 reason would fail validation: -32603
+    result = full["result"]
+    assert result["resultType"] == "complete"
+    home = result["structuredContent"]["capabilities"]["paths"]["home"]
+    assert set(home) == {"unavailable"}
+    reason = home["unavailable"]
+    assert len(reason) == 512  # deterministic cut at the exact schema limit
+    assert reason.startswith("RuntimeError: ")
+    assert reason.endswith("...[truncated]")
 
 
 # ---------------------------------------------------------------------------

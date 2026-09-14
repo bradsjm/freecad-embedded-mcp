@@ -1,5 +1,5 @@
 {
-  "captured": "2026-09-14T15:40:40.846+00:00",
+  "captured": "2026-09-14T22:21:51.076+00:00",
   "freecad": "1.1.3",
   "probes": {
     "attachment.properties": {
@@ -76,29 +76,15 @@
       "forms": {
         "Angle:[0, 1, 0, 2]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            1,
-            0,
-            2
-          ],
           "constructor": "ok",
-          "datum": "deg",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Angle"
+          "outcome": "accepted"
         },
         "Angle:[0, 1]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            1
-          ],
           "constructor": "ok",
-          "datum": "deg",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Angle"
+          "outcome": "accepted"
         },
         "Angle:[0]": {
           "arguments": [
@@ -121,56 +107,27 @@
         },
         "Block:[2]": {
           "addConstraint": "ok",
-          "arguments": [
-            2
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Block"
+          "outcome": "accepted"
         },
         "Coincident:[0, 1, -1, 0]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            1,
-            -1,
-            0
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Coincident"
+          "outcome": "accepted"
         },
         "Coincident:[0, 1, -1, 1]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            1,
-            -1,
-            1
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Coincident"
+          "outcome": "accepted"
         },
         "Coincident:[0, 2, 1, 1]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            2,
-            1,
-            1
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Coincident"
+          "outcome": "accepted"
         },
         "Coincident:[0, 2, 1]": {
           "arguments": [
@@ -197,53 +154,27 @@
         },
         "Diameter:[2]": {
           "addConstraint": "ok",
-          "arguments": [
-            2
-          ],
           "constructor": "ok",
-          "datum": "mm",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Diameter"
+          "outcome": "accepted"
         },
         "Distance:[0, 1, 1, 2]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            1,
-            1,
-            2
-          ],
           "constructor": "ok",
-          "datum": "mm",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Distance"
+          "outcome": "accepted"
         },
         "Distance:[0, 1, 2]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            1,
-            2
-          ],
           "constructor": "ok",
-          "datum": "mm",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Distance"
+          "outcome": "accepted"
         },
         "Distance:[2, 0]": {
           "addConstraint": "ok",
-          "arguments": [
-            2,
-            0
-          ],
           "constructor": "ok",
-          "datum": "mm",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Distance"
+          "outcome": "accepted"
         },
         "Distance:[2]": {
           "arguments": [
@@ -256,17 +187,9 @@
         },
         "DistanceX:[0, 1, 1, 2]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            1,
-            1,
-            2
-          ],
           "constructor": "ok",
-          "datum": "mm",
           "index": 0,
-          "outcome": "accepted",
-          "type": "DistanceX"
+          "outcome": "accepted"
         },
         "DistanceX:[0, 1, 1, 7.0]": {
           "arguments": [
@@ -293,15 +216,8 @@
           "type": "DistanceX"
         },
         "DistanceX:[0, 1, 2]": {
-          "arguments": [
-            0,
-            1,
-            2
-          ],
           "constructor": "TypeError: Invalid parameters: ('DistanceX', 0, 1, 2, 10.0 mm)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
-          "datum": "mm",
-          "outcome": "rejected",
-          "type": "DistanceX"
+          "outcome": "rejected"
         },
         "DistanceX:[0, 1]": {
           "addConstraint": "ok",
@@ -329,28 +245,13 @@
         },
         "DistanceY:[1, 1, 0, 2]": {
           "addConstraint": "ok",
-          "arguments": [
-            1,
-            1,
-            0,
-            2
-          ],
           "constructor": "ok",
-          "datum": "mm",
           "index": 0,
-          "outcome": "accepted",
-          "type": "DistanceY"
+          "outcome": "accepted"
         },
         "DistanceY:[1, 1, 2]": {
-          "arguments": [
-            1,
-            1,
-            2
-          ],
           "constructor": "TypeError: Invalid parameters: ('DistanceY', 1, 1, 2, 10.0 mm)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
-          "datum": "mm",
-          "outcome": "rejected",
-          "type": "DistanceY"
+          "outcome": "rejected"
         },
         "Equal:[0]": {
           "arguments": [
@@ -363,15 +264,9 @@
         },
         "Equal:[2, 3]": {
           "addConstraint": "ok",
-          "arguments": [
-            2,
-            3
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Equal"
+          "outcome": "accepted"
         },
         "Horizontal:[0, 1]": {
           "arguments": [
@@ -385,26 +280,15 @@
         },
         "Horizontal:[0]": {
           "addConstraint": "ok",
-          "arguments": [
-            0
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Horizontal"
+          "outcome": "accepted"
         },
         "Parallel:[0, 1]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            1
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Parallel"
+          "outcome": "accepted"
         },
         "Parallel:[0]": {
           "arguments": [
@@ -417,15 +301,9 @@
         },
         "Perpendicular:[0, 1]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            1
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Perpendicular"
+          "outcome": "accepted"
         },
         "Perpendicular:[0]": {
           "arguments": [
@@ -438,16 +316,9 @@
         },
         "PointOnObject:[4, 1, 0]": {
           "addConstraint": "ok",
-          "arguments": [
-            4,
-            1,
-            0
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "PointOnObject"
+          "outcome": "accepted"
         },
         "PointOnObject:[4, 1]": {
           "arguments": [
@@ -473,45 +344,21 @@
         },
         "Radius:[2]": {
           "addConstraint": "ok",
-          "arguments": [
-            2
-          ],
           "constructor": "ok",
-          "datum": "mm",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Radius"
+          "outcome": "accepted"
         },
         "Symmetric:[0, 1, 1, 2, -1]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            1,
-            1,
-            2,
-            -1
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Symmetric"
+          "outcome": "accepted"
         },
         "Symmetric:[0, 1, 1, 2, 0, 2]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            1,
-            1,
-            2,
-            0,
-            2
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Symmetric"
+          "outcome": "accepted"
         },
         "Symmetric:[0, 1, 1]": {
           "arguments": [
@@ -526,29 +373,15 @@
         },
         "Tangent:[0, 2, 1, 1]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            2,
-            1,
-            1
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Tangent"
+          "outcome": "accepted"
         },
         "Tangent:[0, 2]": {
           "addConstraint": "ok",
-          "arguments": [
-            0,
-            2
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Tangent"
+          "outcome": "accepted"
         },
         "Tangent:[0]": {
           "arguments": [
@@ -571,24 +404,13 @@
         },
         "Vertical:[1]": {
           "addConstraint": "ok",
-          "arguments": [
-            1
-          ],
           "constructor": "ok",
-          "datum": "none",
           "index": 0,
-          "outcome": "accepted",
-          "type": "Vertical"
+          "outcome": "accepted"
         },
         "Weight:[5, 1]": {
-          "arguments": [
-            5,
-            1
-          ],
           "constructor": "TypeError: Invalid parameters: ('Weight', 5, 1, 1.0)\nConstraint constructor accepts:\n-- empty parameter list\n-- Constraint type and index\n",
-          "datum": "unit",
-          "outcome": "rejected",
-          "type": "Weight"
+          "outcome": "rejected"
         },
         "Weight:[5]": {
           "arguments": [
@@ -644,8 +466,7 @@
       },
       "deleted": "ContractReroute2",
       "dependentBaseFeatureBefore": {
-        "object": "ContractReroute2",
-        "subelement": ""
+        "object": "ContractReroute2"
       },
       "dependentLinkedTo": "ContractReroute2",
       "features": [
@@ -1064,7 +885,7 @@
         "no_edit_session": true
       },
       "createdFeature": "ContractEditBox",
-      "document": "MCP_NativeContract_51694",
+      "document": "MCP_NativeContract_58894",
       "editObject": "ContractEditBox",
       "guiActiveObject": "ContractEditBox",
       "inEditName": null,

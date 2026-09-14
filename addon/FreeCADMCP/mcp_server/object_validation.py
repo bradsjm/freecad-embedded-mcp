@@ -243,7 +243,7 @@ def geometry_report(obj: Any, expected_solids: int | None = None) -> dict:
     # 0.05 mm narrower here than in every other tool.
     report["bounds"] = document_bounds(obj)
     if report["bounds"] is None:
-        report["bounds"] = _shape_bounds(shape)
+        report["geometryUnavailable"] = "document-space bounds unavailable"
     report["diagnostics"] = _shape_diagnostics(shape)
     try:
         report["max_tolerance"] = _finite(shape.getTolerance(1))
@@ -552,7 +552,7 @@ def mutation(
     doc: Any,
     label: str,
     objects: Iterable[Any] | Callable[[], Iterable[Any]],
-    expected_solids: int | None = None,
+    expected_solids: int | Callable[[], int | None] | None = None,
     expected_bounds: Sequence[float] | None = None,
     bounds_tolerance: float = 0.000001,
     expectations: Mapping[str, Mapping[str, Any]] | None = None,
@@ -623,6 +623,8 @@ def mutation(
 
     ctx.check_document_idle(doc)
     _reject_user_transaction(ctx, doc)
+    if callable(expected_solids):
+        expected_solids = expected_solids()
     # Reject runaway complexity before any effects when the targets are
     # known up front; create flows (callable) re-check after the body and
     # roll back explicitly instead of skipping dependents.

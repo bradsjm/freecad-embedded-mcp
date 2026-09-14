@@ -17,12 +17,20 @@ refuses the mutation.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Mapping
 from typing import Any
 
 from .. import topology_query as tq
 from ..object_validation import document_bounds, geometry_report, mutation
-from ..protocol import VALIDATION_FAILED, ToolError, check_schema, stale_generation_details
+from ..protocol import (
+    VALIDATION_FAILED,
+    ProtocolError,
+    ToolError,
+    check_schema,
+    stale_generation_details,
+    validate_schema,
+)
 from . import feature_contracts as _contracts
 from . import objects as _objects
 
@@ -518,6 +526,19 @@ _SEMANTIC_PARAM_SCHEMAS = {
     },
 }
 
+# Named root definitions keep the semantic union inspectable and let handler
+# validation select the same closed branch that registration exposes.
+_SEMANTIC_PARAM_DEFS = {
+    f"{kind}Parameters": schema for kind, schema in _SEMANTIC_PARAM_SCHEMAS.items()
+}
+
+
+def _semantic_ref(kind: str) -> dict[str, str]:
+    """Return the named schema reference for one semantic feature kind."""
+
+    return {"$ref": f"#/$defs/{kind}Parameters"}
+
+
 _CREATE_FEATURE_INPUT = {
     "type": "object",
     "additionalProperties": False,
@@ -556,7 +577,9 @@ _CREATE_FEATURE_INPUT = {
         },
         "name": _objects._NAME_FIELD,
         "properties": _objects._PROPERTIES_MAP,
-        "parameters": {"anyOf": list(_SEMANTIC_PARAM_SCHEMAS.values())},
+        "parameters": {
+            "anyOf": [_semantic_ref(kind) for kind in _SEMANTIC_PARAM_SCHEMAS],
+        },
         "profile": _PROFILE_REF,
         "support": _objects._CANONICAL_REF,
         "expected_solids": _objects._EXPECTED_SOLIDS,
@@ -564,7 +587,7 @@ _CREATE_FEATURE_INPUT = {
         "bounds_tolerance": _objects._BOUNDS_TOLERANCE,
         "response_detail": _objects._RESPONSE_DETAIL,
     },
-    "$defs": _objects._VALUE_DEFS,
+    "$defs": {**_objects._VALUE_DEFS, **_SEMANTIC_PARAM_DEFS},
 }
 
 _CHECKPOINT_PROPERTY = {
@@ -629,6 +652,7 @@ _EDIT_FEATURE_INPUT = tq.merge_query_defs(
                     "count": {"type": "integer", "minimum": 2, "maximum": 32},
                     "extent": {"type": "string", "enum": ["distance", "through_all", "up_to_face"]},
                     "length": _SCALAR_PARAM,
+                    "face": _objects._CANONICAL_REF,
                     "diameter": _SCALAR_PARAM,
                     "depth": _SCALAR_PARAM,
                     "depth_type": {"type": "string", "enum": ["dimension", "through_all"]},
@@ -768,9 +792,11 @@ TOOL_DEFINITIONS = [
             "take shared-target subelement, originals, axis, plane or spine "
             "references: a signed reference or a declarative query that "
             "expands to the matched set within each list's budget. Semantic "
-            "parameters map onto native properties "
-            "(lengths in mm, angles in degrees) and accept either a number or "
-            "an {expression} binding. Everything runs in one transaction; a "
+            "parameters map onto native properties (lengths in mm, angles "
+            "in degrees). Scalar parameters accept either a number or an "
+            "{expression} binding; integer-only fields such as teeth, "
+            "polygon, and pattern count, enumerations, and flags take "
+            "direct values only. Everything runs in one transaction; a "
             "property, profile, reference, Tip, bounds or geometry failure "
             'aborts and removes the feature. response_detail: "compact" '
             "omits before-state geometry deltas, property before-values, "
@@ -792,9 +818,11 @@ TOOL_DEFINITIONS = [
             "kind (a wrong-kind parameter names the kind and its supported "
             "parameters) before the transaction opens. Other feature types "
             "are refused with the supported kinds and an edit_object "
-            "fallback. Numeric values are written natively and {expression} "
-            "objects bind a native expression; a resolved expression that "
-            "lands outside the parameter's range refuses and rolls back. "
+            "fallback. Scalar values are written natively and {expression} "
+            "objects bind a native expression on scalar parameters only; "
+            "integer-only fields, enumerations, and flags reject "
+            "expressions, and a resolved expression that lands outside the "
+            "parameter's range refuses and rolls back. "
             "The feature and its Body are recomputed and validated in one "
             "mutation, and parameterValues reports every requested "
             "parameter's persisted expression and actual native value; "
@@ -1161,7 +1189,7 @@ def _resolve_binder_references(
             if not indices:
                 from . import geometry
 
-                raise geometry._cardinality_error(
+                raise geometry.cardinality_error(
                     "selection_empty",
                     f"{path} matched no {role} of {obj.Name}",
                     path,
@@ -1225,7 +1253,7 @@ def _expand_base_subelements(
             if not indices:
                 from . import geometry
 
-                raise geometry._cardinality_error(
+                raise geometry.cardinality_error(
                     "selection_empty",
                     f"{path} matched no {role} of {obj.Name}",
                     path,
@@ -1385,10 +1413,24 @@ def _apply_semantic_references(
     the cached selection-time result.
     """
 
-    if kind in _contracts.BASE_KINDS:
+    if kind in _contracts.BASE_KINDS and ("base" in parameters or "subelements" in parameters):
         applied = _apply_base_list(ctx, doc, feature, kind, parameters, queries=queries)
     else:
         applied = []
+    if kind in ("pad", "pocket") and "face" in parameters:
+        value = parameters["face"]
+        face_obj, face_native = _native_support(ctx, doc, value, path="face", queries=queries)
+        if face_native and not face_native.startswith("Face"):
+            raise _fail(f"the up_to_face reference must be a signed face token, got {face_native}")
+        if not face_native and str(getattr(face_obj, "TypeId", "")) not in (
+            "App::Plane",
+            "PartDesign::Plane",
+        ):
+            raise _fail(f"up_to_face '{face_obj.Name}' is neither a plane nor a signed face")
+        if not _objects._property_exists(feature, "UpToFace"):
+            raise _fail(f"feature '{getattr(feature, 'Name', '')}' exposes no UpToFace property")
+        feature.UpToFace = (face_obj, [face_native] if face_native else [])
+        applied.append("face->UpToFace")
     for name, (prop, form) in _contracts.REFERENCE_PROPERTIES.get(kind, {}).items():
         if name not in parameters:
             continue
@@ -1465,7 +1507,7 @@ def _preflight_semantic_references(
 
     if not parameters:
         return
-    if kind in _contracts.BASE_KINDS:
+    if kind in _contracts.BASE_KINDS and ("base" in parameters or "subelements" in parameters):
         role = _contracts.BASE_KINDS[kind]
         base = parameters.get("base")
         value = parameters.get("subelements")
@@ -1605,12 +1647,79 @@ def _apply_attachment(feature: Any, support_obj: Any, native: str, map_mode: str
 _HOLE_CUT_REQUIREMENTS = {
     "counterbore": ("counterbore_diameter", "counterbore_depth"),
     "countersink": ("countersink_diameter", "countersink_angle"),
-    "counterdrill": (
-        "counterbore_diameter",
-        "counterbore_depth",
-        "countersink_diameter",
-        "countersink_angle",
-    ),
+    "counterdrill": ("countersink_diameter", "counterbore_depth", "countersink_angle"),
+}
+
+_HOLE_CUT_FIELDS = frozenset(
+    {"counterbore_diameter", "counterbore_depth", "countersink_diameter", "countersink_angle"}
+)
+
+_MODE_FIELDS = {
+    "primitive": {
+        "box": {"length", "width", "height", "mode", "shape"},
+        "cylinder": {"radius", "height", "mode", "shape"},
+        "cone": {"radius1", "radius2", "height", "mode", "shape"},
+        "sphere": {"radius", "mode", "shape"},
+        "prism": {"polygon", "circumradius", "height", "mode", "shape"},
+        "torus": {"radius1", "radius2", "mode", "shape"},
+        "ellipsoid": {"radius1", "radius2", "radius3", "mode", "shape"},
+        "wedge": {
+            "x_min",
+            "x_max",
+            "y_min",
+            "y_max",
+            "z_min",
+            "z_max",
+            "x2_min",
+            "x2_max",
+            "z2_min",
+            "z2_max",
+            "mode",
+            "shape",
+        },
+    },
+    "helix": {
+        "pitch_height": {
+            "axis",
+            "helix_mode",
+            "mode",
+            "pitch",
+            "height",
+            "angle",
+            "left_handed",
+            "reversed",
+        },
+        "pitch_turns": {
+            "axis",
+            "helix_mode",
+            "mode",
+            "pitch",
+            "turns",
+            "angle",
+            "left_handed",
+            "reversed",
+        },
+        "height_turns": {
+            "axis",
+            "helix_mode",
+            "mode",
+            "height",
+            "turns",
+            "angle",
+            "left_handed",
+            "reversed",
+        },
+        "height_growth": {
+            "axis",
+            "helix_mode",
+            "mode",
+            "height",
+            "growth",
+            "angle",
+            "left_handed",
+            "reversed",
+        },
+    },
 }
 
 #: Helix driver pairs: one dimension and one extent driver per mode.
@@ -1639,6 +1748,18 @@ def _check_hole_cut(cut: str, parameters: Mapping[str, Any]) -> None:
     """Require the cut form's sub-parameters and bound the countersink angle."""
 
     required = _HOLE_CUT_REQUIREMENTS.get(cut, ())
+    applicable = {
+        "none": set(),
+        "counterbore": {"counterbore_diameter", "counterbore_depth"},
+        "countersink": {"countersink_diameter", "countersink_angle"},
+        "counterdrill": {"countersink_diameter", "counterbore_depth", "countersink_angle"},
+    }.get(cut, set())
+    ignored = sorted(_HOLE_CUT_FIELDS & set(parameters) - applicable)
+    if ignored:
+        raise _fail(
+            f"parameter '{ignored[0]}' is not applicable to hole cut '{cut}'",
+            {"reason": "inapplicable_parameter", "parameter": ignored[0]},
+        )
     missing = [name for name in required if name not in parameters]
     if missing:
         raise _fail(f"hole cut {cut!r} requires {', '.join(missing)}")
@@ -1649,7 +1770,9 @@ def _check_hole_cut(cut: str, parameters: Mapping[str, Any]) -> None:
             raise _fail("countersink_angle must be a finite angle in (0, 180] degrees")
 
 
-def _check_semantic_parameters(kind: str, parameters: Mapping[str, Any]) -> None:
+def _check_semantic_parameters(
+    kind: str, parameters: Mapping[str, Any], *, partial: bool = False
+) -> None:
     """Handler-side kind checks that outlive the wire schema."""
 
     schema = _SEMANTIC_PARAM_SCHEMAS.get(kind)
@@ -1660,7 +1783,7 @@ def _check_semantic_parameters(kind: str, parameters: Mapping[str, Any]) -> None
     # Semantic-only kinds have no raw-property fallback, so their required
     # fields are enforced even when the request carried no parameters at all;
     # a missing mapping must never open a transaction on native defaults.
-    if kind not in _KIND_TYPES and not parameters:
+    if kind not in _KIND_TYPES and not parameters and not partial:
         raise _fail(
             f"kind '{kind}' requires parameters: {', '.join(sorted(schema.get('required', ())))}"
         )
@@ -1668,18 +1791,23 @@ def _check_semantic_parameters(kind: str, parameters: Mapping[str, Any]) -> None
         # The original five kinds keep their raw ``properties`` contract: a
         # request without semantic parameters is legitimate for them.
         return
-    unknown = sorted(set(parameters) - set(schema["properties"]))
+    allowed = set(schema["properties"])
+    if partial and kind == "hole":
+        allowed.add("thread_size")
+    unknown = sorted(set(parameters) - allowed)
     if unknown:
         raise _fail(f"kind '{kind}' does not accept parameters: {', '.join(unknown)}")
-    missing = sorted(set(schema.get("required", ())) - set(parameters))
+    missing = sorted(set(schema.get("required", ())) - set(parameters)) if not partial else []
     if missing:
+        if kind == "helix" and "mode" in missing:
+            raise _fail("mode 'additive' or 'subtractive' is required")
         raise _fail(f"kind '{kind}' requires parameters: {', '.join(missing)}")
 
-    if kind in ("pad", "pocket"):
+    if kind in ("pad", "pocket") and "extent" in parameters:
         extent = parameters["extent"]
         if extent == "through_all" and kind == "pad":
             raise _fail("through_all is available for pocket only")
-        if extent == "distance" and "length" not in parameters:
+        if extent == "distance" and "length" not in parameters and not partial:
             raise _fail("distance extent requires a length")
         if extent != "distance" and "length" in parameters:
             raise _fail(f"{extent} extent does not accept a length")
@@ -1694,6 +1822,20 @@ def _check_semantic_parameters(kind: str, parameters: Mapping[str, Any]) -> None
             number = _contracts.finite_number(length)
             if number is None or number <= 0:
                 raise _fail("length must be a positive finite number or an expression")
+    if kind in ("loft", "pipe"):
+        mode = parameters.get("mode")
+        if mode is not None and mode not in ("additive", "subtractive"):
+            raise _fail("mode 'additive' or 'subtractive' is required")
+    if kind in _contracts.BASE_KINDS and "subelements" in parameters:
+        subelements = parameters["subelements"]
+        if not isinstance(subelements, (list, tuple)) or not subelements:
+            raise _fail("subelements must be a nonempty list")
+    if kind == "loft" and "sections" in parameters:
+        sections = parameters["sections"]
+        if isinstance(sections, (list, tuple)) and len(sections) > _contracts.MAX_LOFT_SECTIONS:
+            raise _fail(f"sections must contain at most {_contracts.MAX_LOFT_SECTIONS} entries")
+    if kind == "helix" and "mode" not in parameters and not partial:
+        raise _fail("mode 'additive' or 'subtractive' is required")
     if kind == "hole":
         for name in ("diameter", "depth"):
             raw = parameters.get(name)
@@ -1705,18 +1847,27 @@ def _check_semantic_parameters(kind: str, parameters: Mapping[str, Any]) -> None
             if number is None or number <= 0:
                 raise _fail(f"hole {name} must be a positive finite number or an expression")
         depth_type = parameters.get("depth_type", "dimension")
-        if depth_type == "dimension" and "depth" not in parameters:
+        if depth_type == "dimension" and "depth" not in parameters and not partial:
             raise _fail("hole requires depth for a dimension extent")
         if depth_type == "through_all" and "depth" in parameters:
             raise _fail("through_all ignores depth; remove the depth parameter")
         cut = parameters.get("cut", "none")
-        _check_hole_cut(cut, parameters)
+        if "cut" in parameters or _HOLE_CUT_FIELDS.intersection(parameters):
+            _check_hole_cut(cut, parameters)
         thread = parameters.get("thread")
         if thread is not None and thread != "none" and "thread_size" not in parameters:
             raise _fail(f"hole thread {thread!r} requires thread_size")
-        if "thread_size" in parameters and (thread is None or thread == "none"):
+        if (
+            "thread_size" in parameters
+            and not (partial and thread is None)
+            and (thread is None or thread == "none")
+        ):
             raise _fail("thread_size requires a thread")
     if kind == "helix":
+        if "helix_mode" not in parameters:
+            if partial:
+                return
+            raise _fail("helix requires helix_mode")
         drivers = _HELIX_DRIVERS[parameters["helix_mode"]]
         missing = [name for name in drivers if name not in parameters]
         if missing:
@@ -1813,8 +1964,71 @@ def _check_semantic_parameters(kind: str, parameters: Mapping[str, Any]) -> None
         _check_positive_scalar("length", parameters)
     if kind == "polar_pattern":
         _check_angle("angle", parameters, 360.0)
-    if kind == _GEAR_PROFILE_KIND:
+    if kind == _GEAR_PROFILE_KIND and (not partial or {"teeth", "module"}.issubset(parameters)):
         _contracts.check_gear_bounds(parameters["teeth"], parameters["module"])
+
+
+def _validate_semantic_branch(
+    kind: str, parameters: Mapping[str, Any], *, partial: bool = False
+) -> None:
+    """Validate one selected semantic branch and return bounded reasons."""
+
+    schema = _SEMANTIC_PARAM_SCHEMAS.get(kind)
+    if schema is None:
+        if parameters:
+            raise _fail(
+                f"kind '{kind}' accepts no semantic parameters",
+                {"reason": "invalid_feature_parameters", "kind": kind, "errors": []},
+            )
+        return
+    if not parameters and kind in _KIND_TYPES:
+        return
+    selected = copy.deepcopy(schema)
+    if partial:
+        selected.pop("required", None)
+        if kind == "hole":
+            selected.setdefault("properties", {})["thread_size"] = {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16,
+            }
+    # The branch is validated outside a full root schema, so resolve the
+    # topology references from the shared local definitions explicitly.
+    selected["$defs"] = {**_objects._VALUE_DEFS}
+    try:
+        _check_semantic_parameters(kind, parameters, partial=partial)
+        validate_schema(dict(parameters), selected)
+    except ProtocolError as exc:
+        message = exc.message
+        raise _fail(
+            message,
+            {
+                "reason": "invalid_feature_parameters",
+                "kind": kind,
+                "errors": [message[:256]],
+            },
+        ) from None
+    except ToolError as exc:
+        details = dict(exc.details) if isinstance(exc.details, Mapping) else {}
+        details.update({"reason": "invalid_feature_parameters", "kind": kind})
+        details.setdefault("errors", [exc.message[:256]])
+        raise _fail(exc.message, details) from None
+
+
+def _reject_mode_inapplicable(kind: str, parameters: Mapping[str, Any]) -> None:
+    """Reject semantic fields that the selected mode cannot consume."""
+
+    selected: set[str] | None = None
+    if kind == "primitive":
+        selected = _MODE_FIELDS["primitive"].get(str(parameters.get("shape")))
+    elif kind == "helix":
+        selected = _MODE_FIELDS["helix"].get(str(parameters.get("helix_mode")))
+    if selected is not None:
+        for name in sorted(set(parameters) - selected):
+            raise _fail(
+                f"parameter '{name}' is not applicable to {kind} mode",
+                {"reason": "inapplicable_parameter", "parameter": name},
+            )
 
 
 def _check_positive_scalar(name: str, parameters: Mapping[str, Any]) -> None:
@@ -1895,20 +2109,9 @@ def _apply_semantic_parameters(
             applied.append("symmetric->SideType")
             continue
         if name == "face":
-            if not isinstance(value, Mapping) or "object" not in value:
-                raise _fail("face must be a canonical reference object")
-            face_obj, face_native = _native_support(ctx, doc, value, path="face", queries=queries)
-            _require_member(body, face_obj)
-            if face_native and not face_native.startswith("Face"):
-                raise _fail(
-                    f"the up_to_face reference must be a signed face token, got {face_native}"
-                )
-            if not _objects._property_exists(feature, "UpToFace"):
-                raise _fail(
-                    f"feature '{getattr(feature, 'Name', '')}' exposes no UpToFace property"
-                )
-            feature.UpToFace = (face_obj, [face_native])
-            applied.append(f"{name}->UpToFace")
+            # ``face`` is a topology reference and is applied by
+            # ``_apply_semantic_references`` so edit and create share the
+            # prepared-query receipt path.
             continue
         if isinstance(value, Mapping):
             spec = _contracts.SEMANTIC_PROPERTIES.get(kind, {}).get(name)
@@ -2311,6 +2514,13 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
             f"kind '{kind}' accepts typed parameters only; raw properties are "
             "not available for this kind"
         )
+    _validate_semantic_branch(kind, parameters)
+    _reject_mode_inapplicable(kind, parameters)
+    if arguments.get("profile") is not None and kind not in _PROFILE_KINDS:
+        raise _fail(
+            "profile is not applicable to this feature kind",
+            {"reason": "inapplicable_parameter", "parameter": "profile"},
+        )
     bounds_tolerance = arguments.get("bounds_tolerance")
     if bounds_tolerance is None:
         bounds_tolerance = _objects._DEFAULT_BOUNDS_TOLERANCE
@@ -2343,8 +2553,6 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
             raise _fail(f"kind '{kind}' requires mode 'additive' or 'subtractive'")
     else:
         type_id = _contracts.KIND_TYPES[kind]
-
-    _check_semantic_parameters(kind, parameters)
 
     profile_obj = None
     if kind in _PROFILE_KINDS:
@@ -2793,6 +3001,8 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
     if unknown:
         raise _fail(f"edit_feature does not accept parameters: {', '.join(unknown)}")
     _check_edit_parameter_names(kind, parameters)
+    _validate_semantic_branch(kind, parameters, partial=True)
+    _reject_mode_inapplicable(kind, parameters)
     if kind == _GEAR_PROFILE_KIND:
         _check_edit_gear_bounds(feature, parameters)
     if kind == "hole":
@@ -2807,6 +3017,8 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
     for name, raw in parameters.items():
         if kind == "hole" and name == "thread_size":
             prop = "ThreadSize"
+        elif name == "face":
+            prop = "UpToFace"
         else:
             probe = raw if not isinstance(raw, Mapping) else 0
             mapping = _contracts.native_value(kind, name, probe)
@@ -2824,6 +3036,8 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
         raise _fail("at least one numeric parameter value is required")
     before_states = {name: _parameter_state(feature, prop) for name, prop in requested}
     before_report = geometry_report(feature)
+    queries = _objects._PreparedQueries(ctx, doc)
+    _preflight_semantic_references(ctx, doc, body, kind, parameters, queries=queries)
 
     expectations: dict[str, dict] = {}
     body_expectation = _expected_body_expectation(
@@ -2880,7 +3094,8 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
         ) as applied:
             if kind == "hole":
                 applied.extend(_apply_hole_parameters(feature, parameters, pin=False))
-            _apply_semantic_parameters(ctx, doc, body, feature, kind, parameters)
+            _apply_semantic_references(ctx, doc, body, feature, kind, parameters, queries=queries)
+            _apply_semantic_parameters(ctx, doc, body, feature, kind, parameters, queries=queries)
     except ToolError as exc:
         if (exc.details or {}).get("operationState") != "rolled_back":
             raise
@@ -2939,6 +3154,8 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
             "boundsBefore": before_report["bounds"],
             "boundsAfter": document_bounds(feature),
         }
+    if queries.receipts:
+        result["resolvedSelections"] = queries.receipts
     return result
 
 

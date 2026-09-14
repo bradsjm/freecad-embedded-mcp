@@ -229,6 +229,9 @@ class FakeCtx:
     def check_document_idle(self, doc: Any) -> None:
         pass
 
+    def document_generation(self, doc: Any) -> int:
+        return 0
+
     def canonical_path(self, path: Any) -> str:
         resolved = os.path.realpath(str(path))
         if resolved != self.root and not resolved.startswith(self.root + os.sep):
@@ -635,10 +638,14 @@ def test_new_file_race_requires_fresh_consent(export_module, tmp_path, monkeypat
     make_box_document(ctx)
     destination = os.path.join(ctx.root, "raced.stl")
 
-    def collide(source: str, destination_name: str) -> None:
-        raise FileExistsError(errno.EEXIST, "file exists", destination_name)
+    real_open = os.open
 
-    monkeypatch.setattr(os, "link", collide)
+    def collide(path: str, flags: int, mode: int = 0o666) -> int:
+        if path == destination:
+            raise FileExistsError(errno.EEXIST, "file exists", path)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", collide)
 
     with pytest.raises(ToolError) as excinfo:
         export_module.export(
@@ -657,15 +664,21 @@ def test_new_file_race_requires_fresh_consent(export_module, tmp_path, monkeypat
     assert staged_leftovers(ctx.root) == []
 
 
-def test_hardlink_unsupported_fails_without_overwrite(export_module, tmp_path, monkeypatch) -> None:
+def test_publication_unavailable_fails_without_overwrite(
+    export_module, tmp_path, monkeypatch
+) -> None:
     ctx = FakeCtx(str(tmp_path))
     make_box_document(ctx)
     destination = os.path.join(ctx.root, "nolink.stl")
 
-    def refuse(source: str, destination_name: str) -> None:
-        raise OSError(errno.EPERM, "Operation not permitted")
+    real_open = os.open
 
-    monkeypatch.setattr(os, "link", refuse)
+    def refuse(path: str, flags: int, mode: int = 0o666) -> int:
+        if path == destination:
+            raise OSError(errno.EPERM, "Operation not permitted")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", refuse)
 
     with pytest.raises(ToolError) as excinfo:
         export_module.export(
@@ -679,7 +692,7 @@ def test_hardlink_unsupported_fails_without_overwrite(export_module, tmp_path, m
         )
 
     assert excinfo.value.code == "VALIDATION_FAILED"
-    assert "hard link" in excinfo.value.message
+    assert "publication" in excinfo.value.message
     assert not os.path.exists(destination)
     assert staged_leftovers(ctx.root) == []
 
@@ -873,7 +886,10 @@ def test_fcstd_export_publishes_verified_copy(export_module, tmp_path) -> None:
     assert result == {
         "format": "fcstd",
         "path": destination,
+        "document": "Smoke",
+        "generation": 0,
         "objects": [],
+        "size": len(b"FCSTD-SAVECOPY"),
         "objectCount": 2,
     }
     with open(destination, "rb") as handle:
@@ -1135,3 +1151,50 @@ def test_tool_schemas_are_finite_and_outputs_validate(export_module, tmp_path) -
         },
     )
     protocol.validate_schema(payload, definition["outputSchema"])
+
+
+# ---------------------------------------------------------------------------
+# Exclusive-copy cleanup truthfulness.
+# ---------------------------------------------------------------------------
+
+
+def test_copy_failure_with_failed_cleanup_reports_partial_remain(
+    export_module, tmp_path, monkeypatch
+) -> None:
+    """A copy failure whose unlink also fails never claims the partial
+    destination was removed: the error reports that it may remain."""
+    ctx = FakeCtx(str(tmp_path))
+    make_box_document(ctx)
+    destination = os.path.join(ctx.root, "stuck.stl")
+    real_unlink = os.unlink
+
+    def refuse_copy(*args: Any, **kwargs: Any) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    def refuse_unlink(path: str, *args: Any, **kwargs: Any) -> None:
+        if path == destination:
+            raise OSError(errno.EPERM, "Operation not permitted")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(export_module.shutil, "copyfileobj", refuse_copy)
+    monkeypatch.setattr(os, "unlink", refuse_unlink)
+
+    with pytest.raises(ToolError) as excinfo:
+        export_module.export(
+            ctx,
+            {"document": "Smoke", "objects": ["Box1"], "format": "stl", "path": destination},
+        )
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert "may remain" in excinfo.value.message
+    assert "was removed" not in excinfo.value.message
+    details = excinfo.value.details
+    assert details["reason"] == "publication_unavailable"
+    assert details["path"] == destination
+    assert details["partialDestinationMayRemain"] is True
+    # cleanupError describes the failed unlink; the copy error is the cause.
+    assert "Operation not permitted" in details["cleanupError"]
+    assert isinstance(excinfo.value.__cause__, OSError)
+    # Truthful on disk: the partial destination really is still there.
+    assert os.path.exists(destination)
+    assert staged_leftovers(ctx.root) == []

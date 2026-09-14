@@ -470,9 +470,11 @@ def test_inspect_solver_summary_reads_dof_attributes(sketch_module) -> None:
         "fullyConstrained": True,
         "degreesOfFreedom": 0,
         "solverMessages": [],
-        "solverStatus": 0,
+        "solverMessageCount": 0,
+        "solverMessagesTruncated": False,
+        "solverStatus": None,
     }
-    assert sketch.solve_calls == 1
+    assert sketch.solve_calls == 0
 
 
 def test_inspect_solver_summary_is_null_when_dof_attribute_is_missing(
@@ -491,7 +493,9 @@ def test_inspect_solver_summary_is_null_when_dof_attribute_is_missing(
         "fullyConstrained": None,
         "degreesOfFreedom": None,
         "solverMessages": [],
-        "solverStatus": 0,
+        "solverMessageCount": 0,
+        "solverMessagesTruncated": False,
+        "solverStatus": None,
     }
 
 
@@ -514,21 +518,22 @@ def test_inspect_solver_summary_uses_getter_fallback_not_the_solve_value(
         "fullyConstrained": False,
         "degreesOfFreedom": 4,
         "solverMessages": [],
-        "solverStatus": 0,
+        "solverMessageCount": 0,
+        "solverMessagesTruncated": False,
+        "solverStatus": None,
     }
 
 
 def test_inspect_solver_summary_reports_the_solve_status_code(sketch_module) -> None:
-    # The recorded conflict case returned solve() == -3; the code is a
-    # diagnostic, so it is reported as-is.
+    # Inspection does not call solve() and has no persisted native status.
     sketch = rectangle_sketch()
     sketch.solver_status = -3
     ctx = FakeCtx(FakeDoc(sketch))
 
     result = call_inspect(sketch_module, ctx)
 
-    assert result["solver"]["solverStatus"] == -3
-    assert sketch.solve_calls == 1
+    assert result["solver"]["solverStatus"] is None
+    assert sketch.solve_calls == 0
 
 
 def test_inspect_solver_status_is_null_when_solve_is_unusable(sketch_module) -> None:

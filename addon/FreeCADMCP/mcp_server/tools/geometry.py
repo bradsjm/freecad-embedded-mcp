@@ -54,7 +54,6 @@ _MAX_CHECK_TARGETS = 100
 
 _NUMERIC_SUBELEMENT = re.compile(r"(?:Face|Edge|Vertex|Wire)\d+")
 _SUBELEMENT_INDEX = re.compile(r"(Face|Edge)([1-9][0-9]*)")
-_MAX_SUBELEMENT_LIST = 32
 
 # Exact FreeCAD surface/curve class names mapped to the uppercase analytic
 # selector types. A missing Surface/Curve or an unmapped class is
@@ -258,7 +257,7 @@ def _reference_for(ctx: Any, doc: Any, obj: Any, selection: Mapping | None) -> d
     return make_reference(ctx, doc, obj, selection["role"], selection["index"])
 
 
-def _cardinality_error(
+def cardinality_error(
     reason: str,
     message: str,
     parameter: str,
@@ -268,7 +267,11 @@ def _cardinality_error(
     role: str,
     indices: list[int],
 ) -> ToolError:
-    """Build the shared zero-match/ambiguity refusal with bounded evidence."""
+    """Build the shared zero-match/ambiguity refusal with bounded evidence.
+
+    Public shared builder: ``objects`` and ``features`` raise it for their
+    own query resolutions instead of duplicating the message formats.
+    """
 
     return ToolError(
         VALIDATION_FAILED,
@@ -518,7 +521,7 @@ def _resolve_reference_parts(
     if "query" in reference:
         obj, role, indices = resolve_query(ctx, doc, reference, parameter)
         if not indices:
-            raise _cardinality_error(
+            raise cardinality_error(
                 "selection_empty",
                 f"{parameter} matched no {role} of {obj.Name}",
                 parameter,
@@ -529,7 +532,7 @@ def _resolve_reference_parts(
                 indices,
             )
         if len(indices) > 1:
-            raise _cardinality_error(
+            raise cardinality_error(
                 "selection_ambiguous",
                 f"{parameter} matched {len(indices)} {role}s of {obj.Name}; "
                 "narrow the query or use a set consumer",
@@ -648,73 +651,6 @@ def resolve_reference(
     return obj, native
 
 
-def resolve_reference_list(
-    ctx: Any, doc: Any, base: Any, references: list[Mapping], role: str
-) -> tuple[Any, list[str]]:
-    """Resolve 1..N shared targets onto one base object.
-
-    Every entry must name the base object and resolve to a signed subshape
-    of the requested role; query targets expand first and whole-object
-    entries are refused. Duplicates are rejected. Returns the base object
-    and the native subelement labels in request order.
-    """
-
-    if not references:
-        raise ToolError(VALIDATION_FAILED, "at least one signed reference is required")
-    if len(references) > _MAX_SUBELEMENT_LIST:
-        raise ToolError(
-            VALIDATION_FAILED,
-            f"at most {_MAX_SUBELEMENT_LIST} signed references are accepted",
-        )
-    base_obj, _base_role, base_native = _resolve_reference_parts(ctx, doc, base, "base")
-    if base_native:
-        raise ToolError(
-            VALIDATION_FAILED,
-            "base must be a whole object, not a subshape",
-            {"reason": "subshape_not_allowed"},
-        )
-    seen: set[str] = set()
-    labels: list[str] = []
-    for position, reference in enumerate(references):
-        parameter = f"references[{position}]"
-        if not isinstance(reference, Mapping):
-            raise ToolError(VALIDATION_FAILED, f"{parameter} must be a target object mapping")
-        obj, resolved_role, native = _resolve_reference_parts(ctx, doc, reference, parameter)
-        if obj is not base_obj:
-            raise ToolError(
-                VALIDATION_FAILED,
-                f"reference {position} targets '{obj.Name}' but the base is '{base_obj.Name}'",
-                {"position": position},
-            )
-        if resolved_role is None:
-            raise ToolError(
-                VALIDATION_FAILED,
-                f"reference {position} must carry a signed subelement token",
-                {"position": position, "reason": "subshape_not_allowed"},
-            )
-        prefix = "Face" if role == "face" else "Edge"
-        if not native.startswith(prefix):
-            raise ToolError(
-                VALIDATION_FAILED,
-                f"reference {position} must be a signed {role} token",
-                {"position": position, "native": native},
-            )
-        if native in seen:
-            raise ToolError(
-                VALIDATION_FAILED,
-                f"reference {position} duplicates {native}",
-                {"position": position},
-            )
-        seen.add(native)
-        labels.append(native)
-    return base_obj, labels
-
-
-# ---------------------------------------------------------------------------
-# Shared target resolution (whole object, signed reference, or query).
-# ---------------------------------------------------------------------------
-
-
 def _resolve_reference_selection(
     ctx: Any, doc: Any, selector: Mapping, parameter: str
 ) -> tuple[Any, Mapping | None]:
@@ -759,7 +695,7 @@ def _resolve_single_query(
 
     obj, role, indices = resolve_query(ctx, doc, selector, parameter)
     if not indices:
-        raise _cardinality_error(
+        raise cardinality_error(
             "selection_empty",
             f"{parameter} matched no {role} of {obj.Name}",
             parameter,
@@ -770,7 +706,7 @@ def _resolve_single_query(
             indices,
         )
     if len(indices) > 1:
-        raise _cardinality_error(
+        raise cardinality_error(
             "selection_ambiguous",
             f"{parameter} matched {len(indices)} {role}s of {obj.Name}; "
             "narrow the query or use a set consumer",
@@ -874,7 +810,7 @@ def _geometry_entry(
         and volume_verdict in ("positive", "not_applicable")
         and (bounds_verdict is None or bounds_verdict["verdict"] == "match")
     )
-    return {
+    entry = {
         "name": name,
         "state": list(report["state"]),
         "object_valid": bool(report["object_valid"]),
@@ -892,6 +828,10 @@ def _geometry_entry(
         },
         "valid": valid,
     }
+    geometry_unavailable = report.get("geometryUnavailable")
+    if geometry_unavailable:
+        entry["geometryUnavailable"] = str(geometry_unavailable)[:_MAX_CHECK_DIAGNOSTIC_LENGTH]
+    return entry
 
 
 #: Bounded diagnostics strings for indeterminate check rows.
@@ -1032,133 +972,86 @@ def _normalize_geometry_checks(checks: Any) -> list[dict]:
 
 def _prepare_geometry_checks(
     ctx: Any, doc: Any, checks: list[dict]
-) -> tuple[list[dict], list[dict], list[str]]:
-    """Stage 2: resolve every identity/query/reference target.
+) -> tuple[list[dict], list[str]]:
+    """Stage 2: resolve every whole-object check target.
 
-    Invalid, stale, missing or ambiguous targets fail the call here, before
-    any expensive distance or common calculation. Returns the checks with
-    resolved targets attached, the bounded resolvedSelection receipt list
-    for query-origin targets, and the first-use-ordered owner-object names.
+    Checks accept whole objects only: the volumetric gate needs a solid
+    with positive volume, so subshape and query targets can never pass and
+    are refused at schema validation. Unknown objects fail the call here,
+    before any expensive distance or common calculation. Each resolved
+    target caches its document-space placed shape exactly once; the same
+    cached shape feeds the volumetric gate and the evaluation. A placement
+    that cannot be resolved is recorded as target evidence and becomes an
+    indeterminate row instead of failing the call. Returns the checks with
+    prepared targets attached and the first-use-ordered owner-object names.
     """
 
-    receipts: list[dict] = []
     owners: list[str] = []
-    generation = int(ctx.document_generation(doc))
 
-    def _resolve_side(check: dict, side: str) -> dict:
-        target = check[side]
-        if "query" in target:
-            obj, role, indices = resolve_query(ctx, doc, target, side)
-            if not indices or len(indices) > 1:
-                raise _cardinality_error(
-                    "selection_ambiguous" if len(indices) > 1 else "selection_empty",
-                    f"{side} of check {check['id']!r} must resolve to exactly "
-                    f"one {role} of {obj.Name}",
-                    side,
-                    ctx,
-                    doc,
-                    obj,
-                    role,
-                    indices,
-                )
-            if len(receipts) < tq.MAX_QUERY_REFERENCES:
-                references = [make_reference(ctx, doc, obj, role, index) for index in indices]
-                receipts.append(
-                    {
-                        "parameter": f"checks.{check['id']}.{side}",
-                        "document": str(getattr(doc, "Name", "")),
-                        "generation": generation,
-                        "references": references,
-                        "count": len(references),
-                    }
-                )
-            selection = {
-                "role": role,
-                "index": indices[0],
-                "shape": None,
-                "reference": make_reference(ctx, doc, obj, role, indices[0]),
-            }
-        else:
-            obj, whole_or_selection = _resolve_target(ctx, doc, target, side)
-            selection = None
-            if whole_or_selection is not None:
-                selection = {
-                    "role": whole_or_selection["role"],
-                    "index": whole_or_selection["index"],
-                    "shape": None,
-                    "reference": make_reference(
-                        ctx, doc, obj, whole_or_selection["role"], whole_or_selection["index"]
-                    ),
-                }
+    def _resolve_object(check: dict, key: str) -> dict:
+        target = check[key]
+        obj = ctx.require_object(doc, str(target.get("object")))
         name = str(getattr(obj, "Name", ""))
         if name not in owners:
             owners.append(name)
-        return {
-            "object": obj,
-            "selection": selection,
-            "reference": (selection["reference"] if selection is not None else {"object": name}),
-        }
+        try:
+            shape = placed_shape(obj)
+            shape_error = None
+        except Exception as exc:
+            # ToolError carries .message; ordinary native exceptions do not.
+            message = getattr(exc, "message", None)
+            shape, shape_error = (
+                None,
+                str(message if message is not None else exc)[:_MAX_CHECK_DIAGNOSTIC_LENGTH],
+            )
+        return {"object": obj, "name": name, "shape": shape, "shapeError": shape_error}
 
     prepared: list[dict] = []
     for check in checks:
         entry = dict(check)
         if check["kind"] == "volume_range":
-            volume_request = {**check, "kind": "volume_range", "a": check["object"]}
-            entry["target"] = _resolve_side(volume_request, "a")
+            entry["target"] = _resolve_object(check, "object")
         else:
-            entry["target_a"] = _resolve_side(check, "a")
-            entry["target_b"] = _resolve_side(check, "b")
+            entry["target_a"] = _resolve_object(check, "a")
+            entry["target_b"] = _resolve_object(check, "b")
         prepared.append(entry)
-    return prepared, receipts, owners
-
-
-def _check_target_shape(target: Mapping[str, Any]) -> Any:
-    """The prepared placed shape for one resolved check target."""
-
-    obj = target["object"]
-    selection = target["selection"]
-    if selection is None:
-        return placed_shape(obj)
-    subshapes = _root_subshapes(placed_shape(obj), selection["role"])
-    return subshapes[selection["index"] - 1]
+    return prepared, owners
 
 
 def _volumetric_gate(check: Mapping[str, Any], targets: list[Mapping[str, Any]]) -> dict | None:
     """Require valid, non-null volumetric targets before acceptance math.
 
-    Returns an indeterminate row when any target has no shape, an invalid
-    shape, or no positive finite solid volume; None means every target may
-    proceed.
+    Reads only the cached prepared evidence. Returns an indeterminate row
+    when any target has no cached shape, an invalid shape, or no positive
+    finite solid volume; None means every target may proceed.
     """
 
     for side, target in zip(("a", "b", "object"), targets, strict=False):
         if target is None:
             continue
         label = f"target {side!r}" if side != "object" else "target"
-        try:
-            shape = _check_target_shape(target)
-        except ToolError as exc:
-            return _indeterminate_check(
-                check, "target_shapeless", [str(exc.message)[:_MAX_CHECK_DIAGNOSTIC_LENGTH]]
-            )
+        shape = target["shape"]
         if shape is None:
             return _indeterminate_check(
                 check,
                 "target_shapeless",
-                [f"{label} has no shape"],
+                [target["shapeError"] or f"{label} has no shape"],
             )
         try:
             valid = bool(shape.isValid())
         except Exception:
             valid = None
-        if valid is False:
+        if valid is not True:
             return _indeterminate_check(
                 check,
                 "target_invalid",
                 [f"{label} failed shape.isValid()"],
             )
         solids = _solid_count(shape)
-        volume = _finite(getattr(shape, "Volume", None))
+        try:
+            volume = _finite(getattr(shape, "Volume", None))
+        except Exception:
+            volume = None
         if not solids or volume is None or volume <= 0:
             return _indeterminate_check(
                 check,
@@ -1186,17 +1079,9 @@ def _evaluate_geometry_checks(ctx: Any, doc: Any, checks: list[dict]) -> list[di
                 results.append(indeterminate)
                 continue
             try:
-                shape = _check_target_shape(target)
-                measured = _finite(getattr(shape, "Volume", None))
-            except ToolError as exc:
-                results.append(
-                    _indeterminate_check(
-                        check,
-                        "measurement_unavailable",
-                        [str(exc.message)[:_MAX_CHECK_DIAGNOSTIC_LENGTH]],
-                    )
-                )
-                continue
+                measured = _finite(getattr(target["shape"], "Volume", None))
+            except Exception:
+                measured = None
             minimum = check.get("min")
             maximum = check.get("max")
             if measured is None:
@@ -1215,7 +1100,7 @@ def _evaluate_geometry_checks(ctx: Any, doc: Any, checks: list[dict]) -> list[di
                 "id": check["id"],
                 "kind": kind,
                 "status": "pass" if passed else "fail",
-                "object": target["reference"],
+                "object": {"object": target["name"]},
                 "measured": measured,
             }
             if minimum is not None:
@@ -1231,12 +1116,10 @@ def _evaluate_geometry_checks(ctx: Any, doc: Any, checks: list[dict]) -> list[di
             results.append(indeterminate)
             continue
         try:
-            a_shape = _check_target_shape(target_a)
-            b_shape = _check_target_shape(target_b)
             distance_payload: dict[str, Any] = {}
-            _measure_distance(a_shape, b_shape, distance_payload)
+            _measure_distance(target_a["shape"], target_b["shape"], distance_payload)
             common_payload: dict[str, Any] = {}
-            _measure_interference(a_shape, b_shape, common_payload)
+            _measure_interference(target_a["shape"], target_b["shape"], common_payload)
         except ToolError as exc:
             results.append(
                 _indeterminate_check(
@@ -1267,8 +1150,8 @@ def _evaluate_geometry_checks(ctx: Any, doc: Any, checks: list[dict]) -> list[di
                     "id": check["id"],
                     "kind": kind,
                     "status": "pass" if passed else "fail",
-                    "a": target_a["reference"],
-                    "b": target_b["reference"],
+                    "a": {"object": target_a["name"]},
+                    "b": {"object": target_b["name"]},
                     "distance": distance,
                     "common_volume": common_volume,
                     "min": minimum,
@@ -1292,8 +1175,8 @@ def _evaluate_geometry_checks(ctx: Any, doc: Any, checks: list[dict]) -> list[di
                     "id": check["id"],
                     "kind": kind,
                     "status": "pass" if passed else "fail",
-                    "a": target_a["reference"],
-                    "b": target_b["reference"],
+                    "a": {"object": target_a["name"]},
+                    "b": {"object": target_b["name"]},
                     "common_volume": common_volume,
                     "max": maximum,
                 }
@@ -1318,21 +1201,37 @@ def _handle_validate_geometry(ctx: Any, arguments: Mapping[str, Any]) -> dict:
         )
     # Stage 1: normalize and prevalidate checks before any native access.
     checks = _normalize_geometry_checks(checks_input) if checks_input is not None else []
-    # Stage 2: resolve every target; refusals here precede any expensive
-    # measurement, and query targets record their bounded receipts.
-    prepared_checks, receipts, owners = _prepare_geometry_checks(ctx, doc, checks)
+    # Stage 2: resolve every whole-object target; refusals here precede any
+    # expensive measurement.
+    prepared_checks, owners = _prepare_geometry_checks(ctx, doc, checks)
     requested = owners[:_MAX_CHECK_TARGETS] if objects_requested is None else objects_requested
+    # An expected_bounds key outside the reported objects can never produce
+    # a verdict, so it is refused before any object resolution.
+    if expected_bounds:
+        known = set(requested)
+        unknown = sorted(str(key) for key in expected_bounds if key not in known)
+        if unknown:
+            raise ToolError(
+                VALIDATION_FAILED,
+                "expected_bounds names objects outside the reported set",
+                {
+                    "reason": "unknown_expectation_target",
+                    "unknown": unknown[:_MAX_CHECK_TARGETS],
+                    "unknownCount": len(unknown),
+                },
+            )
     entries = []
     for name in requested:
         obj = ctx.require_object(doc, name)
-        report = geometry_report(obj, expected_solids)
-        # Reported bounds are document-space: measured against the global
-        # copied shape, never the local serialized placement. Shapeless
-        # objects keep null bounds instead of failing.
-        global_report = dict(report)
-        if _shape_of(obj) is not None:
-            global_report["bounds"] = _bbox(placed_shape(obj))
-        entries.append(_geometry_entry(global_report, expected_solids, expected_bounds, tolerance))
+        # geometry_report is the single bounds source: its bounds are
+        # document-space (global placement applied exactly once) and a
+        # placement that cannot be resolved is reported as null bounds with
+        # a geometryUnavailable reason, never as local coordinates.
+        entries.append(
+            _geometry_entry(
+                geometry_report(obj, expected_solids), expected_solids, expected_bounds, tolerance
+            )
+        )
     # Stage 3: evaluate the checks.
     results = _evaluate_geometry_checks(ctx, doc, prepared_checks)
     all_valid = all(entry["valid"] for entry in entries)
@@ -1352,8 +1251,6 @@ def _handle_validate_geometry(ctx: Any, arguments: Mapping[str, Any]) -> dict:
         # accepted is the single overall summary and never a substitute
         # for the raw evidence beside it.
         result["accepted"] = bool(all_valid and checks_passed)
-        if receipts:
-            result["resolvedSelections"] = receipts
     return result
 
 
@@ -1604,7 +1501,11 @@ def _summarize_edge(edge: Any) -> dict:
 
 
 def _face_summary(face: Any) -> dict:
-    summary: dict[str, Any] = {"area": _finite(getattr(face, "Area", None))}
+    try:
+        area = _finite(getattr(face, "Area", None))
+    except Exception:
+        area = None
+    summary: dict[str, Any] = {"area": area}
     try:
         u1, u2, v1, v2 = face.ParameterRange
         mid_u = (u1 + u2) / 2.0
@@ -1633,8 +1534,12 @@ def _measure_faces(ctx: Any, doc: Any, obj: Any, selection: Mapping | None, payl
     else:
         try:
             all_faces = list(shape.Faces)
-        except Exception:
-            all_faces = []
+        except Exception as exc:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"face enumeration failed on {obj.Name}: {exc}",
+                {"reason": "selector_geometry_unavailable", "nextTool": "inspect_topology"},
+            ) from exc
         truncated = len(all_faces) > _MAX_FACES
         face_count = len(all_faces)
         faces = list(enumerate(all_faces[:_MAX_FACES], 1))
@@ -1655,6 +1560,26 @@ def _measure_faces(ctx: Any, doc: Any, obj: Any, selection: Mapping | None, payl
 def _handle_measure(ctx: Any, arguments: Mapping[str, Any]) -> dict:
     doc = ctx.require_document(arguments["document"])
     mode = arguments["mode"]
+    # Mode applicability is decided before any target resolution: a field
+    # another mode would silently ignore is a named refusal instead.
+    if mode == "section":
+        if arguments.get("plane") is None:
+            raise ToolError(VALIDATION_FAILED, "mode 'section' requires a 'plane'")
+    elif arguments.get("plane") is not None:
+        raise ToolError(
+            VALIDATION_FAILED,
+            "'plane' applies only to mode 'section'",
+            {"reason": "inapplicable_parameter", "parameter": "plane"},
+        )
+    if mode in ("distance", "interference", "difference"):
+        if arguments.get("b") is None:
+            raise ToolError(VALIDATION_FAILED, f"mode {mode!r} requires a 'b' target")
+    elif arguments.get("b") is not None:
+        raise ToolError(
+            VALIDATION_FAILED,
+            "'b' applies only to the distance, interference and difference modes",
+            {"reason": "inapplicable_parameter", "parameter": "b"},
+        )
     a_obj, a_sel = _resolve_target(ctx, doc, arguments["a"], "a")
     payload: dict[str, Any] = {
         "mode": mode,
@@ -1669,20 +1594,12 @@ def _handle_measure(ctx: Any, arguments: Mapping[str, Any]) -> dict:
                 "mode 'faces' requires a whole-object or face target",
             )
         return _measure_faces(ctx, doc, a_obj, a_sel, payload)
-    if mode not in ("distance", "interference", "section", "difference"):
-        raise ToolError(VALIDATION_FAILED, f"unsupported measure mode {mode!r}")
     if mode == "section":
-        if arguments.get("plane") is None:
-            raise ToolError(VALIDATION_FAILED, "mode 'section' requires a 'plane'")
-        if arguments.get("b") is not None:
-            raise ToolError(VALIDATION_FAILED, "mode 'section' takes only 'a' and 'plane'")
         payload["a"] = _reference_for(ctx, doc, a_obj, a_sel)
         a_shape = _target_shape(a_obj, a_sel)
         if a_shape is None:
             raise ToolError(VALIDATION_FAILED, f"object {a_obj.Name} has no shape")
         return _measure_section(a_shape, arguments["plane"], payload)
-    if arguments.get("b") is None:
-        raise ToolError(VALIDATION_FAILED, f"mode {mode!r} requires a 'b' target")
     b_obj, b_sel = _resolve_target(ctx, doc, arguments["b"], "b")
     payload["a"] = _reference_for(ctx, doc, a_obj, a_sel)
     payload["b"] = _reference_for(ctx, doc, b_obj, b_sel)
@@ -1847,8 +1764,7 @@ def _handle_inspect_topology(ctx: Any, arguments: Mapping[str, Any]) -> dict:
     doc = ctx.require_document(arguments["document"])
     detail = str(arguments.get("detail") or "compact")
     limit = arguments.get("limit")
-    limit = _DEFAULT_TOPOLOGY_PAGE if limit is None else int(limit)
-    limit = max(1, min(_MAX_TOPOLOGY_PAGE, limit))
+    limit = _DEFAULT_TOPOLOGY_PAGE if limit is None else limit
     target = arguments["target"]
     if not isinstance(target, Mapping):
         raise ToolError(VALIDATION_FAILED, "target must be a shared target object")
@@ -1862,12 +1778,15 @@ def _handle_inspect_topology(ctx: Any, arguments: Mapping[str, Any]) -> dict:
         if native == "":
             # A whole object enumerates its faces by default; a caller that
             # wants edges passes an explicit one-step edge query.
-            role = "face"
-            indices = list(range(1, len(_root_subshapes(placed_shape(obj), role)) + 1))
+            role, indices = "face", None
         else:
-            indices = [int(native[4:])]
-        if native:
             role = "face" if native.startswith("Face") else "edge"
+            indices = [int(native[4:])]
+    # One document-space copy serves the whole request: the enumeration
+    # and every page item read the same placed shape.
+    shape = placed_shape(obj)
+    if indices is None:
+        indices = list(range(1, len(_root_subshapes(shape, role)) + 1))
 
     start_after = 0
     cursor = arguments.get("cursor")
@@ -1876,7 +1795,7 @@ def _handle_inspect_topology(ctx: Any, arguments: Mapping[str, Any]) -> dict:
             ctx, doc, str(cursor), obj.Name, role, limit, query_hash
         )
 
-    subshapes = _root_subshapes(placed_shape(obj), role)
+    subshapes = _root_subshapes(shape, role)
     total = len(indices)
     build = _topology_face_item if role == "face" else _topology_edge_item
     page = indices[start_after : start_after + limit]
@@ -2321,7 +2240,10 @@ _PLANE_DEF = {
 }
 
 
-_CHECK_TARGET_DEF = {"$ref": "#/$defs/topologyTarget"}
+# Volumetric checks accept whole objects only: the gate needs a solid with
+# positive volume, so subshape and query targets can never pass and are
+# refused at schema validation instead of silently ignored.
+_CHECK_WHOLE_TARGET_DEF = {"$ref": "#/$defs/topologyWholeTarget"}
 
 _CHECK_VOLUME_RANGE_DEF = {
     "type": "object",
@@ -2330,7 +2252,7 @@ _CHECK_VOLUME_RANGE_DEF = {
     "properties": {
         "kind": {"const": "volume_range"},
         "id": {"type": "string", "minLength": 1, "maxLength": 64},
-        "object": _CHECK_TARGET_DEF,
+        "object": _CHECK_WHOLE_TARGET_DEF,
         "min": {"type": "number", "minimum": 0},
         "max": {"type": "number", "minimum": 0},
     },
@@ -2343,8 +2265,8 @@ _CHECK_CLEARANCE_DEF = {
     "properties": {
         "kind": {"const": "clearance_min"},
         "id": {"type": "string", "minLength": 1, "maxLength": 64},
-        "a": _CHECK_TARGET_DEF,
-        "b": _CHECK_TARGET_DEF,
+        "a": _CHECK_WHOLE_TARGET_DEF,
+        "b": _CHECK_WHOLE_TARGET_DEF,
         "min": {"type": "number", "exclusiveMinimum": 0},
     },
 }
@@ -2356,8 +2278,8 @@ _CHECK_INTERFERENCE_DEF = {
     "properties": {
         "kind": {"const": "interference_max"},
         "id": {"type": "string", "minLength": 1, "maxLength": 64},
-        "a": _CHECK_TARGET_DEF,
-        "b": _CHECK_TARGET_DEF,
+        "a": _CHECK_WHOLE_TARGET_DEF,
+        "b": _CHECK_WHOLE_TARGET_DEF,
         "max": {"type": "number", "minimum": 0},
     },
 }
@@ -2389,6 +2311,7 @@ _VALIDATE_GEOMETRY_INPUT = tq.merge_query_defs(
             "expected_solids": {"type": "integer", "minimum": 0, "maximum": 100000},
             "expected_bounds": {
                 "type": "object",
+                "maxProperties": _MAX_CHECK_TARGETS,
                 "additionalProperties": {
                     "type": "array",
                     "items": {"type": "number"},
@@ -2424,24 +2347,14 @@ _CHECK_RESULT_VOLUME = {
     "required": ["id", "kind", "status", "object", "measured"],
     "properties": {
         **_CHECK_RESULT_COMMON,
-        "object": {
-            "anyOf": [
-                {"$ref": "#/$defs/topologyWholeTarget"},
-                {"$ref": "#/$defs/topologyReferenceTarget"},
-            ]
-        },
+        "object": _CHECK_WHOLE_TARGET_DEF,
         "measured": {"type": ["number", "null"]},
         "min": {"type": "number", "minimum": 0},
         "max": {"type": "number", "minimum": 0},
     },
 }
 
-_CHECK_TARGET_OUT = {
-    "anyOf": [
-        {"$ref": "#/$defs/topologyWholeTarget"},
-        {"$ref": "#/$defs/topologyReferenceTarget"},
-    ]
-}
+_CHECK_TARGET_OUT = {"$ref": "#/$defs/topologyWholeTarget"}
 
 _CHECK_RESULT_CLEARANCE = {
     "type": "object",
@@ -2505,13 +2418,6 @@ _CHECK_RESULT_INDETERMINATE = {
     },
 }
 
-_RESOLVED_SELECTIONS_DEF = {
-    "type": "array",
-    "items": {"$ref": "#/$defs/topologyResolvedSelection"},
-    "minItems": 1,
-    "maxItems": tq.MAX_QUERY_REFERENCES,
-}
-
 _VALIDATE_GEOMETRY_OUTPUT = tq.merge_query_defs(
     {
         "type": "object",
@@ -2547,7 +2453,6 @@ _VALIDATE_GEOMETRY_OUTPUT = tq.merge_query_defs(
             },
             "checksPassed": {"type": "boolean"},
             "accepted": {"type": "boolean"},
-            "resolvedSelections": _RESOLVED_SELECTIONS_DEF,
         },
         "required": ["document", "units", "all_valid", "objects"],
         "$defs": {
@@ -2591,6 +2496,11 @@ _VALIDATE_GEOMETRY_OUTPUT = tq.merge_query_defs(
                     "max_tolerance": {"type": ["number", "null"]},
                     "diagnostics": {"type": "array", "items": {"type": "string"}},
                     "error": {"type": ["string", "null"]},
+                    "geometryUnavailable": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                    },
                     "verdicts": {"$ref": "#/$defs/verdicts"},
                     "valid": {"type": "boolean"},
                 },
@@ -2747,10 +2657,12 @@ TOOL_DEFINITIONS = [
             " bounds, clearance_min passes only when minimum distance >= min"
             " AND common volume is zero (positive clearance evidence), and"
             " interference_max passes when common volume <= max (touching is"
-            " permitted, not clearance). Check targets use the shared"
-            " whole/signed/query vocabulary; every fit target must be a"
-            " valid solid with positive volume, otherwise the row reports"
-            " indeterminate instead of passing. checksPassed is true only"
+            " permitted, not clearance). Check targets are whole objects"
+            ' ({"object": <Name>}); signed, query and subshape targets are'
+            " refused at schema validation because every fit target must be"
+            " a valid solid with positive volume, otherwise the row reports"
+            " indeterminate instead of passing. expected_bounds keys must"
+            " name the reported objects. checksPassed is true only"
             " when every check passes; accepted combines it with the object"
             " reports and never replaces the raw evidence. objects may be"
             " omitted when checks are supplied: the owner objects of the"

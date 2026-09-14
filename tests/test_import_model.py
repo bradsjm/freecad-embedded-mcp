@@ -7,6 +7,7 @@ The consent preflight and the shared mutation gate run for real.
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import sys
 import types
 from collections.abc import Iterator
@@ -35,6 +36,7 @@ VALIDATION_FAILED = "VALIDATION_FAILED"
 # ---------------------------------------------------------------------------
 
 IMPORT_STATE: dict[str, Any] = {"insert_error": None, "created": ()}
+_STUB_OBJECT_IDS = itertools.count(1)
 
 
 class StubMesh:
@@ -64,6 +66,16 @@ def _insert(path: str, document: str) -> None:
         *IMPORT_STATE.get("insert_calls", []),
         (path, document),
     ]
+    # Double of a native importer that removes a pre-existing object and
+    # creates a fresh one under the same name: names and list order are
+    # unchanged, only the native object identity differs.
+    replace_name = IMPORT_STATE.get("replace_name")
+    doc = IMPORT_STATE.get("doc")
+    if replace_name is not None and doc is not None:
+        for index, entry in enumerate(doc.Objects):
+            if entry.Name == replace_name:
+                doc.Objects[index] = StubObject(replace_name, "Part::Feature", shape=StubShape())
+                break
 
 
 _STUB_IMPORT.insert = _insert
@@ -135,6 +147,8 @@ class StubShape:
 class StubObject:
     def __init__(self, name: str, type_id: str, *, shape: Any = None, mesh: Any = None) -> None:
         self.Name = name
+        # Monotonic per-document id, mirroring native DocumentObject.ID.
+        self.ID = next(_STUB_OBJECT_IDS)
         self.Label = name
         self.TypeId = type_id
         self.State: list[str] = []
@@ -480,3 +494,60 @@ def test_tampered_consent_target_fails_without_effect(tmp_path) -> None:
     assert excinfo.value.code == CONSENT_DENIED
     assert calls == []
     assert doc.transactions == []
+
+
+# ---------------------------------------------------------------------------
+# Same-name replacement detection.
+# ---------------------------------------------------------------------------
+
+
+def test_step_import_refuses_same_name_replacement(tmp_path) -> None:
+    """A native import that replaces a pre-existing object under its own
+    name is refused on stable native object IDs even though names and list
+    order are unchanged — and the replaced object is never deleted."""
+    path = tmp_path / "replace.step"
+    path.write_text("ISO-10303-21")
+    with load_import() as module:
+        doc = FakeDoc(str(path), [StubObject("Box", "Part::Feature", shape=StubShape())])
+        IMPORT_STATE["doc"] = doc
+        IMPORT_STATE["replace_name"] = "Box"
+        ctx = FakeCtx(doc)
+        ctx.approved_target = consent_target(module, ctx, str(path), "step")
+
+        with pytest.raises(ToolError) as excinfo:
+            call(module, ctx, path=str(path), format="step")
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    details = excinfo.value.details
+    assert details["reason"] == "import_identity_conflict"
+    assert details["conflicts"] == ["Box"]
+    assert details["conflictCount"] == 1
+    assert details["identityEvidence"] == "document_object_id"
+    assert "Box" not in doc.removed
+    assert [entry.Name for entry in doc.Objects] == ["Box"]
+    assert doc.transactions[-1] == ("abort",)
+
+
+def test_step_import_without_native_ids_refuses_preexisting_objects(tmp_path) -> None:
+    """Without native identity evidence the import cannot prove a
+    pre-existing name kept its object, so it refuses with the limitation
+    recorded instead of reporting success."""
+    path = tmp_path / "replace-no-id.step"
+    path.write_text("ISO-10303-21")
+    with load_import() as module:
+        doc = FakeDoc(str(path), [StubObject("Box", "Part::Feature", shape=StubShape())])
+        del doc.Objects[0].ID
+        IMPORT_STATE["doc"] = doc
+        IMPORT_STATE["replace_name"] = "Box"
+        ctx = FakeCtx(doc)
+        ctx.approved_target = consent_target(module, ctx, str(path), "step")
+
+        with pytest.raises(ToolError) as excinfo:
+            call(module, ctx, path=str(path), format="step")
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    details = excinfo.value.details
+    assert details["reason"] == "import_identity_conflict"
+    assert details["identityEvidence"] == "unavailable"
+    assert "Box" not in doc.removed
+    assert doc.transactions[-1] == ("abort",)

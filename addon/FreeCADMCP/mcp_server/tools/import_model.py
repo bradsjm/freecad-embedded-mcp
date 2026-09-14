@@ -2,10 +2,14 @@
 
 Imported files are untrusted input, so every import runs a file-target
 consent preflight (purpose ``import``) before any effect. STEP objects are
-created by ``Import.insert`` and discovered by identity difference; STL is
-loaded into a ``Mesh::Feature``. Everything runs inside the shared mutation
-so a failure aborts the transaction and removes only the objects this call
-introduced — never a pre-existing object, even with a colliding name.
+created by ``Import.insert`` and discovered by document-name difference
+against the pre-import name set — never Python wrapper identity, which
+FreeCAD recreates for existing objects; STL is loaded into a
+``Mesh::Feature``. If the native import removes or replaces a pre-existing
+name, the call is refused with ``import_identity_conflict``. Everything
+runs inside the shared mutation so a failure aborts the transaction and
+removes only the objects this call introduced — never a pre-existing
+object, even with a colliding name.
 
 The result reports facts only: bounds, validity, solid count and a
 ``geometryKind`` marker. Imported geometry is never claimed to be
@@ -110,7 +114,9 @@ TOOL_DEFINITIONS = [
             "Import a STEP or STL file into an existing document. Imported "
             "files are untrusted input, so the call requires file consent "
             "before any effect. STEP uses Import.insert and reports the "
-            "created objects discovered by identity difference; STL loads "
+            "created objects discovered by document-name difference; an "
+            "import that removes or replaces an existing object is refused "
+            "(import_identity_conflict). STL loads "
             "into a Mesh::Feature and fails when the file has no facets. "
             "The result reports bounds, validity, solid count and "
             "geometryKind plus a units label ('file_defined' for STEP, "
@@ -273,6 +279,26 @@ def _multi_solid_expectations(objects: list[Any]) -> dict[str, dict]:
     return expectations
 
 
+def _native_object_ids(objects: list[Any]) -> dict[str, int] | None:
+    """Stable native identity per document object name.
+
+    FreeCAD gives every ``App::DocumentObject`` a read-only, monotonically
+    increasing ``ID`` at creation. Unlike Python wrapper identity or list
+    position it survives wrapper recreation, so a fresh object that took a
+    pre-existing name is detected even when names and order are unchanged.
+    Returns ``None`` when any object lacks the evidence, telling the
+    caller its replacement guard is limited.
+    """
+
+    identities: dict[str, int] = {}
+    for entry in objects:
+        raw = getattr(entry, "ID", None)
+        if not isinstance(raw, int) or isinstance(raw, bool):
+            return None
+        identities[str(getattr(entry, "Name", ""))] = raw
+    return identities
+
+
 # ---------------------------------------------------------------------------
 # Handler.
 # ---------------------------------------------------------------------------
@@ -294,12 +320,73 @@ def _import_model(ctx: Any, arguments: dict) -> dict:
     # objects and their solid counts first exist.
     expectations: dict[str, dict] = {}
     with mutation(ctx, doc, "import_model", lambda: created, expectations=expectations):
-        before_ids = {id(entry) for entry in (doc.Objects or ())}
+        # identity is tracked by stable document object name, never Python
+        # wrapper identity: FreeCAD recreates wrappers for existing objects,
+        # so an id() diff would mistake every pre-existing object for a new
+        # one — and delete it on failure.
+        before_objects = list(doc.Objects or ())
+        before_names = {str(entry.Name) for entry in before_objects}
+        before_ids = _native_object_ids(before_objects)
         try:
             if fmt == "step":
                 _import_step(doc, path)
+                after_objects = list(doc.Objects or ())
+                after_names = {str(entry.Name) for entry in after_objects}
+                after_ids = _native_object_ids(after_objects)
+                prefix_matches = len(after_objects) >= len(before_objects) and all(
+                    str(current.Name) == str(original.Name)
+                    for current, original in zip(after_objects, before_objects, strict=False)
+                )
+                missing = sorted(before_names - after_names)
+                # A native import can remove a pre-existing object and
+                # create a new one under the same name, leaving names and
+                # list order unchanged. Detect that replacement through
+                # the stable native object IDs, never wrapper identity.
+                replaced = sorted(
+                    name
+                    for name in before_names & after_names
+                    if before_ids is not None
+                    and after_ids is not None
+                    and after_ids[name] != before_ids[name]
+                )
+                if missing or replaced or not prefix_matches:
+                    # The native importer removed a pre-existing object (or
+                    # replaced it under the same name). Refuse: the object
+                    # now sitting at a pre-existing name is not attributed
+                    # to this import and is never deleted by its cleanup.
+                    raise ToolError(
+                        VALIDATION_FAILED,
+                        "native import removed or replaced existing objects; "
+                        "refusing to import over them",
+                        {
+                            "reason": "import_identity_conflict",
+                            "conflicts": (missing + replaced or sorted(before_names))[:16],
+                            "conflictCount": len(missing) + len(replaced) or 1,
+                            "identityEvidence": (
+                                "document_object_id"
+                                if before_ids is not None and after_ids is not None
+                                else "unavailable"
+                            ),
+                        },
+                    )
+                if before_names and (before_ids is None or after_ids is None):
+                    # Conservative fallback: no stable native identity is
+                    # available to prove each pre-existing name kept its
+                    # object, so refuse rather than risk a silent
+                    # replacement when the import also adds new objects.
+                    raise ToolError(
+                        VALIDATION_FAILED,
+                        "native object identity evidence is unavailable; "
+                        "refusing to import over pre-existing objects",
+                        {
+                            "reason": "import_identity_conflict",
+                            "conflicts": sorted(before_names)[:16],
+                            "conflictCount": 1,
+                            "identityEvidence": "unavailable",
+                        },
+                    )
                 created.extend(
-                    entry for entry in (doc.Objects or ()) if id(entry) not in before_ids
+                    entry for entry in (doc.Objects or ()) if str(entry.Name) not in before_names
                 )
                 if not created:
                     raise ToolError(
@@ -317,13 +404,15 @@ def _import_model(ctx: Any, arguments: dict) -> dict:
         except BaseException:
             # Import.insert and the mesh loader are not transaction-aware;
             # remove only objects introduced by this call — never a
-            # pre-existing object, even with a colliding name — then let
-            # the gate abort and recompute the rest.
+            # pre-existing object: a name present before the import is
+            # skipped even when the importer replaced the object under
+            # it — then let the gate abort and recompute the rest.
             for entry in list(doc.Objects or ()):
-                if id(entry) in before_ids:
+                name = str(entry.Name)
+                if name in before_names:
                     continue
                 try:
-                    doc.removeObject(str(entry.Name))
+                    doc.removeObject(name)
                 except Exception:
                     continue
             created.clear()

@@ -895,7 +895,9 @@ def test_measure_section_requires_plane():
                 "plane": {"z": 5.0},
             },
         )
-    assert "takes only 'a' and 'plane'" in excinfo.value.message
+    assert (
+        "applies only to the distance, interference and difference modes" in excinfo.value.message
+    )
 
 
 def test_measure_section_rejects_zero_normal():
@@ -1250,6 +1252,16 @@ def test_topology_limit_above_max_is_clamped():
     assert result["nextCursor"] is not None
 
 
+def test_inspect_topology_rejects_direct_handler_limit_coercion():
+    ctx = _topology_doc()
+
+    with pytest.raises(TypeError):
+        geometry.HANDLERS["inspect_topology"](
+            ctx,
+            {"document": "Doc", "target": {"object": "Shell"}, "limit": "50"},
+        )
+
+
 def test_inspect_topology_face_items_carry_descriptive_data():
     ctx = _topology_doc()
     result = geometry.HANDLERS["inspect_topology"](
@@ -1507,126 +1519,6 @@ def test_measure_rejects_reference_incompatible_with_mode():
             },
         )
     assert excinfo.value.code == protocol.VALIDATION_FAILED
-
-
-# ---------------------------------------------------------------------------
-# Bounded reference lists (dress-up bases).
-# ---------------------------------------------------------------------------
-
-
-def _face_reference(ctx, doc, obj, index):
-    return geometry.make_reference(ctx, doc, obj, "face", index)
-
-
-def _two_face_objects():
-    box = (0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
-    shape = FakeShape(faces=[FakeFace(area=1.0, bounds=box) for _ in range(3)])
-    base = FakeObject("Base", shape)
-    other = FakeObject("Other", shape)
-    ctx = FakeCtx({"Base": base, "Other": other})
-    return ctx, ctx.doc, base, other
-
-
-def _many_face_objects(count):
-    box = (0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
-    shape = FakeShape(faces=[FakeFace(area=1.0, bounds=box) for _ in range(count)])
-    base = FakeObject("Base", shape)
-    ctx = FakeCtx({"Base": base})
-    return ctx, ctx.doc, base
-
-
-def test_reference_list_accepts_same_object_faces_in_order():
-    ctx, doc, base, _other = _two_face_objects()
-
-    resolved, labels = geometry.resolve_reference_list(
-        ctx,
-        doc,
-        {"object": "Base"},
-        [_face_reference(ctx, doc, base, 2), _face_reference(ctx, doc, base, 1)],
-        "face",
-    )
-
-    assert resolved is base
-    assert labels == ["Face2", "Face1"]
-
-
-def test_reference_list_rejects_a_foreign_object():
-    ctx, doc, _base, other = _two_face_objects()
-
-    with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.resolve_reference_list(
-            ctx,
-            doc,
-            {"object": "Base"},
-            [_face_reference(ctx, doc, other, 1)],
-            "face",
-        )
-
-    assert "does not" not in excinfo.value.message
-    assert "but the base is" in excinfo.value.message
-
-
-def test_reference_list_rejects_duplicates_and_wrong_role():
-    ctx, doc, base, _other = _two_face_objects()
-    duplicate = _face_reference(ctx, doc, base, 1)
-
-    with pytest.raises(protocol.ToolError) as dup:
-        geometry.resolve_reference_list(
-            ctx, doc, {"object": "Base"}, [duplicate, duplicate], "face"
-        )
-    assert "duplicates" in dup.value.message
-
-    with pytest.raises(protocol.ToolError) as role:
-        geometry.resolve_reference_list(
-            ctx,
-            doc,
-            {"object": "Base"},
-            [_face_reference(ctx, doc, base, 1)],
-            "edge",
-        )
-    assert "signed edge token" in role.value.message
-
-
-def test_reference_list_rejects_a_whole_object_entry():
-    ctx, doc, _base, _other = _two_face_objects()
-
-    with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.resolve_reference_list(
-            ctx,
-            doc,
-            {"object": "Base"},
-            [{"object": "Base"}],
-            "face",
-        )
-
-    assert "signed subelement token" in excinfo.value.message
-
-
-def test_reference_list_enforces_the_32_item_boundary():
-    ctx, doc, base = _many_face_objects(40)
-
-    accepted = [_face_reference(ctx, doc, base, index) for index in range(1, 33)]
-    resolved, labels = geometry.resolve_reference_list(
-        ctx,
-        doc,
-        {"object": "Base"},
-        accepted,
-        "face",
-    )
-    assert resolved is base
-    assert labels == [f"Face{index}" for index in range(1, 33)]
-
-    oversized = [_face_reference(ctx, doc, base, index) for index in range(1, 34)]
-    with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.resolve_reference_list(
-            ctx,
-            doc,
-            {"object": "Base"},
-            oversized,
-            "face",
-        )
-    assert excinfo.value.code == protocol.VALIDATION_FAILED
-    assert "at most 32" in excinfo.value.message
 
 
 # ---------------------------------------------------------------------------
@@ -1903,38 +1795,30 @@ def test_checks_absent_omits_check_only_fields():
         assert key not in result
 
 
-def test_query_check_targets_report_receipts():
+def test_query_check_targets_are_rejected_for_volumetric_checks():
     a = _solid("A")
-    b = _solid("B")
     face = FakeFace(area=1.0, bounds=(0.0, 0.0, 0.0, 1.0, 1.0, 1.0), center=(0.0, 0.0, 0.5))
     a.Shape.Faces = [face]
     a.Shape._distance = (2.0, [(FakeVector(0, 0, 0), FakeVector(2, 0, 0))], None)
     a.Shape._common = FakeShape(volume=0.0, solids=0)
-    ctx = FakeCtx({"A": a, "B": b})
-    result = geometry.HANDLERS["validate_geometry"](
-        ctx,
-        {
-            "document": "Doc",
-            "checks": [
-                {
-                    "kind": "clearance_min",
-                    "a": {"object": "A", "query": [{"role": "face", "selector": ">Z"}]},
-                    "b": {"object": "B"},
-                    "min": 1.0,
-                }
-            ],
-        },
+    definition = next(
+        entry for entry in geometry.TOOL_DEFINITIONS if entry["name"] == "validate_geometry"
     )
-    _assert_output_schema(result, "validate_geometry")
-    row = result["checks"][0]
-    # A single face is not a volumetric target, so the row is indeterminate;
-    # the receipt still records the selection-time resolution.
-    assert row["status"] == "indeterminate"
-    assert row["reason"] == "non_volumetric_target"
-    receipts = result["resolvedSelections"]
-    assert receipts[0]["parameter"] == "checks.check-1.a"
-    assert receipts[0]["count"] == 1
-    assert receipts[0]["generation"] == ctx.generation
+    with pytest.raises(protocol.ProtocolError):
+        protocol.validate_schema(
+            {
+                "document": "Doc",
+                "checks": [
+                    {
+                        "kind": "clearance_min",
+                        "a": {"object": "A", "query": [{"role": "face", "selector": ">Z"}]},
+                        "b": {"object": "B"},
+                        "min": 1.0,
+                    }
+                ],
+            },
+            definition["inputSchema"],
+        )
 
 
 def test_query_axis_predicate_matches_a_cylindrical_face():

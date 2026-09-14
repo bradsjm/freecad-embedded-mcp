@@ -41,7 +41,13 @@ _MAX_LIMIT = 500
 _MAX_LINKS = 64
 _MAX_FILTER = 64
 _MAX_PROPERTY_PAGE = 64
+#: Wire bounds for an explicit inspect_objects selection: the handler pages
+#  rows at _MAX_PROPERTY_PAGE, so the schema must advertise the same bound
+#  instead of the wider whole-document listing cap.
+_MAX_SELECTION = _MAX_PROPERTY_PAGE
 _PROPERTY_LIST_LIMIT = 64
+_MAPPING_LIMIT = 64
+_JSONIFY_LEAF_BUDGET = 1024
 _ENUMERATION_LIMIT = 64
 _MAX_DEPENDENTS_LISTED = 64
 _MAX_SPREADSHEET_CELLS = 256
@@ -198,7 +204,11 @@ def _value_defs() -> dict:
             "anyOf": [
                 *_json_scalars(),
                 {"type": "array", "items": previous, "maxItems": 64},
-                {"type": "object", "additionalProperties": previous},
+                {
+                    "type": "object",
+                    "maxProperties": _MAPPING_LIMIT,
+                    "additionalProperties": previous,
+                },
             ]
         }
     return defs
@@ -282,6 +292,7 @@ _GEOMETRY_REPORT = {
             "minItems": 6,
             "maxItems": 6,
         },
+        "geometryUnavailable": {"type": "string", "minLength": 1},
         "diagnostics": {"type": "array", "items": {"type": "string"}, "maxItems": 16},
         "max_tolerance": {"type": ["number", "null"]},
         "ok": {"type": "boolean"},
@@ -363,6 +374,18 @@ _UNAVAILABLE_LINK = {
     },
 }
 
+_BOUNDED_MAPPING = {
+    "type": "object",
+    "maxProperties": _MAPPING_LIMIT,
+    "additionalProperties": {
+        "anyOf": [
+            *_json_scalars(),
+            {"type": "array", "maxItems": 64},
+            {"type": "object", "maxProperties": _MAPPING_LIMIT},
+        ]
+    },
+}
+
 _WHOLE_LINK_OUT = {
     "type": "object",
     "additionalProperties": False,
@@ -399,6 +422,7 @@ _PROPERTY_VALUE = {
             "required": ["unavailable"],
             "properties": {"unavailable": {"type": "string"}},
         },
+        _BOUNDED_MAPPING,
     ]
 }
 
@@ -437,6 +461,7 @@ _SPREADSHEET_VALUE = {
             "required": ["unavailable"],
             "properties": {"unavailable": {"type": "string", "maxLength": _MAX_SPREADSHEET_ERROR}},
         },
+        _BOUNDED_MAPPING,
     ]
 }
 
@@ -615,6 +640,7 @@ _ROW_DEFS = {
     "propertyMetadata": _PROPERTY_METADATA,
     "spreadsheetCell": _SPREADSHEET_CELL,
     "spreadsheetInfo": _SPREADSHEET_INFO,
+    "boundedPropertyValue": _PROPERTY_VALUE,
 }
 
 _CHANGE_PROPERTY = {
@@ -672,17 +698,6 @@ _CHANGE = {
     },
 }
 
-_CHECKPOINT_RECEIPT = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["path", "document", "generation"],
-    "properties": {
-        "path": {"type": "string", "minLength": 1},
-        "document": {"type": "string", "minLength": 1},
-        "generation": {"type": "integer", "minimum": 0},
-    },
-}
-
 _MUTATION_OUTPUT_DEFS = {
     "geometryReport": _GEOMETRY_REPORT,
     "objectIdentity": _OBJECT_IDENTITY,
@@ -723,16 +738,19 @@ _INSPECT_INPUT = {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "minItems": 1,
+            "maxItems": _MAX_SELECTION,
         },
         "cursor": {"type": ["string", "null"]},
         "property_filter": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
+            "maxItems": _MAX_FILTER,
         },
         "detail": {"type": "string", "enum": ["compact", "full"], "default": "compact"},
         "limit": {
             "type": "integer",
             "minimum": 1,
+            "maximum": _MAX_PROPERTY_PAGE,
             "default": 32,
         },
         "property_offset": {"type": "integer", "minimum": 0, "default": 0},
@@ -852,7 +870,7 @@ _INSPECT_OUTPUT = {
         "objects": {
             "type": "array",
             "items": {"$ref": "#/$defs/objectRow"},
-            "maxItems": _MAX_LIMIT,
+            "maxItems": 64,
         },
         "nextCursor": {"type": ["string", "null"]},
     },
@@ -929,10 +947,6 @@ _EDIT_OBJECTS_OUTPUT = {
     },
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
-
-_MUTATED_OUTPUT["properties"]["checkpoint"] = _CHECKPOINT_RECEIPT
-_DELETE_OUTPUT["properties"]["checkpoint"] = _CHECKPOINT_RECEIPT
-_EDIT_OBJECTS_OUTPUT["properties"]["checkpoint"] = _CHECKPOINT_RECEIPT
 
 _CREATE_OBJECTS_INPUT = {
     "type": "object",
@@ -1015,7 +1029,6 @@ _CREATE_OBJECTS_OUTPUT = {
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
 
-_CREATE_OBJECTS_OUTPUT["properties"]["checkpoint"] = _CHECKPOINT_RECEIPT
 
 TOOL_DEFINITIONS = [
     {
@@ -1879,9 +1892,9 @@ def _resolve_one(
 
             obj, role, indices = resolve_query(ctx, doc, value, what)
         if not indices or len(indices) > 1:
-            from .geometry import _cardinality_error
+            from .geometry import cardinality_error
 
-            raise _cardinality_error(
+            raise cardinality_error(
                 "selection_ambiguous" if len(indices) > 1 else "selection_empty",
                 (
                     f"{what} matched {len(indices)} {role}s of {obj.Name}; a "
@@ -1945,9 +1958,9 @@ def _resolve_link_sub_list(
 
                 obj, role, indices = resolve_query(ctx, doc, entry, what)
             if not indices:
-                from .geometry import _cardinality_error
+                from .geometry import cardinality_error
 
-                raise _cardinality_error(
+                raise cardinality_error(
                     "selection_empty",
                     f"{what} matched no {role} of {obj.Name}",
                     what,
@@ -2607,9 +2620,20 @@ def _link_value(ctx: Any, doc: Any, raw: Any) -> Any | None:
     return None
 
 
-def _jsonify(value: Any) -> Any:
-    """Convert one property value; document objects never stringify."""
+def _jsonify(value: Any, budget: list[int] | None = None) -> Any:
+    """Convert one property value; document objects never stringify.
 
+    ``budget`` carries the remaining bounded node count for one top-level
+    conversion. A shared sub-mapping DAG whose repeated emission would
+    expand exponentially as JSON exhausts the budget and degrades to the
+    unavailable marker instead of producing an unbounded payload.
+    """
+
+    if budget is None:
+        budget = [_JSONIFY_LEAF_BUDGET]
+    budget[0] -= 1
+    if budget[0] < 0:
+        return _unavailable(type(value).__name__)
     if value is None:
         return None
     if isinstance(value, bool):
@@ -2668,8 +2692,42 @@ def _jsonify(value: Any) -> Any:
                 converted.append(item)
             else:
                 return _unavailable(type(value).__name__)
+        budget[0] -= len(converted)
+        if budget[0] < 0:
+            return _unavailable(type(value).__name__)
         return converted
-    return _unavailable(type(value).__name__)
+    if isinstance(value, Mapping):
+        if len(value) > _MAPPING_LIMIT:
+            return _unavailable(type(value).__name__)
+        converted_mapping: dict[str, Any] = {}
+        try:
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    return _unavailable(type(value).__name__)
+                converted_item = _jsonify(item, budget)
+                if (
+                    isinstance(converted_item, str)
+                    and len(converted_item) > _MAX_SPREADSHEET_CONTENT
+                ):
+                    return _unavailable(type(value).__name__)
+                if isinstance(converted_item, list) and any(
+                    isinstance(entry, str) and len(entry) > _MAX_SPREADSHEET_CONTENT
+                    for entry in converted_item
+                ):
+                    return _unavailable(type(value).__name__)
+                if isinstance(converted_item, Mapping) and "unavailable" in converted_item:
+                    return _unavailable(type(value).__name__)
+                converted_mapping[key] = converted_item
+        except Exception:
+            return _unavailable(type(value).__name__)
+        return converted_mapping
+    try:
+        candidate = dict(value)
+    except Exception:
+        return _unavailable(type(value).__name__)
+    if len(candidate) > _MAPPING_LIMIT:
+        return _unavailable(type(value).__name__)
+    return _jsonify(candidate, budget)
 
 
 def _read_value(obj: Any, prop: str) -> Any:
@@ -3034,7 +3092,7 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
         raise ToolError(VALIDATION_FAILED, "detail must be 'compact' or 'full'")
     limit = args.get("limit")
     limit = 32 if limit is None else int(limit)
-    limit = max(1, min(_MAX_LIMIT, limit))
+    limit = max(1, min(_MAX_PROPERTY_PAGE, limit))
     props = [str(prop) for prop in (args.get("property_filter") or [])]
     property_offset = args.get("property_offset")
     property_offset = 0 if property_offset is None else int(property_offset)
@@ -3521,8 +3579,11 @@ def edit_objects(ctx: Any, args: dict) -> dict:
                 VALIDATION_FAILED,
                 f"edits list object '{obj.Name}' more than once",
             )
+        # Entry-keyed ownership mirrors create_objects: a same-named
+        # property on another edit must never reuse this entry's prepared
+        # query resolution.
         prepared[obj.Name] = _prepare_properties(
-            ctx, doc, obj, properties, queries=queries, owner=obj.Name
+            ctx, doc, obj, properties, queries=queries, owner=f"edits[{position}]"
         )
         names.append(obj.Name)
         targets.append(obj)
@@ -3589,7 +3650,7 @@ def edit_objects(ctx: Any, args: dict) -> dict:
                 bounds_before=before_bounds[obj.Name],
                 bounds_after=report["bounds"],
                 dependents_before=dependent_counts[obj.Name],
-                dependents=outcome["dependentCountAfter"],
+                dependents=dependent_count([obj]),
                 cell_contents_persisted=spreadsheet_writes_by_object.get(obj.Name, False),
             )
         )
@@ -3629,12 +3690,12 @@ def create_objects(ctx: Any, args: dict) -> dict:
         properties = dict(entry.get("properties") or {})
         requested_names.add(requested_name)
         factory, factory_kwargs = _plan_create(ctx, doc, obj_type, properties)
+        owner = f"entries[{position}]"
         for prop, value in properties.items():
-            # The requested name keys the resolution: batch entries may edit
-            # same-named properties on different future objects.
-            queries.scan_property(prop, value, owner=requested_name)
+            queries.scan_property(prop, value, owner=owner)
         plans.append(
             {
+                "index": position,
                 "type": obj_type,
                 "name": requested_name,
                 "properties": properties,
@@ -3646,6 +3707,12 @@ def create_objects(ctx: Any, args: dict) -> dict:
     expectations = args.get("expectations") or {}
     if not isinstance(expectations, dict):
         raise ToolError(VALIDATION_FAILED, "expectations must be an object")
+    if len(requested_names) != len(entries) and expectations:
+        raise ToolError(
+            VALIDATION_FAILED,
+            "duplicate requested names are ambiguous when expectations are present",
+            {"reason": "duplicate_requested_name"},
+        )
     unknown = sorted(set(expectations) - requested_names)
     if unknown:
         raise ToolError(
@@ -3694,7 +3761,7 @@ def create_objects(ctx: Any, args: dict) -> dict:
                     obj,
                     plan["properties"],
                     queries=queries,
-                    owner=plan["name"],
+                    owner=f"entries[{plan['index']}]",
                 )
 
     identities = []
@@ -3722,7 +3789,11 @@ def create_objects(ctx: Any, args: dict) -> dict:
                 bounds_after=report["bounds"],
                 # A created object had no pre-mutation dependent closure.
                 dependents_before=0,
-                dependents=outcome["dependentCountAfter"],
+                # outcome["dependentCountAfter"] is the batch-wide closure
+                # union, so copying it to every row would overstate each
+                # target. Read each target's own post-commit closure instead:
+                # a bounded, read-only InList walk, no second mutation.
+                dependents=dependent_count([obj]),
                 cell_contents_persisted=spreadsheet_writes_by_object.get(obj.Name, False),
             )
         )

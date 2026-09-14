@@ -25,6 +25,8 @@ thread)::
 
 from __future__ import annotations
 
+import base64
+import binascii
 import concurrent.futures
 import copy
 import json
@@ -47,11 +49,13 @@ from mcp_server.protocol import (
     CONSENT_DENIED,
     DOCUMENT_NOT_FOUND,
     GUI_DISPATCH_FAILED,
+    GUI_DISPATCH_STUCK,
     INTERNAL_ERROR,
     INVALID_PARAMS,
     METHOD_NOT_FOUND,
     OBJECT_NOT_FOUND,
     PATH_NOT_ALLOWED,
+    SERVER_BUSY,
     SUPPORTED_PROTOCOL_VERSION,
     VALIDATION_FAILED,
     ConsentSigner,
@@ -78,7 +82,6 @@ from mcp_server.tasks import (
     TaskStore,
     create_task_wire,
     declares_tasks_capability,
-    detailed_task_wire,
     require_tasks_capability,
 )
 from mcp_server.tools.documents import (
@@ -156,9 +159,6 @@ from mcp_server.tools.view import (
 from mcp_server.tools.view import (
     TOOL_DEFINITIONS as _VIEW_DEFS,
 )
-
-#: Tool errors are complete ``isError`` results, never JSON-RPC errors.
-SERVER_BUSY = "SERVER_BUSY"
 
 #: The 26 registered tools, in the exact plan section 5 order.
 PLAN_TOOL_ORDER = (
@@ -291,11 +291,6 @@ def _client_supports_form(client_capabilities: Mapping[str, Any] | None) -> bool
 CACHE_PUBLIC = {"ttlMs": 3_600_000, "cacheScope": "public"}
 CACHE_PRIVATE = {"ttlMs": 0, "cacheScope": "private"}
 
-#: Marker inside ``Outcome.error`` produced by the stuck-running timeout
-#: path of ``gui_dispatch`` (a running job is never falsely reported as
-#: stopped; the blocking caller gets this truthful message instead).
-_STUCK_RUNNING_MARKER = "cannot be safely cancelled"
-
 #: Poll granularity while a retained async Future (FEM) is awaited: the
 #: wait must wake for the deadline and for a shared cancellation request
 #: as well as for the Future itself, so it sleeps in bounded ticks.
@@ -307,6 +302,38 @@ _CANCELLED_OUTCOME_MARKERS = ("was cancelled", "is draining")
 def _rpc_result(request_id: Any, result: dict) -> dict:
     """Full JSON-RPC success response for one dispatched request."""
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _stuck_tool_error(outcome: gui_dispatch.Outcome) -> ToolError:
+    """Map one stuck dispatch outcome to its public tool error.
+
+    Carries the dispatcher's structured stuck fields unchanged:
+    ``GUI_DISPATCH_STUCK`` with ``reason: "deadline_exceeded"`` and
+    ``stillRunning: true`` for the call that timed out while running, and
+    ``reason: "dispatcher_stuck"`` with ``started: false`` for a later
+    fail-fast refusal. The blocked operation, elapsed and timeout evidence
+    ride along as bounded numbers.
+    """
+
+    stuck = outcome.stuck
+    if stuck is None:  # callers branch on Outcome.stuck first
+        raise ProtocolError(INTERNAL_ERROR, "stuck tool error requested for a non-stuck outcome")
+    if stuck.code != GUI_DISPATCH_STUCK:
+        # The dispatcher owns this code; a mismatch means the structured
+        # contract drifted and the wire result would be a lie.
+        raise ProtocolError(INTERNAL_ERROR, f"unknown stuck dispatch code: {stuck.code!r}")
+    details: dict[str, Any] = {
+        "operation": stuck.operation,
+        "elapsedSeconds": stuck.elapsed_seconds,
+        "timeoutSeconds": stuck.timeout_seconds,
+    }
+    if stuck.started:
+        details["reason"] = "deadline_exceeded"
+        details["stillRunning"] = True
+    else:
+        details["reason"] = "dispatcher_stuck"
+        details["started"] = False
+    return ToolError(stuck.code, outcome.error or stuck.code, details)
 
 
 def _target_identity(target: Mapping[str, Any] | None) -> dict | None:
@@ -523,9 +550,11 @@ class _OpContext:
         if not live:
             return
         try:
+            import importlib
+
             import FreeCADGui
 
-            from .tools import view as view_tools
+            view_tools = importlib.import_module("mcp_server.tools.view")
 
             document_name = str(getattr(doc, "Name", ""))
             if not document_name:
@@ -538,6 +567,8 @@ class _OpContext:
             view = getattr(gui_document, "ActiveView", None)
             if view is None:
                 return
+            if isinstance(view, type):
+                view = view()
 
             # ``clearSelection`` is global, so selections in every open
             # document are snapshotted and restored, not just the active one.
@@ -686,6 +717,9 @@ class Server:
 
         self._static_capabilities: dict | None = None
         self._capabilities_lock = threading.Lock()
+        #: Raw handler-output schemas (capture_view): the public schema
+        #: publishes metadata only; the raw one still validates ``data``.
+        self._raw_output_schemas: dict[str, dict] = {}
         self._register_tools()
 
     # ------------------------------------------------------------------
@@ -742,14 +776,74 @@ class Server:
             return True
         return bool(self.settings.get("allow_scripts", False))
 
+    def _checked_next_tool(self, name: str) -> str:
+        """Return ``name`` when it is a registered, enabled tool name.
+
+        The one validator for emitted ``details.nextTool`` hints: a stale
+        or disabled target fails loudly instead of advertising a tool the
+        wire does not expose.
+        """
+
+        if name not in self._definitions or not self._tool_enabled(name):
+            raise RuntimeError(f"nextTool hint {name!r} is not an enabled registered tool")
+        return name
+
+    def _validate_error_next_tool(self, error: ToolError) -> None:
+        """Reject an invalid ``details.nextTool`` hint at the wire boundary.
+
+        Tool-emitted hints must name an enabled registered tool; anything
+        else is an output-contract violation surfaced as INTERNAL_ERROR,
+        never a silently shipped dead hint.
+        """
+
+        details = error.details
+        if isinstance(details, Mapping) and "nextTool" in details:
+            hint = details["nextTool"]
+            if not isinstance(hint, str):
+                # A non-string hint is unrenderable evidence; refuse it
+                # before the registry lookup, whose membership test would
+                # raise a bare TypeError for unhashable values.
+                raise ProtocolError(
+                    INTERNAL_ERROR,
+                    f"tool error carries an invalid nextTool hint: {hint!r}",
+                )
+            try:
+                self._checked_next_tool(hint)
+            except RuntimeError:
+                # The membership/enablement predicate lives only in
+                # _checked_next_tool; the boundary adds the wire mapping.
+                raise ProtocolError(
+                    INTERNAL_ERROR,
+                    f"tool error carries an invalid nextTool hint: {hint!r}",
+                ) from None
+
+    def _error_result(self, error: ToolError) -> dict:
+        """One boundary for every ToolError crossing to the wire.
+
+        Consent refusals, preflight refusals, task-path failures and
+        handler errors all pass through here, so a ``details.nextTool``
+        hint is validated against the enabled tool registry exactly once,
+        on the same terms as handler outputs.
+        """
+
+        self._validate_error_next_tool(error)
+        return tool_error_result(error)
+
     def _add_definition(self, definition: Any, handlers: Any, preflight: Any) -> None:
         name, description, input_schema, output_schema = _unpack_definition(definition)
         if name in self._definitions:
             raise RuntimeError(f"duplicate tool definition: {name}")
         if not isinstance(input_schema, Mapping) or not isinstance(output_schema, Mapping):
             raise RuntimeError(f"tool {name} must declare finite input/output schemas")
+        raw_output_schema: Mapping[str, Any] | None = None
+        if name == "capture_view":
+            raw_output_schema = output_schema
+            output_schema = _metadata_only_capture_schema(output_schema)
+            self._raw_output_schemas[name] = dict(raw_output_schema)
         for schema in (input_schema, output_schema):
             check_schema(schema)  # rejects unsupported constructs at registration
+        if raw_output_schema is not None:
+            check_schema(raw_output_schema)
         self._definitions[name] = {
             "name": name,
             "description": description,
@@ -835,7 +929,7 @@ class Server:
                     "document": doc.Name,
                     "object": name,
                     "suggestions": suggestions,
-                    "nextTool": "inspect_objects",
+                    "nextTool": self._checked_next_tool("inspect_objects"),
                 },
             )
         return obj
@@ -978,7 +1072,9 @@ class Server:
             if not snapshot or snapshot.get("supportedTypesDocument") != name:
                 return
             tombstone = dict(snapshot)
-            tombstone["supportedTypes"] = {"unavailable": f"snapshot document '{name}' was closed"}
+            tombstone["supportedTypes"] = _bounded_unavailable(
+                f"snapshot document '{name}' was closed"
+            )
             tombstone["supportedTypesDocument"] = None
             self._static_capabilities = tombstone
 
@@ -1047,7 +1143,7 @@ class Server:
         if document is not None and refresh is not True:
             return _rpc_result(
                 validated["id"],
-                tool_error_result(
+                self._error_result(
                     ToolError(
                         VALIDATION_FAILED,
                         "document requires refresh=true",
@@ -1126,6 +1222,13 @@ class Server:
                 operation_name="discover:refresh",
             )
             if outcome.error is not None:
+                if outcome.stuck is not None:
+                    stuck_error = _stuck_tool_error(outcome)
+                    return {}, {
+                        "code": stuck_error.code,
+                        "message": stuck_error.message,
+                        "details": stuck_error.details,
+                    }
                 error: dict = {
                     "code": GUI_DISPATCH_FAILED,
                     "message": f"capability refresh failed: {outcome.error}",
@@ -1270,8 +1373,6 @@ class Server:
         definition = self._definitions.get(name)
         if definition is None or name not in self._handlers:
             raise ProtocolError(METHOD_NOT_FOUND, f"unknown tool: {name}")
-        if not self._tool_enabled(name):
-            raise ProtocolError(METHOD_NOT_FOUND, f"unknown tool: {name}")
         validate_schema(arguments, definition["inputSchema"])
 
         request_id = validated["id"]
@@ -1282,7 +1383,7 @@ class Server:
             try:
                 payload = self._tool_discover_capabilities(self, arguments)
             except ToolError as exc:
-                return _rpc_result(request_id, tool_error_result(exc))
+                return _rpc_result(request_id, self._error_result(exc))
             return _with_caching(
                 _rpc_result(request_id, self._validated_tool_result(name, payload)),
                 CACHE_PRIVATE,
@@ -1293,7 +1394,7 @@ class Server:
             # queued: no effects, no consent round trip, no registration.
             return _rpc_result(
                 request_id,
-                tool_error_result(
+                self._error_result(
                     ToolError(
                         CONSENT_DENIED,
                         "Operation cancelled before execution",
@@ -1306,7 +1407,7 @@ class Server:
                 name, arguments, params, principal, validated["client_capabilities"]
             )
         except ToolError as exc:
-            return _rpc_result(request_id, tool_error_result(exc))
+            return _rpc_result(request_id, self._error_result(exc))
         except InputRequired as exc:
             return _rpc_result(
                 request_id, input_required_result(exc.input_requests, exc.request_state)
@@ -1315,7 +1416,7 @@ class Server:
             # The event may have been set while consent was pending.
             return _rpc_result(
                 request_id,
-                tool_error_result(
+                self._error_result(
                     ToolError(
                         CONSENT_DENIED,
                         "Operation cancelled before execution",
@@ -1450,6 +1551,8 @@ class Server:
                 operation_name=f"preflight:{name}",
             )
             if outcome.error is not None:
+                if outcome.stuck is not None:
+                    raise _stuck_tool_error(outcome)
                 details = {"traceback": outcome.traceback} if outcome.traceback else None
                 raise ToolError(
                     GUI_DISPATCH_FAILED,
@@ -1668,7 +1771,7 @@ class Server:
                 cancel_event=validated.get("cancel_event"),
             )
         except ToolError as exc:
-            return _rpc_result(request_id, tool_error_result(exc))
+            return _rpc_result(request_id, self._error_result(exc))
         op_ctx = _OpContext(self, operation=op, approved_target=_target_identity(target))
         handler = self._handlers[name]
 
@@ -1742,7 +1845,7 @@ class Server:
                 value = self._await_async_value(name, value, op)
             if isinstance(value, ToolError):
                 self._merge_receipt(value, op.checkpoint)
-                return tool_error_result(value)
+                return self._error_result(value)
             if name == "discover_capabilities" and isinstance(value, dict):
                 # The handler captured GUI health mid-flight, while its own
                 # job was still the active dispatch. That job has finalized
@@ -1752,17 +1855,13 @@ class Server:
                 value["gui"] = _gui_health_snapshot()
             return self._validated_tool_result(name, value)
         error = outcome.error
-        if _STUCK_RUNNING_MARKER in error:
-            tool_exc = ToolError(
-                SERVER_BUSY,
-                f"operation deadline exceeded; '{name}' is still running on the GUI thread",
-                {"reason": "deadline_exceeded", "stillRunning": True},
-            )
+        if outcome.stuck is not None:
+            tool_exc = _stuck_tool_error(outcome)
         else:
             details = {"traceback": outcome.traceback} if outcome.traceback else None
             tool_exc = ToolError(GUI_DISPATCH_FAILED, error, details)
         self._merge_receipt(tool_exc, op.checkpoint)
-        return tool_error_result(tool_exc)
+        return self._error_result(tool_exc)
 
     def _merge_receipt(self, error: ToolError, receipt: dict | None) -> None:
         """Report a published checkpoint on a failed operation.
@@ -1844,12 +1943,12 @@ class Server:
                 deadline_s=deadline_s,
             )
         except ToolError as exc:
-            return _rpc_result(validated["id"], tool_error_result(exc))
+            return _rpc_result(validated["id"], self._error_result(exc))
         try:
             record = self._task_store.create(name, arguments, principal=principal)
         except ToolError as exc:
             self._remove_op(op)
-            return _rpc_result(validated["id"], tool_error_result(exc))
+            return _rpc_result(validated["id"], self._error_result(exc))
         op.task_id = record.task_id
         # ONE shared cancellation event per operation: tasks/cancel, the
         # service-tick deadline sweep, stop() and a blocking disconnect all
@@ -1901,7 +2000,20 @@ class Server:
 
         if outcome.error is not None:
             error_text = outcome.error
-            if any(marker in error_text for marker in _CANCELLED_OUTCOME_MARKERS):
+            if getattr(outcome, "stuck", None) is not None:
+                # Fail-fast rejection while the dispatcher is stuck: the
+                # structured stuck facts must survive into the task result.
+                tool_exc = _stuck_tool_error(outcome)
+                receipt = self._operation_checkpoint(op_id)
+                if receipt:
+                    self._merge_receipt(tool_exc, receipt)
+                self._task_store.complete(
+                    task_id,
+                    self._error_result(tool_exc),
+                    principal=principal,
+                    status_message=error_text,
+                )
+            elif any(marker in error_text for marker in _CANCELLED_OUTCOME_MARKERS):
                 # True completion of work that never started (queued
                 # cancellation / dispatcher shutdown): cancelled, not failed.
                 self._task_store.finalize_cancelled(
@@ -1915,7 +2027,7 @@ class Server:
                     self._merge_receipt(tool_exc, receipt)
                 self._task_store.complete(
                     task_id,
-                    tool_error_result(tool_exc),
+                    self._error_result(tool_exc),
                     principal=principal,
                     status_message=error_text,
                 )
@@ -1938,12 +2050,13 @@ class Server:
         self, task_id: str, op_id: str, principal: str, name: str, value: Any
     ) -> None:
         if isinstance(value, ToolError):
+            self._validate_error_next_tool(value)
             receipt = self._operation_checkpoint(op_id)
             if receipt:
                 self._merge_receipt(value, receipt)
             self._task_store.complete(
                 task_id,
-                tool_error_result(value),
+                self._error_result(value),
                 principal=principal,
                 status_message=value.message,
             )
@@ -1989,9 +2102,12 @@ class Server:
             except BaseException as exc:
                 try:
                     if isinstance(exc, ToolError):
+                        # Validate at the wire boundary first: a refused
+                        # hint must fall through to the failure branch
+                        # below, never abandon task finalization.
                         self._task_store.complete(
                             task_id,
-                            tool_error_result(exc),
+                            self._error_result(exc),
                             principal=principal,
                             status_message=exc.message,
                         )
@@ -2006,6 +2122,17 @@ class Server:
                         )
                     self._publish_task_update(task_id, principal)
                     self._remove_op_by_id(op_id)
+                except ProtocolError as boundary:
+                    # The boundary refused this error payload (e.g. an
+                    # invalid details.nextTool hint): finalize the task
+                    # truthfully as an infrastructure failure with its
+                    # terminal state, notification, and op cleanup.
+                    try:
+                        self._task_store.fail(task_id, boundary, principal=principal)
+                        self._publish_task_update(task_id, principal)
+                        self._remove_op_by_id(op_id)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -2013,8 +2140,8 @@ class Server:
 
     def _publish_task_update(self, task_id: str, principal: str | None) -> None:
         try:
-            task = self._task_store.get(task_id, principal=principal)
-            self._registry.publish_task_status(detailed_task_wire(task))
+            snapshot = self._task_store.snapshot(task_id, principal=principal)
+            self._registry.publish_task_status(snapshot)
         except Exception:
             pass  # notification delivery must never break finalization
 
@@ -2031,13 +2158,14 @@ class Server:
         """
 
         if isinstance(value, ToolError):
-            return tool_error_result(value)
+            return self._error_result(value)
         definition = self._definitions[name]
+        raw_schema = self._raw_output_schemas.get(name) or definition["outputSchema"]
         try:
-            # Validate the handler's raw payload against its registered
-            # schema BEFORE the capture_view image conversion: the schema
-            # describes the handler's structured payload.
-            validate_schema(value, definition["outputSchema"])
+            # Validate the handler's raw payload against the registered raw
+            # schema BEFORE the capture_view image conversion: the raw
+            # schema still describes the handler payload with ``data``.
+            validate_schema(value, raw_schema)
         except ProtocolError as exc:
             raise ProtocolError(
                 INTERNAL_ERROR,
@@ -2047,15 +2175,34 @@ class Server:
         payload: Any = value
         structured: dict | None = None
         if isinstance(payload, Mapping) and payload.get("mimeType") == "image/png":
-            # Released both ways: the image content block carries the pixels
-            # for visual clients, and the structured payload — including the
-            # real width/height — satisfies the declared output schema.
-            structured = dict(payload)
+            # The PNG lives exactly once, in the image content block. The
+            # bytes are validated here — the public output schema describes
+            # metadata only — and the base64 copy is removed from the
+            # structured payload.
+            data = payload.get("data")
+            if not isinstance(data, str) or not data:
+                raise ProtocolError(
+                    INTERNAL_ERROR,
+                    f"tool '{name}' image payload has no base64 data",
+                )
+            try:
+                decoded = base64.b64decode(data, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ProtocolError(
+                    INTERNAL_ERROR,
+                    f"tool '{name}' image payload is not valid base64: {exc}",
+                ) from None
+            if not decoded:
+                raise ProtocolError(
+                    INTERNAL_ERROR,
+                    f"tool '{name}' image payload is empty",
+                )
+            structured = {key: item for key, item in payload.items() if key != "data"}
             payload = [
                 {
                     "type": "image",
                     "mimeType": payload["mimeType"],
-                    "data": payload["data"],
+                    "data": data,
                 }
             ]
         try:
@@ -2094,8 +2241,10 @@ class Server:
 
     def _dispatch_tasks_get(self, validated: dict, principal: str) -> dict:
         require_tasks_capability(validated["client_capabilities"])
-        task = self._task_store.get(self._require_task_id(validated["params"]), principal=principal)
-        return _rpc_result(validated["id"], complete_result(detailed_task_wire(task)))
+        snapshot = self._task_store.snapshot(
+            self._require_task_id(validated["params"]), principal=principal
+        )
+        return _rpc_result(validated["id"], complete_result(snapshot))
 
     def _dispatch_tasks_update(self, validated: dict, principal: str) -> dict:
         require_tasks_capability(validated["client_capabilities"])
@@ -2495,11 +2644,25 @@ class _SubscriptionStream:
 # ---------------------------------------------------------------------------
 
 
+def _bounded_unavailable(source: BaseException | str) -> dict:
+    """Closed unavailable shape whose reason carries the shared 512-char
+    bound. ``source`` is a probe exception or static reason text. The
+    renderer lives in the FEM tool module (the lowest producer of
+    capability reason strings) and is imported lazily, matching the other
+    tool-module helper consumption above.
+    """
+
+    from mcp_server.tools.fem import bounded_reason
+
+    reason = f"{type(source).__name__}: {source}" if isinstance(source, BaseException) else source
+    return {"unavailable": bounded_reason(reason)}
+
+
 def _probe(fn: Callable[[], Any]) -> Any:
     try:
         return fn()
     except Exception as exc:
-        return {"unavailable": f"{type(exc).__name__}: {exc}"}
+        return _bounded_unavailable(exc)
 
 
 def _module_available(name: str) -> bool:
@@ -2523,7 +2686,7 @@ def _supported_types_sample(document: Any = None) -> Any:
     try:
         return sorted({str(entry) for entry in document.supportedTypes()})
     except Exception as exc:
-        return {"unavailable": f"{type(exc).__name__}: {exc}"}
+        return _bounded_unavailable(exc)
 
 
 def _capture_static_capabilities(document: Any = None) -> dict:
@@ -2555,7 +2718,7 @@ def _capture_static_capabilities(document: Any = None) -> dict:
             else {"unavailable": "availability probe missing"}
         )
     except Exception as exc:
-        fem_readiness = {"unavailable": f"{type(exc).__name__}: {exc}"}
+        fem_readiness = _bounded_unavailable(exc)
     version = list(FreeCAD.Version())
     workbenches = _probe(lambda: sorted(FreeCADGui.listWorkbenches()))
     try:
@@ -2563,7 +2726,20 @@ def _capture_static_capabilities(document: Any = None) -> dict:
 
         occ_version = getattr(Part, "OCC_VERSION", None)
     except Exception as exc:
-        occ_version = {"unavailable": f"{type(exc).__name__}: {exc}"}
+        occ_version = _bounded_unavailable(exc)
+    if not isinstance(occ_version, str) or not occ_version:
+        # A missing native attribute is capture evidence, not a version:
+        # report the closed unavailable shape the schema can render.
+        occ_version = {"unavailable": "OCC version unavailable"}
+    supported_types = _probe(lambda: _supported_types_sample(document))
+    if not isinstance(supported_types, list) or not document_name:
+        # Provenance and the type list stand or fall together: a probe
+        # without an identified source document is unavailable evidence,
+        # so the compact projection can never pair a count with a null
+        # document, or the unavailable reason with a document name.
+        if isinstance(supported_types, list):
+            supported_types = {"unavailable": "the probed document did not report its name"}
+        document_name = None
     return {
         "freecad": {
             "version": version[:3] if len(version) >= 3 else version,
@@ -2571,7 +2747,7 @@ def _capture_static_capabilities(document: Any = None) -> dict:
         },
         "occ": {"version": occ_version},
         "workbenches": workbenches,
-        "supportedTypes": _probe(lambda: _supported_types_sample(document)),
+        "supportedTypes": supported_types,
         "exporters": {
             "mesh": _module_available("Mesh"),
             "meshPart": _module_available("MeshPart"),
@@ -2609,7 +2785,7 @@ def _gui_health_snapshot() -> dict:
     try:
         snapshot = gui_dispatch.get_dispatch_status()
     except Exception as exc:
-        return {"unavailable": f"{type(exc).__name__}: {exc}"}
+        return _bounded_unavailable(exc)
     return {
         "state": snapshot.get("state"),
         "operation": snapshot.get("operation"),
@@ -2655,6 +2831,36 @@ def _unpack_definition(definition: Any) -> tuple[str, str, Any, Any]:
     return name, description, input_schema, output_schema
 
 
+#: The capture_view PNG bytes live exactly once, in the image content
+#: block. The handler payload still carries the base64 ``data`` key and is
+#: validated against the raw schema (the registered definition) before the
+#: server strips it; the published schema and the structured content
+#: describe metadata only.
+_CAPTURE_IMAGE_DATA_KEY = "data"
+
+
+def _metadata_only_capture_schema(schema: Mapping[str, Any]) -> dict:
+    """Return the public ``capture_view`` schema without the image bytes.
+
+    ``data`` is removed from ``properties`` and ``required`` so the
+    advertised contract describes exactly the metadata that survives in
+    ``structuredContent``: mime type, dimensions, document, generation,
+    mode, focus, view name and views.
+    """
+
+    public = {
+        key: (copy.deepcopy(value) if key in ("properties", "required") else value)
+        for key, value in schema.items()
+    }
+    properties = public.get("properties")
+    if isinstance(properties, dict):
+        properties.pop(_CAPTURE_IMAGE_DATA_KEY, None)
+    required = public.get("required")
+    if isinstance(required, list):
+        public["required"] = [key for key in required if key != _CAPTURE_IMAGE_DATA_KEY]
+    return public
+
+
 #: Compact ``discover_capabilities`` keeps only the summary blocks; the
 #: heavy arrays (workbenches, supportedTypes, paths) need ``detail: "full"``.
 _COMPACT_CAPABILITY_KEYS = ("freecad", "occ", "exporters", "fem", "geometryQueries")
@@ -2686,6 +2892,227 @@ _DOCUMENT_ROW_REQUIRED = [
 ]
 
 
+#: Closed shape shared by every capability probe that can fail at capture
+#: time: exactly one bounded ``unavailable`` reason.
+_UNAVAILABLE_SCHEMA = {
+    "type": "object",
+    "properties": {"unavailable": {"type": "string", "maxLength": 512}},
+    "required": ["unavailable"],
+    "additionalProperties": False,
+    "maxProperties": 1,
+}
+
+_FREECAD_SCHEMA = {
+    "anyOf": [
+        {
+            "type": "object",
+            "properties": {
+                "version": {
+                    "type": "array",
+                    "items": {"type": ["string", "number"]},
+                    "maxItems": 16,
+                },
+                "full": {
+                    "type": "array",
+                    "items": {"type": ["string", "number"]},
+                    "maxItems": 16,
+                },
+            },
+            "required": ["version", "full"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "version": {
+                    "type": "array",
+                    "items": {"type": ["string", "number"]},
+                    "maxItems": 16,
+                }
+            },
+            "required": ["version"],
+            "additionalProperties": False,
+        },
+    ]
+}
+
+_OCC_SCHEMA = {
+    "type": "object",
+    "properties": {"version": {"anyOf": [{"type": "string"}, _UNAVAILABLE_SCHEMA]}},
+    "required": ["version"],
+    "additionalProperties": False,
+}
+
+_EXPORTERS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "mesh": {"type": "boolean"},
+        "meshPart": {"type": "boolean"},
+        "part": {"type": "boolean"},
+        "step": {"type": "boolean"},
+        "fem": {"type": "boolean"},
+    },
+    "required": ["mesh", "meshPart", "part", "step", "fem"],
+    "additionalProperties": False,
+}
+
+_FEM_READINESS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "available": {"type": "boolean"},
+        "has_frd_to_vtk": {"type": "boolean"},
+        "vtk_support": {"type": "boolean"},
+        "calculix_binary": {"type": ["string", "null"], "maxLength": 4096},
+        "reason": {"type": ["string", "null"], "maxLength": 512},
+    },
+    "required": [
+        "available",
+        "has_frd_to_vtk",
+        "vtk_support",
+        "calculix_binary",
+        "reason",
+    ],
+    "additionalProperties": False,
+}
+
+_FEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "module": {"type": "boolean"},
+        "objectsFem": {"type": "boolean"},
+        "femsolver": {"type": "boolean"},
+        "readiness": {"anyOf": [_FEM_READINESS_SCHEMA, _UNAVAILABLE_SCHEMA]},
+    },
+    "required": ["module", "objectsFem", "femsolver", "readiness"],
+    "additionalProperties": False,
+}
+
+_GEOMETRY_QUERIES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "syntax": {"type": "string", "const": "cadquery-string-v1"},
+        "roles": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["face", "edge"]},
+            "maxItems": 8,
+        },
+        "maxSteps": {"type": "integer", "minimum": 0},
+        "maxSelectorLength": {"type": "integer", "minimum": 0},
+        "maxCandidates": {"type": "integer", "minimum": 0},
+    },
+    "required": ["syntax", "roles", "maxSteps", "maxSelectorLength", "maxCandidates"],
+    "additionalProperties": False,
+}
+
+_PATHS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "home": {"anyOf": [{"type": "string", "maxLength": 4096}, _UNAVAILABLE_SCHEMA]},
+        "userAppData": {"anyOf": [{"type": "string", "maxLength": 4096}, _UNAVAILABLE_SCHEMA]},
+        "userMacro": {"anyOf": [{"type": "string", "maxLength": 4096}, _UNAVAILABLE_SCHEMA]},
+        "temp": {"anyOf": [{"type": "string", "maxLength": 4096}, _UNAVAILABLE_SCHEMA]},
+        "resource": {"anyOf": [{"type": "string", "maxLength": 4096}, _UNAVAILABLE_SCHEMA]},
+    },
+    "required": ["home", "userAppData", "userMacro", "temp", "resource"],
+    "additionalProperties": False,
+}
+
+_STRING_LIST_SCHEMA = {"type": "array", "items": {"type": "string", "maxLength": 256}}
+
+# Compact projects one of exactly two closed shapes: a captured type list
+# (integer count, string provenance, no unavailable key) or the unavailable
+# pair (null count and provenance, optional bounded reason). A partially
+# cached snapshot omits the summary blocks; the type correlation still
+# holds, because the producer nulls the provenance whenever the list is
+# missing.
+_COMPACT_SUMMARY_PROPERTIES = {
+    "freecad": _FREECAD_SCHEMA,
+    "occ": _OCC_SCHEMA,
+    "exporters": _EXPORTERS_SCHEMA,
+    "fem": _FEM_SCHEMA,
+    "geometryQueries": _GEOMETRY_QUERIES_SCHEMA,
+    "scriptingEnabled": {"type": "boolean"},
+    "recoveryEnabled": {"type": "boolean"},
+}
+
+_COMPACT_CAPABILITIES_SCHEMA = {
+    "anyOf": [
+        {
+            "type": "object",
+            "properties": {
+                **_COMPACT_SUMMARY_PROPERTIES,
+                "supportedTypesCount": {"type": "integer", "minimum": 0},
+                "supportedTypesDocument": {"type": "string", "maxLength": 256},
+            },
+            "required": [
+                "supportedTypesCount",
+                "supportedTypesDocument",
+                "scriptingEnabled",
+                "recoveryEnabled",
+            ],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                **_COMPACT_SUMMARY_PROPERTIES,
+                "supportedTypesCount": {"const": None},
+                "supportedTypesDocument": {"const": None},
+                "supportedTypesUnavailable": {"type": "string", "maxLength": 512},
+            },
+            "required": [
+                "supportedTypesCount",
+                "supportedTypesDocument",
+                "supportedTypesUnavailable",
+                "scriptingEnabled",
+                "recoveryEnabled",
+            ],
+            "additionalProperties": False,
+        },
+    ]
+}
+
+_FULL_CAPABILITIES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "freecad": _FREECAD_SCHEMA,
+        "occ": _OCC_SCHEMA,
+        "workbenches": {"anyOf": [_STRING_LIST_SCHEMA, _UNAVAILABLE_SCHEMA]},
+        "supportedTypes": {"anyOf": [_STRING_LIST_SCHEMA, _UNAVAILABLE_SCHEMA]},
+        "exporters": _EXPORTERS_SCHEMA,
+        "fem": _FEM_SCHEMA,
+        "supportedTypesDocument": {"type": ["string", "null"], "maxLength": 256},
+        "geometryQueries": _GEOMETRY_QUERIES_SCHEMA,
+        "paths": _PATHS_SCHEMA,
+        "scriptingEnabled": {"type": "boolean"},
+        "recoveryEnabled": {"type": "boolean"},
+    },
+    "required": ["scriptingEnabled", "recoveryEnabled"],
+    "additionalProperties": False,
+}
+
+_GUI_HEALTH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "state": {"type": "string", "enum": ["healthy", "busy", "stuck"]},
+        "operation": {"type": "string", "maxLength": 256},
+        "runningForSeconds": {"type": "number", "minimum": 0},
+        "timeoutSeconds": {"type": "number", "minimum": 0},
+        "queuedJobs": {"type": "integer", "minimum": 0},
+        "draining": {"type": "boolean"},
+    },
+    "required": [
+        "state",
+        "operation",
+        "runningForSeconds",
+        "timeoutSeconds",
+        "queuedJobs",
+        "draining",
+    ],
+    "additionalProperties": False,
+}
+
+
 def _compact_capabilities(snapshot: Mapping[str, Any]) -> dict:
     """Summary projection of one capability snapshot.
 
@@ -2698,11 +3125,15 @@ def _compact_capabilities(snapshot: Mapping[str, Any]) -> dict:
     compact = {key: snapshot[key] for key in _COMPACT_CAPABILITY_KEYS if key in snapshot}
     supported = snapshot.get("supportedTypes")
     compact["supportedTypesCount"] = len(supported) if isinstance(supported, list) else None
-    compact["supportedTypesDocument"] = snapshot.get("supportedTypesDocument")
+    compact["supportedTypesDocument"] = (
+        snapshot.get("supportedTypesDocument") if isinstance(supported, list) else None
+    )
     if isinstance(supported, Mapping) and "unavailable" in supported:
         # A snapshot captured with no document open cannot carry the type
         # list; compact must say why instead of reporting bare nulls.
         compact["supportedTypesUnavailable"] = str(supported["unavailable"])
+    elif not isinstance(supported, list):
+        compact["supportedTypesUnavailable"] = "capability snapshot not captured"
     return compact
 
 
@@ -2748,8 +3179,10 @@ def _discover_definition() -> dict:
         "outputSchema": {
             "type": "object",
             "properties": {
-                "capabilities": {"type": "object"},
-                "gui": {"type": "object"},
+                "capabilities": {
+                    "anyOf": [_COMPACT_CAPABILITIES_SCHEMA, _FULL_CAPABILITIES_SCHEMA],
+                },
+                "gui": {"anyOf": [_GUI_HEALTH_SCHEMA, _UNAVAILABLE_SCHEMA]},
             },
             "required": ["capabilities", "gui"],
             "additionalProperties": False,

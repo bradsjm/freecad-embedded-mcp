@@ -132,8 +132,7 @@ def test_complete_sets_terminal_result_and_creation_based_ttl() -> None:
     record = store.create("run_fem", {}, principal="alice")
     clock.advance(300)  # 300 s of work
     assert store.complete(record.task_id, {"resultType": "complete", "ok": True}, principal="alice")
-    wire = tasks_module.get_task_wire(record)
-    assert wire["resultType"] == "complete"
+    wire = tasks_module.detailed_task_wire(record)
     assert wire["status"] == "completed"
     assert wire["result"] == {"resultType": "complete", "ok": True}
     assert "error" not in wire
@@ -165,6 +164,52 @@ def test_fail_accepts_protocol_error_instances() -> None:
     record = store.create("export", {}, principal=None)
     store.fail(record.task_id, ProtocolError(-32602, "bad args"))
     assert record.error == {"code": -32602, "message": "bad args"}
+
+
+def test_terminal_status_message_is_bounded_and_budgeted() -> None:
+    store, _ = make_store(max_retained_bytes=1024)
+    record = store.create("export", {}, principal="alice")
+    store.complete(
+        record.task_id,
+        {"ok": True},
+        principal="alice",
+        status_message="x" * 4096,
+    )
+    assert len((record.status_message or "").encode("utf-8")) <= 256
+    assert store._retained_bytes <= 1024
+    assert len(tasks_module.detailed_task_wire(record)["statusMessage"].encode("utf-8")) <= 256
+
+
+def test_finalized_control_character_status_respects_byte_budget() -> None:
+    store, _ = make_store(max_retained_bytes=1024)
+    record = store.create("export", {"format": "step"}, principal="alice")
+    # Control characters expand six-fold under canonical JSON escaping
+    # (\x01 -> \u0001), so the accounting edge case is a message whose
+    # raw length sits far below its canonical retained-byte charge.
+    assert store.finalize_cancelled(
+        record.task_id,
+        principal="alice",
+        status_message="\x01" * 4096,
+    )
+    assert record.status == "cancelled"
+    assert record.args == {}
+    assert record.status_message is not None
+    assert record.status_message.endswith(tasks_module._STATUS_TRUNCATION_SUFFIX)
+    # Bounding and accounting both charge canonical JSON bytes, so the
+    # stored message is shorter raw than its escaped canonical size.
+    assert len(record.status_message) < tasks_module._status_message_size(record.status_message)
+    assert tasks_module._status_message_size(record.status_message) <= 256
+    # Dropped args release their budget and the terminal reservation is
+    # returned, so only the bounded message stays retained and it fits
+    # the configured budget.
+    assert store._retained_bytes == tasks_module._status_message_size(record.status_message)
+    assert store._retained_bytes <= 1024
+    # The terminal record stays readable through the snapshot API.
+    snapshot = store.snapshot(record.task_id, principal="alice")
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["statusMessage"] == record.status_message
+    assert "result" not in snapshot
+    assert "error" not in snapshot
 
 
 def test_terminal_state_is_immutable_against_late_writers() -> None:
@@ -357,21 +402,21 @@ def test_active_task_cap_rejects_with_busy_tool_error() -> None:
     assert store.get(third.task_id, principal="alice") is third
 
 
-def test_retention_cap_evicts_oldest_terminal_only() -> None:
+def test_retention_cap_rejects_when_unexpired_records_fill_capacity() -> None:
     store, _ = make_store(max_retained=3)
     oldest = store.create("run_script", {}, principal="alice").task_id
     store.complete(oldest, {"n": 1}, principal="alice")
     middle = store.create("run_script", {}, principal="alice").task_id
     store.complete(middle, {"n": 2}, principal="alice")
     running = store.create("run_fem", {}, principal="alice")
-    # Oldest terminal record is evicted; the running one is never touched.
-    newest = store.create("measure", {}, principal="alice")
+    # Unexpired records are never evicted to admit a new task.
+    with pytest.raises(ToolError) as excinfo:
+        store.create("measure", {}, principal="alice")
+    assert excinfo.value.details["reason"] == "retention_limit"
     assert len(store) == 3
-    with pytest.raises(ProtocolError):
-        store.get(oldest, principal="alice")
+    assert store.get(oldest, principal="alice")
     assert store.get(middle, principal="alice")
     assert store.get(running.task_id, principal="alice") is running
-    assert store.get(newest.task_id, principal="alice") is newest
 
 
 def test_retention_cap_with_no_terminal_records_rejects_busy() -> None:
@@ -382,6 +427,17 @@ def test_retention_cap_with_no_terminal_records_rejects_busy() -> None:
         store.create("measure", {}, principal="alice")
     assert excinfo.value.code == "SERVER_BUSY"
     assert excinfo.value.details["reason"] == "retention_limit"
+
+
+def test_retained_byte_budget_rejects_creation_before_state_is_stored() -> None:
+    store, _ = make_store(max_retained_bytes=1024)
+
+    with pytest.raises(ToolError) as excinfo:
+        store.create("export", {"payload": "x" * 300}, principal="alice")
+
+    assert excinfo.value.code == "SERVER_BUSY"
+    assert excinfo.value.details["reason"] == "retained_byte_limit"
+    assert len(store) == 0
 
 
 # -- Tasks capability helper --------------------------------------------

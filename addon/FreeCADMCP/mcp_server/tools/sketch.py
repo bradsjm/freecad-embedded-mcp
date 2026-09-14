@@ -1,16 +1,19 @@
 """``inspect_sketch`` / ``edit_sketch``: structured Sketcher access.
 
-Both handlers run on the GUI thread. Inspection reads native geometry and
-constraint rows in native index order (0-based, as FreeCAD reports them),
-solves the sketch for the degree-of-freedom summary and discloses
+Both handlers run on the GUI thread. Inspection is read-only: it reads
+native geometry and constraint rows in native index order (0-based, as
+FreeCAD reports them) plus the last solved state — it never calls
+``solve()``, recomputes, or opens an edit session — and discloses
 constraint expression bindings. Editing applies one batch of operations
 inside the shared ``object_validation.mutation`` gate: deletes first in
 descending index order, then additions, then datum edits. Every referenced
 index is prevalidated against a simulated index state before the
 transaction opens, so a bad index never opens one.
 
-Both responses also carry the native object state names, the status
-string, and the solve() status code. An edit batch may carry
+Both responses also carry the native object state names and the status
+string; only the edit response runs the solver (validating the batch)
+and reports its status code, while inspection reports ``solverStatus``
+null because no prior native status is exposed. An edit batch may carry
 ``expected_generation``; a mismatch is refused before planning, so a
 stale batch never opens a transaction either.
 
@@ -38,6 +41,7 @@ _MAX_SKETCH_ROWS = 4096
 _MAX_STATE_NAMES = 32
 _MAX_OPERATIONS = 64
 _MAX_CONSTRAINT_ARGUMENTS = 6
+_SOLVER_MESSAGE_LIMIT = 16
 
 _SKETCH_TYPE_ID = "Sketcher::SketchObject"
 
@@ -328,6 +332,8 @@ _SOLVER_SUMMARY = {
         "fullyConstrained",
         "degreesOfFreedom",
         "solverMessages",
+        "solverMessageCount",
+        "solverMessagesTruncated",
         "solverStatus",
     ],
     "properties": {
@@ -336,8 +342,10 @@ _SOLVER_SUMMARY = {
         "solverMessages": {
             "type": "array",
             "items": {"type": "string"},
-            "maxItems": 16,
+            "maxItems": _SOLVER_MESSAGE_LIMIT,
         },
+        "solverMessageCount": {"type": "integer", "minimum": 0},
+        "solverMessagesTruncated": {"type": "boolean"},
         "solverStatus": {"type": ["integer", "null"]},
     },
 }
@@ -534,16 +542,6 @@ _INSPECT_SKETCH_OUTPUT = {
         "geometryTruncated": {"type": "boolean"},
         "constraintsTruncated": {"type": "boolean"},
         "expressionBindingsTruncated": {"type": "boolean"},
-        "checkpoint": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["path", "document", "generation"],
-            "properties": {
-                "path": {"type": "string", "minLength": 1},
-                "document": {"type": "string", "minLength": 1},
-                "generation": {"type": "integer", "minimum": 0},
-            },
-        },
     },
 }
 
@@ -610,6 +608,8 @@ _EDIT_SKETCH_OUTPUT = {
         "deletedGeometry",
         "deletedConstraints",
         "changedDatums",
+        "changedExpressions",
+        "clearedExpressions",
         "expressionBindings",
     ],
     "properties": {
@@ -648,6 +648,16 @@ _EDIT_SKETCH_OUTPUT = {
             "items": {"$ref": "#/$defs/datumRow"},
             "maxItems": _MAX_OPERATIONS,
         },
+        "changedExpressions": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/expressionRow"},
+            "maxItems": _MAX_OPERATIONS,
+        },
+        "clearedExpressions": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 0},
+            "maxItems": _MAX_OPERATIONS,
+        },
         "expressionBindings": {
             "type": "array",
             "items": {
@@ -661,16 +671,6 @@ _EDIT_SKETCH_OUTPUT = {
             },
             "maxItems": _MAX_SKETCH_ROWS,
         },
-        "checkpoint": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["path", "document", "generation"],
-            "properties": {
-                "path": {"type": "string", "minLength": 1},
-                "document": {"type": "string", "minLength": 1},
-                "generation": {"type": "integer", "minimum": 0},
-            },
-        },
     },
     "$defs": {
         "datumRow": {
@@ -681,7 +681,16 @@ _EDIT_SKETCH_OUTPUT = {
                 "index": {"type": "integer", "minimum": 0},
                 "datum": {"type": "string"},
             },
-        }
+        },
+        "expressionRow": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["index", "expression"],
+            "properties": {
+                "index": {"type": "integer", "minimum": 0},
+                "expression": {"type": "string"},
+            },
+        },
     },
 }
 
@@ -694,6 +703,9 @@ TOOL_DEFINITIONS = [
             "unsupported marker with the native type name) and constraint "
             "rows in native 0-based index order, the solver degree-of-"
             "freedom summary and the constraint expression bindings. "
+            "The inspection is read-only: it never solves, recomputes or "
+            "opens an edit session, so solverStatus is null (edit_sketch "
+            "reports the post-batch solve status). "
             "Unavailable native getters report null or empty fields. "
             "geometry, constraints and expressionBindings cap at 4096 "
             "rows; the Count fields report full totals and the Truncated "
@@ -935,14 +947,25 @@ def _status_text(sketch: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _solver_summary(sketch: Any) -> dict:
-    solve = getattr(sketch, "solve", None)
+def _solver_summary(sketch: Any, run_solve: bool = False) -> dict:
+    """Solver summary for one sketch, read without mutating it.
+
+    ``DoF``, ``FullyConstrained``, the solver messages and the status text
+    are plain reads of the last solved state: inspection never calls
+    ``solve()`` or recomputes. ``run_solve=True`` (edit_sketch's
+    post-mutation validation) runs the native solver once and reports its
+    status code; without it ``solverStatus`` stays null because no prior
+    native status is exposed.
+    """
+
     solver_status: int | None = None
-    if callable(solve):
-        try:
-            solver_status = _int_or_none(solve())
-        except Exception:
-            solver_status = None
+    if run_solve:
+        solve = getattr(sketch, "solve", None)
+        if callable(solve):
+            try:
+                solver_status = _int_or_none(solve())
+            except Exception:
+                solver_status = None
     # solve() returns a solver status code, never a degree count:
     # a sketch with 7 remaining DoF returned 0.
     dof = _int_or_none(getattr(sketch, "DoF", None))
@@ -959,6 +982,8 @@ def _solver_summary(sketch: Any) -> dict:
     if fully is None and dof is not None:
         fully = dof == 0
     messages: list[str] = []
+    message_count = 0
+    messages_truncated = False
     get_messages = getattr(sketch, "getSolverMessages", None)
     if callable(get_messages):
         try:
@@ -966,11 +991,15 @@ def _solver_summary(sketch: Any) -> dict:
         except Exception:
             raw = None
         if isinstance(raw, (list, tuple)):
-            messages = [str(message) for message in raw][:16]
+            message_count = len(raw)
+            messages_truncated = message_count > _SOLVER_MESSAGE_LIMIT
+            messages = [str(message) for message in raw[:_SOLVER_MESSAGE_LIMIT]]
     return {
         "fullyConstrained": fully,
         "degreesOfFreedom": dof,
         "solverMessages": messages,
+        "solverMessageCount": message_count,
+        "solverMessagesTruncated": messages_truncated,
         "solverStatus": solver_status,
     }
 
@@ -1058,7 +1087,7 @@ def _validate_geometry_add(entry: Any, what: str) -> dict:
                 "origin": [float(value) for value in values],
                 "width": float(width),
                 "height": float(height),
-            }
+            },
         )
         return checked
     if kind == "polyline":
@@ -1959,12 +1988,20 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
             else:
                 constraint = Sketcher.Constraint(entry["type"], *entry["arguments"])
             result = sketch.addConstraint(constraint)
-            added_constraints.append(
-                _added_index(
-                    result,
-                    plan["constraintBase"] + len(added_constraints),
+            planned = plan["constraintBase"] + len(added_constraints)
+            index = _added_index(result, planned)
+            if index != planned:
+                raise ToolError(
+                    VALIDATION_FAILED,
+                    f"native addConstraint returned index {index} at position "
+                    f"{position}; the batch planned index {planned}",
+                    {
+                        "reason": "native_index_mismatch",
+                        "expectedIndex": planned,
+                        "actualIndex": index,
+                    },
                 )
-            )
+            added_constraints.append(index)
         changed_datums = [
             {"index": entry["index"], "datum": entry["datum"]} for entry in plan["setDatums"]
         ]
@@ -1980,7 +2017,7 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
         "object": str(getattr(sketch, "Name", "")),
-        "solver": _solver_summary(sketch),
+        "solver": _solver_summary(sketch, run_solve=True),
         "state": _state_names(sketch),
         "statusText": _status_text(sketch),
         "addedGeometry": added_geometry,
@@ -1989,6 +2026,14 @@ def _edit_sketch(ctx: Any, arguments: dict) -> dict:
         "deletedGeometry": list(plan["deleteGeometry"]),
         "deletedConstraints": list(plan["deleteConstraints"]),
         "changedDatums": changed_datums,
+        "changedExpressions": [
+            {"index": entry["index"], "expression": entry["expression"]}
+            for entry in plan["setExpressions"]
+            if entry["expression"] is not None
+        ],
+        "clearedExpressions": [
+            entry["index"] for entry in plan["setExpressions"] if entry["expression"] is None
+        ],
         "expressionBindings": _expression_bindings(sketch),
     }
 

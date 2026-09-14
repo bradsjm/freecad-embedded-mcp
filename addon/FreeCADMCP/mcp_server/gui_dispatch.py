@@ -67,6 +67,27 @@ import FreeCADGui
 from PySide import QtCore, QtWidgets
 
 from mcp_server.dispatch_health import DispatchHealth, stuck_failure
+from mcp_server.protocol import GUI_DISPATCH_STUCK
+
+
+@dataclass(frozen=True)
+class StuckDispatch:
+    """Structured stuck-dispatch failure carried unchanged to the wire.
+
+    Built from the same health snapshot as the human-readable
+    ``Outcome.error``, so the text and the machine fields can never drift:
+    ``code`` is the public tool error code, ``operation`` names the blocked
+    (stuck) GUI operation, ``elapsed_seconds``/``timeout_seconds`` carry
+    its health evidence, and ``started`` records whether *this* call's
+    callable began executing — True for the call that timed out while
+    running, False for a later fail-fast refusal.
+    """
+
+    code: str = GUI_DISPATCH_STUCK
+    operation: str = ""
+    elapsed_seconds: float = 0.0
+    timeout_seconds: float = 0.0
+    started: bool = False
 
 
 @dataclass(frozen=True)
@@ -88,6 +109,11 @@ class Outcome:
     # functions below still resolve ``traceback`` to the stdlib module.
     traceback: str = ""
     error: str | None = None
+    #: Structured evidence for a stuck dispatch (None for every other
+    #: outcome): lets callers publish ``GUI_DISPATCH_STUCK`` with its
+    #: reason, blocked operation, elapsed/timeout and started facts
+    #: without substring matching on the error text.
+    stuck: StuckDispatch | None = None
 
     @property
     def ok(self) -> bool:
@@ -237,7 +263,23 @@ def _fire_on_finished(job: _Job, outcome: Outcome) -> None:
 
 
 def _stuck_outcome(snapshot: dict[str, Any], *, just_timed_out: bool) -> Outcome:
-    return Outcome(error=stuck_failure(snapshot, just_timed_out=just_timed_out)["error"])
+    """Stuck outcome carrying the failure text and structured wire fields.
+
+    One health snapshot feeds both: the dispatch-health prose stays the
+    message, and :class:`StuckDispatch` preserves the code, blocked
+    operation, elapsed time, timeout and started fact unchanged.
+    """
+    failure = stuck_failure(snapshot, just_timed_out=just_timed_out)
+    return Outcome(
+        error=failure["error"],
+        stuck=StuckDispatch(
+            code=failure["code"],
+            operation=str(snapshot.get("operation") or "unknown GUI operation"),
+            elapsed_seconds=float(snapshot.get("running_for_seconds", 0.0)),
+            timeout_seconds=float(snapshot.get("timeout_seconds", 0.0)),
+            started=just_timed_out,
+        ),
+    )
 
 
 def _queued_timeout_outcome(timeout: float) -> Outcome:
@@ -276,7 +318,7 @@ def _create_job(
 
     rejection = _dispatch_health.rejection()
     if rejection is not None:
-        _reject(Outcome(error=rejection["error"]))
+        _reject(_stuck_outcome(rejection["dispatch"], just_timed_out=False))
         return job
     if cancel_event is not None and cancel_event.is_set():
         _reject(Outcome(error=f"'{job.operation}' was cancelled before execution"))

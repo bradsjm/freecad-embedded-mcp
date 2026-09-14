@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import uuid
 from typing import Any
 
@@ -153,28 +154,41 @@ def _verify_staged_copy(doc: Any, staged: str, destination: str) -> None:
             f"recovery readback failed: {type(exc).__name__}: {exc}",
             {"path": destination},
         ) from exc
+    primary: ToolError | None = None
     try:
         from .export import _verify_reopened_copy
 
         _verify_reopened_copy(doc, reopened)
     except ToolError as exc:
-        raise _checkpoint_failed(
-            f"recovery readback failed: {exc.message}",
-            {"path": destination},
-        ) from exc
+        primary = exc
     except Exception as exc:
-        raise _checkpoint_failed(
+        primary = ToolError(
+            VALIDATION_FAILED,
             f"recovery readback failed: {type(exc).__name__}: {exc}",
             {"path": destination},
-        ) from exc
+        )
     finally:
+        close_error: str | None = None
         try:
             FreeCAD.closeDocument(str(reopened.Name))
-        except Exception as exc:
+        except Exception as close_exc:
+            close_error = f"{type(close_exc).__name__}: {close_exc}"[:512]
+        # The readback verdict is primary; a close failure never masks it,
+        # and a close failure alone is raised only when verification
+        # otherwise succeeded and no other failure is in flight.
+        if primary is not None:
+            details = {"path": destination, **(primary.details or {})}
+            if close_error is not None:
+                details["closeError"] = close_error
             raise _checkpoint_failed(
-                f"recovery readback close failed: {type(exc).__name__}: {exc}",
+                f"recovery readback failed: {primary.message}",
+                details,
+            ) from primary
+        if close_error is not None and sys.exc_info()[0] is None:
+            raise _checkpoint_failed(
+                f"recovery readback close failed: {close_error}",
                 {"path": destination},
-            ) from exc
+            )
 
 
 def _publish(ctx: Any, staged: str, destination: str) -> None:
