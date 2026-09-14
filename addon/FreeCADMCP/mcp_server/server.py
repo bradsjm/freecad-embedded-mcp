@@ -41,7 +41,7 @@ from typing import Any
 import FreeCAD
 import FreeCADGui
 
-from mcp_server import gui_dispatch
+from mcp_server import gui_dispatch, topology_query
 from mcp_server.http_server import McpHTTPServer, StreamResponse
 from mcp_server.protocol import (
     CONSENT_DENIED,
@@ -2586,6 +2586,13 @@ def _capture_static_capabilities(document: Any = None) -> dict:
             "readiness": fem_readiness,
         },
         "supportedTypesDocument": document_name,
+        "geometryQueries": {
+            "syntax": "cadquery-string-v1",
+            "roles": ["face", "edge"],
+            "maxSteps": topology_query.MAX_QUERY_STEPS,
+            "maxSelectorLength": topology_query.SELECTOR_MAX_LENGTH,
+            "maxCandidates": topology_query.MAX_QUERY_CANDIDATES,
+        },
         "paths": {
             "home": _probe(FreeCAD.getHomePath),
             "userAppData": _probe(FreeCAD.getUserAppDataDir),
@@ -2650,7 +2657,7 @@ def _unpack_definition(definition: Any) -> tuple[str, str, Any, Any]:
 
 #: Compact ``discover_capabilities`` keeps only the summary blocks; the
 #: heavy arrays (workbenches, supportedTypes, paths) need ``detail: "full"``.
-_COMPACT_CAPABILITY_KEYS = ("freecad", "occ", "exporters", "fem")
+_COMPACT_CAPABILITY_KEYS = ("freecad", "occ", "exporters", "fem", "geometryQueries")
 
 #: Complete document-row shape: every field is always present so a client
 #: can rely on one stable row layout.

@@ -1,11 +1,14 @@
 """Tests for the ``capture_view`` tool (mcp_server/tools/view.py).
 
 Loads the real module against stubbed FreeCAD/FreeCADGui/PySide, defending:
-explicit focus prevalidation that never reframes on error, five-argument
-Framebuffer capture only, the viewport/omitted/explicit size rules,
-navigation-animation suppression with preference restoration, and
-subelement-preserving selection + active-document restoration in ``finally``
 — including when the capture itself fails.
+shared-target focus/a/b resolution (whole object or signed reference)
+before any GUI state change, mode routing (overview/detail/interior/fit;
+view_name applies to detail only), five-argument Framebuffer capture only,
+the viewport/omitted/explicit size rules, navigation-animation suppression
+with preference restoration, and subelement-preserving selection +
+active-document restoration in ``finally`` — including when the capture
+itself fails.
 """
 
 import base64
@@ -28,6 +31,7 @@ if str(ADDON_DIR) not in sys.path:
 
 from mcp_server import protocol
 from mcp_server.protocol import ToolError
+from mcp_server.tools import geometry
 
 _ORIENTATION_METHODS = (
     "viewIsometric",
@@ -263,6 +267,8 @@ class FakeCtx:
         self.App = FakeApp(documents)
         self.Gui = FakeGui(gui_views)
         self.objects = objects
+        self.signer = protocol.ConsentSigner(ttl_s=3600)
+        self._identities: dict[Any, str] = {}
 
     def require_document(self, name: str) -> FakeAppDocument:
         doc = self.App.documents.get(name)
@@ -281,6 +287,11 @@ class FakeCtx:
 
     def check_document_idle(self, doc: Any) -> None:
         pass
+
+    def document_identity(self, doc: Any) -> str:
+        if doc not in self._identities:
+            self._identities[doc] = f"identity-{len(self._identities) + 1}"
+        return self._identities[doc]
 
 
 class FakeBoundBox:
@@ -563,8 +574,9 @@ def make_ctx(
 def capture_args(**overrides: Any) -> dict[str, Any]:
     arguments = {
         "document": "Smoke",
-        "focus_object": "Box",
+        "mode": "detail",
         "view_name": "Isometric",
+        "focus": {"object": "Box"},
     }
     arguments.update(overrides)
     return arguments
@@ -586,8 +598,8 @@ def test_capture_returns_png_restores_state_and_suppresses_animations(
     assert base64.b64decode(result["data"]) == b"\x89PNG-fake-bytes"
     assert ("saveImage", 640, 480, "White", "Framebuffer") in view.calls
     assert result["document"] == "Smoke"
-    assert result["focus_object"] == "Box"
-    assert result["focus_subelement"] is None
+    assert result["mode"] == "detail"
+    assert result["focus"] == {"object": "Box"}
     assert result["view_name"] == "Isometric"
     assert all(call != "fitAll" for call in view.calls)
     # Orientation ran with animations disabled (never a stale animated
@@ -626,7 +638,7 @@ def test_unknown_focus_fails_without_reframing(view_module) -> None:
     ctx.Gui.selection.addSelection(lid, "Face3")
 
     with pytest.raises(ToolError) as excinfo:
-        view_module.capture_view(ctx, capture_args(focus_object="Nope"))
+        view_module.capture_view(ctx, capture_args(focus={"object": "Nope"}))
 
     assert excinfo.value.code == "OBJECT_NOT_FOUND"
     # Nothing touched the view: no orientation, no selection framing, no
@@ -788,22 +800,33 @@ def test_state_restored_even_when_capture_fails(view_module) -> None:
 
 
 def test_subelement_capture_frames_and_reports(view_module) -> None:
-    ctx = make_ctx(active="Smoke")
-    result = view_module.capture_view(
-        ctx, capture_args(focus_subelement="Face3", width=640, height=480)
+    face = FakeFace(Plane())
+    box_obj = FakeShapeObject(
+        "Box",
+        "Smoke",
+        FakeShape((0.0, 0.0, 0.0, 10.0, 10.0, 10.0), faces=[face]),
     )
-    assert result["focus_subelement"] == "Face3"
+    ctx = make_ctx(active="Smoke", smoke_objects={"Box": box_obj})
+    doc = ctx.require_document("Smoke")
+    focus = geometry.make_reference(ctx, doc, box_obj, "face", 1)
+
+    result = view_module.capture_view(ctx, capture_args(focus=focus, width=640, height=480))
+
+    assert result["focus"] == focus
     assert result["document"] == "Smoke"
-    assert result["focus_object"] == "Box"
+    assert result["mode"] == "detail"
     assert result["view_name"] == "Isometric"
     assert ctx.Gui.messages == ["ViewSelection", "ViewSelection"]
 
 
-def test_subelement_rejected_before_gui_changes(view_module) -> None:
-    for bad in ("Vertex2", "Face99", "Edge99", "face3"):
+def test_raw_numeric_targets_rejected_before_gui_changes(view_module) -> None:
+    for bad in ("Vertex2", "Face99", "Edge99", "face3", 3):
         ctx = make_ctx()
         with pytest.raises(ToolError) as excinfo:
-            view_module.capture_view(ctx, capture_args(focus_subelement=bad))
+            view_module.capture_view(
+                ctx,
+                capture_args(focus={"object": "Box", "subelement": bad}),
+            )
         assert excinfo.value.code == "VALIDATION_FAILED"
         assert ctx.Gui.messages == []
         assert ctx.App.set_active_calls == []
@@ -870,6 +893,7 @@ def test_overview_sheet_seven_panels_and_legend(view_module) -> None:
     assert base64.b64decode(result["data"]) == b"\x89PNG-composed"
     assert (result["width"], result["height"]) == (2048, 1104)
     assert result["mode"] == "overview"
+    assert result["focus"] is None
     labels = [entry["view"] for entry in result["views"]]
     assert labels == [
         "Isometric",
@@ -915,11 +939,11 @@ def test_overview_manifest_carries_generation_and_camera_axes(view_module) -> No
         },
     )
 
-    result = view_module.capture_view(ctx, capture_args(view_name=None))
+    result = view_module.capture_view(ctx, capture_args(mode="overview", view_name=None))
 
     assert result["generation"] == 7
     assert result["mode"] == "overview"
-    assert result["focus_object"] == "Box"
+    assert result["focus"] == {"object": "Box"}
     assert result["view_name"] is None
     assert "captured_objects" not in result
     panels = result["views"][:7]
@@ -952,7 +976,7 @@ def test_overview_document_scope_uses_viewfit_and_reports_objects(view_module) -
 
     assert result["captured_objects"] == ["Leg"]
     assert result["truncated"] is False
-    assert result["focus_object"] is None
+    assert result["focus"] is None
     assert ctx.Gui.messages.count("ViewFit") == 14
     assert "ViewSelection" not in ctx.Gui.messages
     assert view.calls[0] == "viewIsometric"
@@ -964,9 +988,24 @@ def test_view_name_conflicts_with_sheet_modes(view_module) -> None:
         with pytest.raises(ToolError) as excinfo:
             view_module.capture_view(ctx, capture_args(view_name="Front", mode=mode))
         assert excinfo.value.code == "VALIDATION_FAILED"
-        assert excinfo.value.details["reason"] == "view_name_mode_conflict"
+        assert excinfo.value.details["reason"] == "invalid_parameter_for_mode"
         assert ctx.Gui.views["Smoke"].calls == []
         assert FakeParamGet.set_calls == []
+
+
+def test_view_name_without_mode_defaults_to_overview_and_refuses(view_module) -> None:
+    # mode defaults to overview regardless of view_name, so a bare
+    # named-view call is a parameter-for-mode refusal, never an implicit
+    # single-view capture.
+    ctx = make_ctx()
+    arguments = {"document": "Smoke", "view_name": "Isometric", "focus": {"object": "Box"}}
+    with pytest.raises(ToolError) as excinfo:
+        view_module.capture_view(ctx, arguments)
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.details["reason"] == "invalid_parameter_for_mode"
+    assert excinfo.value.details["mode"] == "overview"
+    assert ctx.Gui.views["Smoke"].calls == []
+    assert FakeParamGet.set_calls == []
 
 
 def test_detail_derives_orientation_from_planar_face(view_module) -> None:
@@ -982,12 +1021,13 @@ def test_detail_derives_orientation_from_planar_face(view_module) -> None:
         },
     )
     view = ctx.Gui.views["Smoke"]
+    doc = ctx.require_document("Smoke")
+    focus = geometry.make_reference(ctx, doc, box_obj, "face", 1)
 
-    result = view_module.capture_view(
-        ctx, capture_args(view_name=None, mode="detail", focus_subelement="Face1")
-    )
+    result = view_module.capture_view(ctx, capture_args(view_name=None, mode="detail", focus=focus))
 
     assert result["mode"] == "detail"
+    assert result["focus"] == focus
     assert result["views"][0]["view"] == "Detail"
     assert result["views"][0]["derived"] is True
     assert result["views"][0]["section_plane"] is None
@@ -1020,11 +1060,20 @@ def test_detail_derives_orientation_from_planar_face(view_module) -> None:
 
 
 def test_detail_without_derivable_target_refuses(view_module) -> None:
-    for arguments in (
-        capture_args(view_name=None, mode="detail"),
-        capture_args(view_name=None, mode="detail", focus_subelement="Edge1"),
+    whole_ctx = make_ctx()
+    edge_obj = FakeShapeObject(
+        "Box",
+        "Smoke",
+        FakeShape((0.0, 0.0, 0.0, 10.0, 10.0, 10.0), edges=[None]),
+    )
+    edge_ctx = make_ctx(smoke_objects={"Box": edge_obj})
+    edge_focus = geometry.make_reference(
+        edge_ctx, edge_ctx.require_document("Smoke"), edge_obj, "edge", 1
+    )
+    for ctx, arguments in (
+        (whole_ctx, capture_args(view_name=None, mode="detail")),
+        (edge_ctx, capture_args(view_name=None, mode="detail", focus=edge_focus)),
     ):
-        ctx = make_ctx()
         with pytest.raises(ToolError) as excinfo:
             view_module.capture_view(ctx, arguments)
         assert excinfo.value.code == "VALIDATION_FAILED"
@@ -1123,6 +1172,28 @@ def test_interior_target_shapeless_refuses(view_module) -> None:
     assert FakeParamGet.set_calls == []
 
 
+def test_interior_subshape_focus_refuses(view_module) -> None:
+    box_obj = FakeShapeObject(
+        "Box",
+        "Smoke",
+        FakeShape((0.0, 0.0, 0.0, 10.0, 10.0, 10.0), faces=[FakeFace(Plane())]),
+    )
+    box_obj.ViewObject = FakeViewObject(0)
+    ctx = make_ctx(smoke_objects={"Box": box_obj})
+    doc = ctx.require_document("Smoke")
+    focus = geometry.make_reference(ctx, doc, box_obj, "face", 1)
+
+    with pytest.raises(ToolError) as excinfo:
+        view_module.capture_view(ctx, capture_args(view_name=None, mode="interior", focus=focus))
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.details["reason"] == "subshape_not_allowed"
+    assert ctx.Gui.views["Smoke"].calls == []
+    assert ctx.Gui.messages == []
+    assert ctx.App.set_active_calls == []
+    assert FakeParamGet.set_calls == []
+
+
 def test_fit_derives_axis_from_coaxial_cylinders(view_module) -> None:
     pin, hole = _cylinder_pair()
     ctx = make_ctx(active="Smoke", smoke_objects={"Pin": pin, "Hole": hole})
@@ -1138,7 +1209,9 @@ def test_fit_derives_axis_from_coaxial_cylinders(view_module) -> None:
     section = result["views"][1]["section_plane"]
     assert section["normal"] == [1.0, 0.0, 0.0]
     assert section["point"] == [10.0, 10.0, 5.0]
-    assert result["focus_object"] is None
+    assert result["focus"] is None
+    assert result["a"] == {"object": "Pin"}
+    assert result["b"] == {"object": "Hole"}
     assert result["view_name"] is None
     # Uncut panel first (no clip call before it), then one enable + one
     # disable around the section panel.
@@ -1155,6 +1228,25 @@ def test_fit_derives_axis_from_coaxial_cylinders(view_module) -> None:
         "UseNavigationAnimations": True,
         "AnimationDuration": 500,
     }
+
+
+def test_fit_subelement_targets_narrow_the_mating_axis(view_module) -> None:
+    pin, hole = _cylinder_pair()
+    ctx = make_ctx(active="Smoke", smoke_objects={"Pin": pin, "Hole": hole})
+    view = ctx.Gui.views["Smoke"]
+    doc = ctx.require_document("Smoke")
+    a_target = geometry.make_reference(ctx, doc, pin, "face", 1)
+    b_target = geometry.make_reference(ctx, doc, hole, "face", 1)
+
+    result = view_module.capture_view(ctx, _fit_arguments(a=a_target, b=b_target))
+
+    assert result["focus"] is None
+    assert result["a"] == a_target
+    assert result["b"] == b_target
+    section = result["views"][1]["section_plane"]
+    assert section["normal"] == [1.0, 0.0, 0.0]
+    assert section["point"] == [10.0, 10.0, 5.0]
+    assert [call[0] for call in view.clip_calls] == [1, 0]
 
 
 def test_fit_ambiguous_pair_refuses(view_module) -> None:
@@ -1221,6 +1313,22 @@ def test_fit_explicit_override_used(view_module) -> None:
         assert fresh_ctx.Gui.views["Smoke"].calls == []
         # The refusals never opened a capture session.
         assert len(FakeParamGet.set_calls) == refusals_before
+
+
+def test_fit_with_focus_refuses(view_module) -> None:
+    ctx = make_ctx()
+    with pytest.raises(ToolError) as excinfo:
+        view_module.capture_view(
+            ctx,
+            _fit_arguments(focus={"object": "Pin"}),
+        )
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.details["mode"] == "fit"
+    assert ctx.Gui.views["Smoke"].calls == []
+    assert ctx.Gui.messages == []
+    assert ctx.App.set_active_calls == []
+    assert FakeParamGet.set_calls == []
 
 
 def test_restoration_failure_raises_with_failed_list(view_module) -> None:
@@ -1302,15 +1410,36 @@ def test_mode_schemas_are_finite(view_module) -> None:
         {
             "document": "Smoke",
             "mode": "fit",
-            "a": {"object": "Pin", "subelement": "Face1"},
-            "b": {"object": "Hole"},
+            "a": {"object": "Pin"},
+            "b": {"object": "Hole", "subelement": "1.2.3"},
             "section_axis": [0.0, 0.0, 1.0],
             "section_point": [2.0, 3.0, 4.0],
         },
         definition["inputSchema"],
     )
+    protocol.validate_schema(
+        {
+            "document": "Smoke",
+            "mode": "detail",
+            "focus": {
+                "object": "Box",
+                "query": [{"role": "face", "selector": ">Z"}],
+            },
+        },
+        definition["inputSchema"],
+    )
     with pytest.raises(protocol.ProtocolError):
         protocol.validate_schema({"document": "Smoke", "mode": "spider"}, definition["inputSchema"])
+    # Raw numeric subelement payloads are refused at the schema boundary.
+    with pytest.raises(protocol.ProtocolError):
+        protocol.validate_schema(
+            {
+                "document": "Smoke",
+                "mode": "detail",
+                "focus": {"object": "Box", "subelement": 3},
+            },
+            definition["inputSchema"],
+        )
     with pytest.raises(protocol.ProtocolError):
         protocol.validate_schema({"document": "Smoke"}, definition["outputSchema"])
     protocol.validate_schema(
@@ -1322,8 +1451,7 @@ def test_mode_schemas_are_finite(view_module) -> None:
             "document": "Smoke",
             "generation": 7,
             "mode": "overview",
-            "focus_object": None,
-            "focus_subelement": None,
+            "focus": None,
             "view_name": None,
             "views": [
                 {
@@ -1340,3 +1468,76 @@ def test_mode_schemas_are_finite(view_module) -> None:
         },
         definition["outputSchema"],
     )
+    protocol.validate_schema(
+        {
+            "mimeType": "image/png",
+            "data": "cG5n",
+            "width": 1024,
+            "height": 552,
+            "document": "Smoke",
+            "generation": 7,
+            "mode": "fit",
+            "focus": None,
+            "a": {"object": "Pin", "subelement": "1.2.3"},
+            "b": {"object": "Hole"},
+            "view_name": None,
+            "views": [
+                {
+                    "view": "Isometric",
+                    "direction": [0.0, 0.0, 1.0],
+                    "up": [0.0, -1.0, 0.0],
+                    "section_plane": None,
+                    "rect": {"x": 0, "y": 0, "w": 512, "h": 552},
+                    "derived": False,
+                },
+                {
+                    "view": "MatingSection",
+                    "direction": None,
+                    "up": None,
+                    "section_plane": {
+                        "normal": [1.0, 0.0, 0.0],
+                        "point": [10.0, 10.0, 5.0],
+                    },
+                    "rect": {"x": 512, "y": 0, "w": 512, "h": 552},
+                    "derived": False,
+                },
+            ],
+        },
+        definition["outputSchema"],
+    )
+
+
+def test_removed_focus_fields_are_refused_at_the_schema(view_module) -> None:
+    (definition,) = view_module.TOOL_DEFINITIONS
+    sample_output = {
+        "mimeType": "image/png",
+        "data": "cG5n",
+        "width": 640,
+        "height": 480,
+        "document": "Smoke",
+        "generation": 7,
+        "mode": "detail",
+        "focus": None,
+        "view_name": "Isometric",
+        "views": [
+            {
+                "view": "Detail",
+                "direction": [0.0, 0.0, 1.0],
+                "up": [0.0, -1.0, 0.0],
+                "section_plane": None,
+                "rect": {"x": 0, "y": 0, "w": 640, "h": 480},
+                "derived": False,
+            }
+        ],
+    }
+    for removed in ("focus_object", "focus_subelement"):
+        with pytest.raises(protocol.ProtocolError):
+            protocol.validate_schema(
+                {**capture_args(), removed: "Box"},
+                definition["inputSchema"],
+            )
+        with pytest.raises(protocol.ProtocolError):
+            protocol.validate_schema(
+                {**sample_output, removed: "Box"},
+                definition["outputSchema"],
+            )

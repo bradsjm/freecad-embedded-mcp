@@ -7,6 +7,7 @@ test_object_validation.py).
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 import types
@@ -19,6 +20,7 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
+from mcp_server import topology_query as tq
 from mcp_server.protocol import (
     DOCUMENT_NOT_FOUND,
     OBJECT_NOT_FOUND,
@@ -87,23 +89,238 @@ _STUB_OBJECTSFEM_INSTALL = ("ObjectsFem", _STUB_OBJECTSFEM)
 
 _STUB_GEOMETRY = types.ModuleType("mcp_server.tools.geometry")
 _NUMERIC_SUB = re.compile(r"^(Face|Edge|Vertex|Wire)\d+$")
+_MAX_CARDINALITY_CANDIDATES = 16
 
 
-def _stub_resolve_reference(ctx: Any, doc: Any, reference: dict) -> tuple[Any, str]:
-    name = reference.get("object")
-    subelement = reference.get("subelement") or ""
-    if _NUMERIC_SUB.match(subelement):
+def _stub_token(ctx: Any, doc: Any, obj: Any, role: str, index: int) -> str:
+    """A signed-looking opaque token: bound fields plus a payload digest."""
+
+    head = ".".join(
+        (
+            "topology",
+            str(ctx.document_identity(doc)),
+            str(int(ctx.document_generation(doc))),
+            str(obj.Name),
+            role,
+            str(int(index)),
+        )
+    )
+    return f"{head}.{hashlib.sha256(head.encode()).hexdigest()[:12]}"
+
+
+def _stub_make_reference(ctx: Any, doc: Any, obj: Any, role: str, index: int) -> dict:
+    return {"object": obj.Name, "subelement": _stub_token(ctx, doc, obj, role, index)}
+
+
+def _stub_whole_reference(obj: Any) -> dict:
+    return {"object": obj.Name}
+
+
+def _stub_cardinality_error(
+    reason: str,
+    message: str,
+    parameter: str,
+    ctx: Any,
+    doc: Any,
+    obj: Any,
+    role: str,
+    indices: list,
+) -> ToolError:
+    """Mirror ``geometry._cardinality_error``'s bounded evidence."""
+
+    return ToolError(
+        VALIDATION_FAILED,
+        message,
+        {
+            "reason": reason,
+            "parameter": parameter,
+            "object": obj.Name,
+            "role": role,
+            "matchCount": len(indices),
+            "candidates": [
+                _stub_make_reference(ctx, doc, obj, role, index)
+                for index in indices[:_MAX_CARDINALITY_CANDIDATES]
+            ],
+            "candidatesTruncated": len(indices) > _MAX_CARDINALITY_CANDIDATES,
+            "nextTool": "inspect_topology",
+        },
+    )
+
+
+def _stub_query_record(role: str, index: int, subshape: Any) -> dict:
+    """A minimal evaluation record; centers are read when the fake provides them."""
+
+    record: dict[str, Any] = {
+        "index": index,
+        "role": role,
+        "type": None,
+        "typeStatus": "unreadable",
+        "center": None,
+        "direction": None,
+        "radius": None,
+        "axis": None,
+    }
+    center = getattr(subshape, "CenterOfMass", None)
+    if center is not None:
+        record["center"] = [float(center[0]), float(center[1]), float(center[2])]
+    return record
+
+
+def _stub_resolve_query(ctx: Any, doc: Any, target: Any, parameter: str = "query") -> tuple:
+    """Resolve a shared query target against the fake document's shapes."""
+
+    obj = ctx.require_object(doc, str(target.get("object")))
+    expected_generation = target.get("expected_generation")
+    if expected_generation is not None and expected_generation != int(ctx.document_generation(doc)):
         raise ToolError(
             VALIDATION_FAILED,
-            "numeric topology selectors are not durable; use signed tokens",
+            "query target is stale for the current document generation",
+            {
+                "reason": "stale_generation",
+                "expected": int(expected_generation),
+                "actual": int(ctx.document_generation(doc)),
+                "nextTool": "inspect_topology",
+            },
         )
-    obj = doc.getObject(name)
-    if obj is None:
-        raise ToolError(OBJECT_NOT_FOUND, f"object '{name}' not found")
-    return obj, subelement
+    steps = tq.normalize_query(target.get("query"), parameter)
+    shape = _stub_placed_shape(obj)
+    role: str | None = None
+    current: list[dict] = []
+    selected: list[int] = []
+    for step in steps:
+        if role is None:
+            role = step["role"]
+            subshapes = list(shape.Faces if role == "face" else shape.Edges)
+            current = [
+                _stub_query_record(role, index, subshape)
+                for index, subshape in enumerate(subshapes, 1)
+            ]
+        elif step["role"] == role:
+            by_index = {record["index"]: record for record in current}
+            current = [by_index[index] for index in selected]
+        else:
+            raise ToolError(
+                VALIDATION_FAILED,
+                "stub queries do not expand face->edge; use the real module for that",
+                {"reason": "unsupported_query_transition"},
+            )
+        if step["selector"] is not None:
+            indices = tq.evaluate_selector(tq.parse_selector(step["selector"]), current)
+        else:
+            indices = [record["index"] for record in current]
+        selected = sorted(indices)
+    assert role is not None
+    return obj, role, selected
+
+
+def _stub_resolve_reference(
+    ctx: Any, doc: Any, reference: Any, parameter: str = "reference"
+) -> tuple[Any, str]:
+    """Shared-target resolution: whole (no key), signed token, or one query match."""
+
+    if not isinstance(reference, dict):
+        raise ToolError(VALIDATION_FAILED, f"{parameter} must be a target object mapping")
+    if "query" in reference:
+        obj, role, indices = _stub_resolve_query(ctx, doc, reference, parameter)
+        if not indices:
+            raise _stub_cardinality_error(
+                "selection_empty",
+                f"{parameter} matched no {role} of {obj.Name}",
+                parameter,
+                ctx,
+                doc,
+                obj,
+                role,
+                indices,
+            )
+        if len(indices) > 1:
+            raise _stub_cardinality_error(
+                "selection_ambiguous",
+                f"{parameter} matched {len(indices)} {role}s of {obj.Name}",
+                parameter,
+                ctx,
+                doc,
+                obj,
+                role,
+                indices,
+            )
+        return obj, ("Face" if role == "face" else "Edge") + str(indices[0])
+    if "subelement" not in reference or reference.get("subelement") is None:
+        name = reference.get("object")
+        if not isinstance(name, str) or not name:
+            raise ToolError(VALIDATION_FAILED, f"{parameter} is missing an object name")
+        return ctx.require_object(doc, name), ""
+    subelement = reference.get("subelement")
+    if not isinstance(subelement, str):
+        raise ToolError(VALIDATION_FAILED, f"{parameter}.subelement must be a string")
+    if not subelement:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"{parameter}.subelement is empty; omit it for a whole object or "
+            "pass a signed reference",
+            {"parameter": parameter, "reason": "empty_subelement"},
+        )
+    if "." not in subelement:
+        if _NUMERIC_SUB.fullmatch(subelement):
+            raise ToolError(
+                VALIDATION_FAILED,
+                "numeric topology selectors (e.g. Face7) are not durable; use the"
+                " signed reference returned by inspect_topology or measure",
+            )
+        raise ToolError(VALIDATION_FAILED, f"{parameter}.subelement is not a signed token")
+    head, _, digest = subelement.rpartition(".")
+    expected_digest = hashlib.sha256(head.encode()).hexdigest()[:12]
+    if digest != expected_digest:
+        raise ToolError(
+            VALIDATION_FAILED,
+            "topology reference signature rejected",
+            {"reason": "invalid"},
+        )
+    domain, identity, generation, name, role, index = head.split(".")
+    if domain != "topology":
+        raise ToolError(
+            VALIDATION_FAILED,
+            "topology reference signature rejected",
+            {"reason": "invalid"},
+        )
+    obj = ctx.require_object(doc, name)
+    if identity != str(ctx.document_identity(doc)):
+        raise ToolError(
+            VALIDATION_FAILED,
+            "topology reference belongs to a different document",
+            {"reason": "document_mismatch"},
+        )
+    if int(generation) != int(ctx.document_generation(doc)):
+        raise ToolError(
+            VALIDATION_FAILED,
+            "topology reference is stale for the current document generation",
+            {
+                "reason": "stale_generation",
+                "expected": int(generation),
+                "actual": int(ctx.document_generation(doc)),
+                "nextTool": "inspect_topology",
+            },
+        )
+    if name != obj.Name:
+        raise ToolError(
+            VALIDATION_FAILED,
+            "topology reference does not match the referenced object",
+            {"reason": "object_mismatch"},
+        )
+    if role not in ("face", "edge") or not index.isdigit() or int(index) < 1:
+        raise ToolError(
+            VALIDATION_FAILED,
+            "topology reference role or index is invalid",
+            {"reason": "malformed"},
+        )
+    return obj, ("Face" if role == "face" else "Edge") + index
 
 
 _STUB_GEOMETRY.resolve_reference = _stub_resolve_reference
+_STUB_GEOMETRY.make_reference = _stub_make_reference
+_STUB_GEOMETRY.whole_reference = _stub_whole_reference
+_STUB_GEOMETRY.resolve_query = _stub_resolve_query
+_STUB_GEOMETRY._cardinality_error = _stub_cardinality_error
 
 
 def _stub_placed_shape(obj: Any) -> Any:
@@ -120,6 +337,20 @@ def _stub_placed_shape(obj: Any) -> Any:
 
 
 _STUB_GEOMETRY.placed_shape = _stub_placed_shape
+
+
+def _stub_subshape_fingerprints(shape: Any, role: str, indices: Any) -> None:
+    """The doubles carry no readable subshape geometry: no fingerprint evidence.
+
+    ``_PreparedQueries.resolve`` records this as an absent snapshot, exactly
+    as the real module's fail-closed extraction does for these doubles; no
+    objects-level flow re-verifies a query selection.
+    """
+
+    return None
+
+
+_STUB_GEOMETRY.subshape_fingerprints = _stub_subshape_fingerprints
 _STUB_GEOMETRY_INSTALL = ("mcp_server.tools.geometry", _STUB_GEOMETRY)
 
 _STUB_MODULES = (
@@ -193,6 +424,8 @@ class FakeShape:
         bounds: tuple[float, ...] = (0.0, 0.0, 0.0, 10.0, 10.0, 10.0),
         check: list[str] | None = None,
         tolerance: float = 1e-7,
+        faces: tuple[Any, ...] = (),
+        edges: tuple[Any, ...] = (),
     ) -> None:
         self._valid = valid
         self._solids = solids
@@ -200,6 +433,8 @@ class FakeShape:
         self._bounds = bounds
         self._check = check or []
         self._tolerance = tolerance
+        self.Faces = list(faces)
+        self.Edges = list(edges)
 
     def isNull(self) -> bool:
         # probes["shape.null_attributes"]: a real shape is not null; the
@@ -273,6 +508,7 @@ class FakeObj:
         object.__setattr__(self, "_values", dict(values or {}))
         object.__setattr__(self, "_derived_from", tuple(derived_from))
         object.__setattr__(self, "_blocked", set())
+        object.__setattr__(self, "Document", None)
         object.__setattr__(self, "history", [])
 
     @property
@@ -411,6 +647,8 @@ class FakeDoc:
         self.recompute_observers: list[Any] = []
         self._by_name: dict[str, FakeObj] = {obj.Name: obj for obj in self.Objects}
         self._tx: list[tuple[FakeObj, dict, list[str]]] | None = None
+        for obj in self.Objects:
+            obj.Document = self
 
     def supportedTypes(self) -> tuple[str, ...]:
         return self._supported
@@ -426,6 +664,7 @@ class FakeDoc:
         if any(obj.Name == actual for obj in self.Objects):
             actual = f"{name}001"
         obj = FakeObj(actual, TypeId=type_id)
+        obj.Document = self
         self.Objects.append(obj)
         self._by_name[obj.Name] = obj
         return obj
@@ -624,7 +863,7 @@ def test_missing_reference_makes_no_mutation() -> None:
     assert doc.calls == []
 
 
-def test_numeric_subelement_is_rejected() -> None:
+def test_subelement_bearing_link_position_is_refused() -> None:
     doc = FakeDoc(objects=[box()])
     ctx = FakeCtx(doc)
 
@@ -638,7 +877,23 @@ def test_numeric_subelement_is_rejected() -> None:
             },
         )
 
-    expect_tool_error(exc_info, VALIDATION_FAILED)
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    # A plain Link position never strips or widens a subshape target.
+    assert error.details == {"parameter": "Base", "reason": "subshape_not_allowed"}
+    assert doc.calls == []
+
+    with pytest.raises(ToolError) as query_refusal:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Box",
+                "properties": {"Base": {"object": "Box", "query": [{"role": "face"}]}},
+            },
+        )
+
+    query_error = expect_tool_error(query_refusal, VALIDATION_FAILED)
+    assert query_error.details == {"parameter": "Base", "reason": "subshape_not_allowed"}
     assert doc.calls == []
 
 
@@ -1524,6 +1779,7 @@ def test_edit_spreadsheet_cells_uses_native_set_and_verifies_contents() -> None:
             "document": doc.Name,
             "object": sheet.Name,
             "properties": {"cells": {"SocketCenter": "0.01 mm", "B2": "=A1"}},
+            "response_detail": "full",
         },
     )
 
@@ -1895,6 +2151,7 @@ def test_touched_state_is_rejected_by_validity_check() -> None:
 def test_document_objects_are_never_stringified_in_output() -> None:
     doc, ctx = _three_box_doc()
     linked = box("LinkTarget", shape=None)
+    linked.Document = doc
     source = box(
         "Source",
         shape=None,
@@ -1911,10 +2168,9 @@ def test_document_objects_are_never_stringified_in_output() -> None:
     )
 
     row = next(r for r in result["objects"] if r["name"] == "Source")
-    assert row["properties"]["Link"] == {
-        "object": "LinkTarget",
-        "subelement": "",
-    }
+    # A same-document whole link reads back as bare object identity; the
+    # retired empty-subelement sentinel is gone.
+    assert row["properties"]["Link"] == {"object": "LinkTarget"}
 
 
 # ---------------------------------------------------------------------------
@@ -2289,9 +2545,10 @@ def test_expression_metadata_is_disclosed_in_full_detail() -> None:
     assert metadata["Width"]["expression"] is None
 
 
-def test_link_subelement_pairs_serialize_as_descriptive_references() -> None:
+def test_link_subelement_pairs_serialize_as_signed_references() -> None:
     doc, ctx = _three_box_doc()
-    linked = box("LinkTarget", shape=None)
+    linked = box("LinkTarget", shape=FakeShape(faces=[object(), object()]))
+    linked.Document = doc
     source = box(
         "Source",
         shape=None,
@@ -2308,9 +2565,76 @@ def test_link_subelement_pairs_serialize_as_descriptive_references() -> None:
     )
 
     row = next(r for r in result["objects"] if r["name"] == "Source")
+    expected = _STUB_GEOMETRY.make_reference(ctx, doc, linked, "face", 1)["subelement"]
+    # A supported native subshape pair is re-signed, never published as a
+    # reusable raw FaceN label.
+    assert row["properties"]["Mount"] == {"object": "LinkTarget", "subelement": expected}
+
+
+def test_unsupported_stale_and_foreign_links_read_back_as_unavailable() -> None:
+    doc, ctx = _three_box_doc()
+    foreign = box("Foreign", shape=FakeShape(faces=[object()]))
+    foreign.Document = FakeDoc(name="Other")
+    linked = box("LinkTarget", shape=FakeShape(faces=[object()]))
+    linked.Document = doc
+    source = box(
+        "Source",
+        shape=None,
+        properties=("Mount", "Backup", "Alias"),
+        prop_types={
+            "Mount": "App::PropertyLinkSub",
+            "Backup": "App::PropertyLinkSub",
+            "Alias": "App::PropertyLink",
+        },
+        values={
+            "Mount": (linked, ["Vertex3"]),
+            "Backup": (linked, ["Face9"]),
+            "Alias": foreign,
+        },
+    )
+    source.Document = doc
+    doc.Objects.append(source)
+    doc._by_name[source.Name] = source
+
+    result = objects_mod.inspect_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "detail": "full",
+            "property_filter": ["Mount", "Backup", "Alias"],
+        },
+    )
+
+    row = next(r for r in result["objects"] if r["name"] == "Source")
     assert row["properties"]["Mount"] == {
-        "object": "LinkTarget",
-        "subelement": "Face1",
+        "unavailableLink": {
+            "object": "LinkTarget",
+            "reason": "unsupported_subelement",
+            "nativeSubelement": "Vertex3",
+        }
+    }
+    assert row["properties"]["Backup"] == {
+        "unavailableLink": {
+            "object": "LinkTarget",
+            "reason": "stale_subelement",
+            "nativeSubelement": "Face9",
+        }
+    }
+    assert row["properties"]["Alias"] == {
+        "unavailableLink": {"object": "Foreign", "reason": "cross_document"}
+    }
+
+
+def test_context_free_pair_fallback_is_unavailable_link() -> None:
+    """Without document context, _jsonify never publishes a reusable FaceN."""
+
+    linked = box("LinkTarget", shape=None)
+    assert objects_mod._jsonify((linked, ["Face1"])) == {
+        "unavailableLink": {
+            "object": "LinkTarget",
+            "reason": "link_readback_unavailable",
+            "nativeSubelement": "Face1",
+        }
     }
 
 
@@ -2322,7 +2646,13 @@ def test_edit_object_reports_property_geometry_and_dependent_deltas() -> None:
 
     result = objects_mod.edit_object(
         ctx,
-        {"document": doc.Name, "object": "Box", "properties": {"Length": 40}},
+        {
+            "document": doc.Name,
+            "object": "Box",
+            "properties": {"Length": 40},
+            # Deltas are full-detail evidence; the handler default is compact.
+            "response_detail": "full",
+        },
     )
 
     change = result["change"]
@@ -2357,6 +2687,7 @@ def test_create_object_change_uses_null_before_fields() -> None:
             "type": "Part::Box",
             "name": "Created",
             "properties": {"Length": 4},
+            "response_detail": "full",
         },
     )
 
@@ -2410,7 +2741,13 @@ def test_create_reuses_the_gate_report_without_reprobing_geometry(monkeypatch) -
     monkeypatch.setattr(objects_mod, "document_bounds", counting_bounds)
 
     result = objects_mod.create_object(
-        ctx, {"document": doc.Name, "type": "Part::Box", "name": "Created"}
+        ctx,
+        {
+            "document": doc.Name,
+            "type": "Part::Box",
+            "name": "Created",
+            "response_detail": "full",
+        },
     )
 
     assert shape.check_calls == 1  # gate only, no handler re-probe
@@ -2447,7 +2784,13 @@ def test_edit_object_probes_geometry_only_before_the_transaction(monkeypatch) ->
     monkeypatch.setattr(objects_mod, "document_bounds", recording_bounds)
 
     result = objects_mod.edit_object(
-        ctx, {"document": doc.Name, "object": "Box", "properties": {"Length": 40}}
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "Box",
+            "properties": {"Length": 40},
+            "response_detail": "full",
+        },
     )
 
     # Exactly the two pre-mutation snapshots, both before openTransaction.
@@ -2484,6 +2827,7 @@ def test_link_rewiring_edit_reports_changed_dependent_closure() -> None:
             "document": doc.Name,
             "object": "Source",
             "properties": {"Deps": [{"object": "Added"}]},
+            "response_detail": "full",
         },
     )
 
@@ -2579,6 +2923,7 @@ def test_edit_objects_applies_all_edits_in_one_transaction() -> None:
                 {"object": "First", "properties": {"Length": 10}},
                 {"object": "Second", "properties": {"Length": 20}},
             ],
+            "response_detail": "full",
         },
     )
 
@@ -2777,6 +3122,7 @@ class _BoxDoc(FakeDoc):
         if any(obj.Name == actual for obj in self.Objects):
             actual = f"{name}001"
         obj = box(actual)
+        obj.Document = self
         self.Objects.append(obj)
         self._by_name[obj.Name] = obj
         return obj
@@ -2899,3 +3245,768 @@ def test_create_objects_rejects_more_than_32_entries() -> None:
 
     expect_tool_error(exc_info, VALIDATION_FAILED)
     assert doc.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Shared link-target contract: query receipts and LinkSubList wiring.
+# ---------------------------------------------------------------------------
+
+
+def _link_doc(*, faces: tuple = (), edges: tuple = ()) -> tuple[FakeDoc, FakeCtx, FakeObj]:
+    target = box("Target", shape=FakeShape(faces=faces, edges=edges))
+    source = box(
+        "Source",
+        shape=None,
+        properties=("Mount", "Deps"),
+        prop_types={"Mount": "App::PropertyLinkSub", "Deps": "App::PropertyLinkSubList"},
+        values={"Mount": None, "Deps": []},
+    )
+    doc = FakeDoc(objects=[target, source])
+    return doc, FakeCtx(doc), source
+
+
+def test_edit_linksub_query_resolves_once_and_reports_receipt() -> None:
+    doc, ctx, source = _link_doc(faces=[object()])
+    target = doc.getObject("Target")
+
+    result = objects_mod.edit_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "Source",
+            "properties": {"Mount": {"object": "Target", "query": [{"role": "face"}]}},
+        },
+    )
+
+    # The singleton consumer bound the single match; the receipt carries the
+    # selection-time generation and the signed reference, and only appears
+    # because a query was used.
+    assert source.Mount == (target, ["Face1"])
+    token = _STUB_GEOMETRY.make_reference(ctx, doc, target, "face", 1)["subelement"]
+    assert result["resolvedSelections"] == [
+        {
+            "parameter": "Mount",
+            "document": doc.Name,
+            "generation": 1,
+            "references": [{"object": "Target", "subelement": token}],
+            "count": 1,
+        }
+    ]
+    validate_schema(result, _output_schema("edit_object"))
+
+
+def test_edit_linksub_ambiguous_query_refuses_without_mutation() -> None:
+    doc, ctx, source = _link_doc(faces=[object(), object()])
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Source",
+                "properties": {"Mount": {"object": "Target", "query": [{"role": "face"}]}},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["reason"] == "selection_ambiguous"
+    assert error.details["matchCount"] == 2
+    assert len(error.details["candidates"]) == 2
+    assert source.Mount is None
+    assert doc.calls == []
+
+
+def test_edit_linksub_empty_query_refuses_without_mutation() -> None:
+    doc, ctx, source = _link_doc()
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Source",
+                "properties": {"Mount": {"object": "Target", "query": [{"role": "face"}]}},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["reason"] == "selection_empty"
+    assert source.Mount is None
+    assert doc.calls == []
+
+
+def test_edit_linksub_accepts_signed_token_from_readback() -> None:
+    doc, ctx, source = _link_doc(faces=[object(), object()])
+    target = doc.getObject("Target")
+    token = _STUB_GEOMETRY.make_reference(ctx, doc, target, "face", 2)["subelement"]
+
+    result = objects_mod.edit_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "Source",
+            "properties": {"Mount": {"object": "Target", "subelement": token}},
+        },
+    )
+
+    assert source.Mount == (target, ["Face2"])
+    # A signed reference is not a query: no receipt scaffolding.
+    assert "resolvedSelections" not in result
+    validate_schema(result, _output_schema("edit_object"))
+
+
+def test_edit_linksub_whole_object_binds_empty_subelement() -> None:
+    doc, ctx, source = _link_doc()
+    target = doc.getObject("Target")
+
+    result = objects_mod.edit_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "Source",
+            "properties": {"Mount": {"object": "Target"}},
+        },
+    )
+
+    # Native LinkSub keeps the whole-object binding as the empty subelement.
+    assert source.Mount == (target, [""])
+    assert "resolvedSelections" not in result
+    validate_schema(result, _output_schema("edit_object"))
+
+
+def test_numeric_label_is_refused_on_linksub() -> None:
+    doc, ctx, source = _link_doc(faces=[object()])
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Source",
+                "properties": {"Mount": {"object": "Target", "subelement": "Face7"}},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "not durable" in error.message
+    assert source.Mount is None
+    assert doc.calls == []
+
+
+def test_empty_subelement_is_refused_by_the_closed_target_schema() -> None:
+    """The retired empty sentinel cannot slip through the permissive union."""
+
+    doc, ctx, source = _link_doc()
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Source",
+                "properties": {"Mount": {"object": "Target", "subelement": ""}},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "not a valid shared link target" in error.message
+    assert error.details == {"parameter": "Mount"}
+    assert source.Mount is None
+    assert doc.calls == []
+
+
+def test_tampered_token_is_refused_without_mutation() -> None:
+    doc, ctx, source = _link_doc(faces=[object()])
+    token = _STUB_GEOMETRY.make_reference(ctx, doc, doc.getObject("Target"), "face", 1)[
+        "subelement"
+    ]
+    tampered = token[:-1] + ("0" if token[-1] != "0" else "1")
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Source",
+                "properties": {"Mount": {"object": "Target", "subelement": tampered}},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "signature rejected" in error.message
+    assert source.Mount is None
+    assert doc.calls == []
+
+
+def test_edit_linksublist_query_expands_and_reports_receipt() -> None:
+    doc, ctx, source = _link_doc(edges=[object(), object()])
+    target = doc.getObject("Target")
+
+    result = objects_mod.edit_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "Source",
+            "properties": {"Deps": [{"object": "Target", "query": [{"role": "edge"}]}]},
+        },
+    )
+
+    # The set consumer expands the multi-match query in root-index order.
+    assert source.Deps == [(target, ["Edge1"]), (target, ["Edge2"])]
+    tokens = [
+        _STUB_GEOMETRY.make_reference(ctx, doc, target, "edge", index)["subelement"]
+        for index in (1, 2)
+    ]
+    assert result["resolvedSelections"] == [
+        {
+            "parameter": "Deps[0]",
+            "document": doc.Name,
+            "generation": 1,
+            "references": [
+                {"object": "Target", "subelement": tokens[0]},
+                {"object": "Target", "subelement": tokens[1]},
+            ],
+            "count": 2,
+        }
+    ]
+    validate_schema(result, _output_schema("edit_object"))
+
+
+def test_edit_linksublist_expands_whole_and_query_entries_in_order() -> None:
+    doc, ctx, source = _link_doc(edges=[object(), object()])
+    target = doc.getObject("Target")
+
+    result = objects_mod.edit_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "Source",
+            "properties": {
+                "Deps": [
+                    {"object": "Target"},
+                    {"object": "Target", "query": [{"role": "edge"}]},
+                ]
+            },
+        },
+    )
+
+    # Entries expand in request order; only the query entry earns a receipt.
+    assert source.Deps == [(target, [""]), (target, ["Edge1"]), (target, ["Edge2"])]
+    assert [receipt["parameter"] for receipt in result["resolvedSelections"]] == ["Deps[1]"]
+    assert result["resolvedSelections"][0]["count"] == 2
+    validate_schema(result, _output_schema("edit_object"))
+
+
+def test_linksublist_expansion_cap_refuses_before_mutation() -> None:
+    doc, ctx, source = _link_doc(edges=tuple(object() for _ in range(65)))
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Source",
+                "properties": {"Deps": [{"object": "Target", "query": [{"role": "edge"}]}]},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["reason"] == "selection_limit"
+    assert source.Deps == []
+    assert doc.calls == []
+
+
+def test_omitted_response_detail_equals_explicit_compact() -> None:
+    """The mutation handlers default to compact: omitted equals explicit."""
+
+    doc = FakeDoc()
+
+    def add_box(type_id: str, name: str) -> FakeObj:
+        created = box(name)
+        doc.Objects.append(created)
+        doc._by_name[created.Name] = created
+        return created
+
+    doc.addObject = add_box  # type: ignore[method-assign]
+    ctx = FakeCtx(doc)
+
+    omitted = objects_mod.create_object(
+        ctx,
+        {"document": doc.Name, "type": "Part::Box", "name": "First", "properties": {"Length": 4}},
+    )
+    explicit = objects_mod.create_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "type": "Part::Box",
+            "name": "Second",
+            "properties": {"Length": 4},
+            "response_detail": "compact",
+        },
+    )
+
+    assert omitted["change"] == explicit["change"]
+    assert omitted["change"] == {"properties": [{"name": "Length", "after": 4.0}]}
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Part CSG wiring — declared link surfaces, rollback and refusals.
+# ---------------------------------------------------------------------------
+
+
+class _CSGDoc(FakeDoc):
+    """A document declaring Part::Cut / Part::MultiFuse property surfaces.
+
+    ``Part::Cut`` exposes Base/Tool as App::PropertyLink and
+    ``Part::MultiFuse`` exposes Shapes as App::PropertyLinkList. The fake
+    boolean result shape is seeded by the document, so CSG assertions prove
+    operand link resolution, sanitized output identity and commit wiring —
+    never an OCC subtraction or union.
+    """
+
+    def __init__(self, *args: Any, cut_solids: int = 1, fuse_solids: int = 1, **kwargs: Any):
+        kwargs.setdefault(
+            "supported",
+            ("Part::Box", "Part::Cut", "Part::MultiFuse", "App::DocumentObjectGroup"),
+        )
+        super().__init__(*args, **kwargs)
+        self.cut_solids = cut_solids
+        self.fuse_solids = fuse_solids
+
+    def addObject(self, type_id: str, name: str) -> FakeObj:
+        actual = name
+        if any(obj.Name == actual for obj in self.Objects):
+            actual = f"{name}001"
+        if type_id == "Part::Cut":
+            obj = FakeObj(
+                actual,
+                TypeId=type_id,
+                properties=("Base", "Tool"),
+                prop_types={"Base": "App::PropertyLink", "Tool": "App::PropertyLink"},
+                shape=FakeShape(solids=self.cut_solids),
+                values={"Base": None, "Tool": None},
+            )
+        elif type_id == "Part::MultiFuse":
+            obj = FakeObj(
+                actual,
+                TypeId=type_id,
+                properties=("Shapes",),
+                prop_types={"Shapes": "App::PropertyLinkList"},
+                shape=FakeShape(solids=self.fuse_solids),
+                values={"Shapes": []},
+            )
+        else:
+            obj = box(actual)
+        obj.Document = self
+        self.Objects.append(obj)
+        self._by_name[obj.Name] = obj
+        return obj
+
+
+def test_create_part_cut_resolves_base_tool_links_and_commits() -> None:
+    doc = _CSGDoc(objects=[box("Base"), box("Tool")])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.create_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "type": "Part::Cut",
+            "name": "Cut",
+            "properties": {"Base": {"object": "Base"}, "Tool": {"object": "Tool"}},
+            "expected_solids": 1,
+        },
+    )
+
+    cut = doc.getObject("Cut")
+    assert cut.Base is doc.getObject("Base")
+    assert cut.Tool is doc.getObject("Tool")
+    assert result["object"] == {"name": "Cut", "label": "Cut", "typeId": "Part::Cut"}
+    assert result["report"]["ok"] is True
+    assert result["report"]["solid_count"] == 1
+    # Plain object links add no receipt scaffolding, and the compact
+    # default serializes whole links as bare object identity.
+    assert "resolvedSelections" not in result
+    assert result["change"] == {
+        "properties": [
+            {"name": "Base", "after": {"object": "Base"}},
+            {"name": "Tool", "after": {"object": "Tool"}},
+        ]
+    }
+    assert ("commit", None) in doc.calls
+    validate_schema(result, _output_schema("create_object"))
+
+
+def test_create_part_multifuse_resolves_shape_links_and_commits() -> None:
+    doc = _CSGDoc(objects=[box("First"), box("Second"), box("Third")])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.create_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "type": "Part::MultiFuse",
+            "name": "Fused",
+            "properties": {
+                "Shapes": [
+                    {"object": "First"},
+                    {"object": "Second"},
+                    {"object": "Third"},
+                ]
+            },
+            "expected_solids": 1,
+        },
+    )
+
+    fused = doc.getObject("Fused")
+    assert fused.Shapes == [
+        doc.getObject("First"),
+        doc.getObject("Second"),
+        doc.getObject("Third"),
+    ]
+    assert result["object"]["typeId"] == "Part::MultiFuse"
+    assert result["report"]["solid_count"] == 1
+    assert ("commit", None) in doc.calls
+    validate_schema(result, _output_schema("create_object"))
+
+
+def test_create_part_cut_missing_tool_reference_restores_document() -> None:
+    doc = _CSGDoc(objects=[box("Base"), box("Tool")])
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "type": "Part::Cut",
+                "name": "Cut",
+                "properties": {"Base": {"object": "Base"}, "Tool": {"object": "Ghost"}},
+                "expected_solids": 1,
+            },
+        )
+
+    error = expect_tool_error(exc_info, OBJECT_NOT_FOUND)
+    # The rollback restored the document inventory, not merely logged an abort.
+    assert error.details["operationState"] == "rolled_back"
+    assert doc.getObject("Cut") is None
+    assert [obj.Name for obj in doc.Objects] == ["Base", "Tool"]
+    assert ("abort", None) in doc.calls
+    assert ("commit", None) not in doc.calls
+
+
+def test_create_part_cut_expected_solids_mismatch_rolls_back() -> None:
+    doc = _CSGDoc(objects=[box("Base"), box("Tool")], cut_solids=2)
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "type": "Part::Cut",
+                "name": "Cut",
+                "properties": {"Base": {"object": "Base"}, "Tool": {"object": "Tool"}},
+                "expected_solids": 1,
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    # The mismatched fake boolean result is refused and the created object
+    # is removed by the mutation-gate rollback.
+    assert error.details["operationState"] == "rolled_back"
+    assert any("expected_solids" in message for message in error.details["errors"])
+    assert doc.getObject("Cut") is None
+    assert [obj.Name for obj in doc.Objects] == ["Base", "Tool"]
+    assert ("abort", None) in doc.calls
+    assert ("commit", None) not in doc.calls
+
+
+def test_part_cut_link_positions_reject_subshape_targets() -> None:
+    doc = _CSGDoc(objects=[box("Base"), box("Tool")])
+    ctx = FakeCtx(doc)
+    token = _STUB_GEOMETRY.make_reference(ctx, doc, doc.getObject("Base"), "face", 1)["subelement"]
+
+    with pytest.raises(ToolError) as query_refusal:
+        objects_mod.create_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "type": "Part::Cut",
+                "name": "Cut",
+                "properties": {
+                    "Base": {"object": "Base", "query": [{"role": "face"}]},
+                    "Tool": {"object": "Tool"},
+                },
+            },
+        )
+
+    # A queryTarget in a PropertyLink position is refused outright instead
+    # of being widened into the owner shape.
+    assert expect_tool_error(query_refusal, VALIDATION_FAILED).details == {
+        "parameter": "Base",
+        "reason": "subshape_not_allowed",
+        "operationState": "rolled_back",
+        "nextAction": "retry_from_original_state",
+    }
+    assert doc.getObject("Cut") is None
+    assert ("commit", None) not in doc.calls
+
+    with pytest.raises(ToolError) as signed_refusal:
+        objects_mod.create_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "type": "Part::Cut",
+                "name": "Cut",
+                "properties": {
+                    "Base": {"object": "Base", "subelement": token},
+                    "Tool": {"object": "Tool"},
+                },
+            },
+        )
+
+    assert expect_tool_error(signed_refusal, VALIDATION_FAILED).details == {
+        "parameter": "Base",
+        "reason": "subshape_not_allowed",
+        "operationState": "rolled_back",
+        "nextAction": "retry_from_original_state",
+    }
+    assert doc.getObject("Cut") is None
+    assert [obj.Name for obj in doc.Objects] == ["Base", "Tool"]
+
+
+def test_part_multifuse_shapes_reject_subshape_entries() -> None:
+    doc = _CSGDoc(objects=[box("First"), box("Second")])
+    ctx = FakeCtx(doc)
+    token = _STUB_GEOMETRY.make_reference(ctx, doc, doc.getObject("First"), "face", 1)["subelement"]
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "type": "Part::MultiFuse",
+                "name": "Fused",
+                "properties": {
+                    "Shapes": [{"object": "First"}, {"object": "First", "subelement": token}]
+                },
+            },
+        )
+
+    assert expect_tool_error(exc_info, VALIDATION_FAILED).details == {
+        "parameter": "Shapes[1]",
+        "reason": "subshape_not_allowed",
+        "operationState": "rolled_back",
+        "nextAction": "retry_from_original_state",
+    }
+    assert doc.getObject("Fused") is None
+    assert ("commit", None) not in doc.calls
+
+
+def test_full_detail_link_rows_keep_document_context_before_and_after() -> None:
+    """Before and after link rows serialize with the same signed form.
+
+    A before-state row that fell back to the context-free serializer would
+    report ``unavailableLink`` for a property the after row reports as a
+    signed reference, so one unchanged property could never compare equal.
+    """
+
+    doc, ctx, source = _link_doc(faces=[object(), object()])
+    target = doc.getObject("Target")
+    before_token = _STUB_GEOMETRY.make_reference(ctx, doc, target, "face", 1)["subelement"]
+    after_token = _STUB_GEOMETRY.make_reference(ctx, doc, target, "face", 2)["subelement"]
+    source.Mount = (target, ["Face1"])
+
+    result = objects_mod.edit_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "Source",
+            "properties": {"Mount": {"object": "Target", "subelement": after_token}},
+            "response_detail": "full",
+        },
+    )
+
+    row = result["change"]["properties"][0]
+    assert row["name"] == "Mount"
+    # Both sides are canonical signed references carrying document context.
+    assert row["before"] == {"object": "Target", "subelement": before_token}
+    assert row["after"] == {"object": "Target", "subelement": after_token}
+    validate_schema(result, _output_schema("edit_object"))
+
+
+def test_query_scan_ignores_a_cells_map_aliased_query() -> None:
+    """A spreadsheet cell alias named "query" is not a shared target.
+
+    The pre-transaction scan only pre-resolves values that actually look
+    like a shared query target, so an address-or-alias map such as
+    ``properties.cells`` is never misread as a link value.
+    """
+
+    doc = FakeDoc(objects=[])
+    ctx = FakeCtx(doc)
+    queries = objects_mod._PreparedQueries(ctx, doc)
+
+    # A cells map whose alias is literally "query" is left alone...
+    queries.scan_property("cells", {"query": "=1"})
+    assert queries.resolutions == {}
+    assert queries.receipts == []
+
+    # ...while a real query target (which always names its object) resolves.
+    _doc, _ctx, _source = _link_doc(faces=[object()])
+    scanning = objects_mod._PreparedQueries(_ctx, _doc)
+    scanning.scan_property("Mount", {"object": "Target", "query": [{"role": "face"}]})
+    assert scanning.resolutions[("", "Mount")][2] == [1]
+    assert scanning.receipts[0]["parameter"] == "Mount"
+
+
+def test_batch_query_resolutions_do_not_collide_across_entries() -> None:
+    """Each batch entry resolves and binds its OWN query selection.
+
+    The prepared-query cache is keyed per target object as well as per
+    property path, so two entries editing a same-named property with
+    different queries never share one resolution.
+    """
+
+    target_a = box("TargetA", shape=FakeShape(faces=[object()]))
+    target_b = box("TargetB", shape=FakeShape(faces=[object()]))
+    source_a = box(
+        "SourceA",
+        shape=None,
+        properties=("Mount",),
+        prop_types={"Mount": "App::PropertyLinkSub"},
+        values={"Mount": None},
+    )
+    source_b = box(
+        "SourceB",
+        shape=None,
+        properties=("Mount",),
+        prop_types={"Mount": "App::PropertyLinkSub"},
+        values={"Mount": None},
+    )
+    doc = FakeDoc(objects=[target_a, target_b, source_a, source_b])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.edit_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "edits": [
+                {
+                    "object": "SourceA",
+                    "properties": {"Mount": {"object": "TargetA", "query": [{"role": "face"}]}},
+                },
+                {
+                    "object": "SourceB",
+                    "properties": {"Mount": {"object": "TargetB", "query": [{"role": "face"}]}},
+                },
+            ],
+        },
+    )
+
+    # The bug bound target_a's cached resolution to entry B.
+    assert source_a.Mount == (target_a, ["Face1"])
+    assert source_b.Mount[0] is target_b, "entry B bound entry A's resolution"
+    assert source_b.Mount == (target_b, ["Face1"])
+    receipts = result["resolvedSelections"]
+    assert [row["references"][0]["object"] for row in receipts] == ["TargetA", "TargetB"]
+    validate_schema(result, _output_schema("edit_objects"))
+
+
+def test_batch_creation_query_resolutions_do_not_collide() -> None:
+    """Batch creation keys each entry's query resolution by its target name.
+
+    Two entries create a same-named link property whose query selects a
+    DIFFERENT target object; each created object must bind its own
+    selection rather than reusing the first entry's cached resolution.
+    """
+
+    target_a = box("TargetA", shape=FakeShape(faces=[object()]))
+    target_b = box("TargetB", shape=FakeShape(faces=[object()]))
+    doc = _BoxDoc(objects=[target_a, target_b])
+
+    def add_with_mount(self: Any, type_id: str, name: str) -> Any:
+        obj = _BoxDoc.addObject(self, type_id, name)
+        obj.PropertiesList.append("Mount")
+        obj._types["Mount"] = "App::PropertyLinkSub"
+        obj._values["Mount"] = None
+        return obj
+
+    doc.addObject = add_with_mount.__get__(doc, _BoxDoc)  # type: ignore[method-assign]
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.create_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "entries": [
+                {
+                    "type": "Part::Box",
+                    "name": "HolderA",
+                    "properties": {
+                        "Length": 1.0,
+                        "Mount": {"object": "TargetA", "query": [{"role": "face"}]},
+                    },
+                },
+                {
+                    "type": "Part::Box",
+                    "name": "HolderB",
+                    "properties": {
+                        "Length": 2.0,
+                        "Mount": {"object": "TargetB", "query": [{"role": "face"}]},
+                    },
+                },
+            ],
+        },
+    )
+
+    holder_a = doc.getObject("HolderA")
+    holder_b = doc.getObject("HolderB")
+    assert holder_a.Mount == (target_a, ["Face1"])
+    assert holder_b.Mount[0] is target_b, "entry B reused entry A's resolution"
+    assert holder_b.Mount == (target_b, ["Face1"])
+    receipts = result["resolvedSelections"]
+    assert [row["references"][0]["object"] for row in receipts] == ["TargetA", "TargetB"]
+
+
+def test_prepared_singleton_refusal_carries_full_evidence() -> None:
+    """The zero-match refusal reports the shared bounded evidence payload."""
+
+    doc, ctx, _source = _link_doc(faces=[])
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Source",
+                "properties": {"Mount": {"object": "Target", "query": [{"role": "face"}]}},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["reason"] == "selection_empty"
+    assert error.details["parameter"] == "Mount"
+    assert error.details["object"] == "Target"
+    assert error.details["role"] == "face"
+    assert error.details["matchCount"] == 0
+    assert error.details["candidates"] == []
+    assert error.details["candidatesTruncated"] is False
+    assert error.details["nextTool"] == "inspect_topology"
+
+
+def test_prepared_cache_keys_by_owner_and_path() -> None:
+    """The cache distinguishes owners with the same property path."""
+
+    target_a = box("TargetA", shape=FakeShape(faces=[object()]))
+    target_b = box("TargetB", shape=FakeShape(faces=[object()]))
+    doc = FakeDoc(objects=[target_a, target_b])
+    ctx = FakeCtx(doc)
+    queries = objects_mod._PreparedQueries(ctx, doc)
+
+    queries.scan_property("Mount", {"object": "TargetA", "query": [{"role": "face"}]}, owner="A")
+    queries.scan_property("Mount", {"object": "TargetB", "query": [{"role": "face"}]}, owner="B")
+
+    assert queries.resolutions[("A", "Mount")][0] is target_a
+    assert queries.resolutions[("B", "Mount")][0] is target_b
+    assert len(queries.receipts) == 2

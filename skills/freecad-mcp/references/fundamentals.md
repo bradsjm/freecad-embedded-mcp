@@ -67,8 +67,10 @@ The value shape must match the property type. `create_object`, `create_objects`,
 | `App::PropertyLength`, `Distance`, `Angle`, `Quantity`, `Area`, `Volume`, `Speed`, `Percent` | A finite JSON number in the property's internal unit. A unit string such as `"5 mm"` is rejected. Strip the unit, or use `run_script`. |
 | `App::PropertyVector`, `VectorDistance`, `Direction` | `[x, y, z]` or `{"x": n, "y": n, "z": n}`. |
 | `App::PropertyPlacement` | `{"position": [x, y, z], "axis": [x, y, z], "angle_deg": n}`. |
-| `App::PropertyLink`, `LinkSub`, `XLink`, `XLinkSub` | `{"object": "<Name>", "subelement": ""}`. A link-sub may carry `"Face1"`. |
-| `App::PropertyLinkList`, `LinkSubList`, `XLinkList`, `XLinkSubList` | Array of the link form. |
+| `App::PropertyLink`, `XLink` | Whole object `{"object": "<Name>"}`. A subshape or query target refuses `subshape_not_allowed`. |
+| `App::PropertyLinkSub`, `XLinkSub` | One shared target: a signed `{"object": "<Name>", "subelement": "<token>"}` from `inspect_topology`, or a query resolving to exactly one subshape. Empty-string subelement sentinels and raw `FaceN` labels are invalid input. |
+| `App::PropertyLinkList`, `XLinkList` | Array of whole-object links. |
+| `App::PropertyLinkSubList`, `XLinkSubList` | Array of shared targets; query entries expand in order and all entries are validated before assignment (expanded pairs cap at 64 per operation). |
 | `App::PropertyColor` | `[r, g, b]` or `[r, g, b, a]`. |
 | `App::PropertyEnumeration` | The exact allowed string. |
 | `Part::PropertyPartShape` and other unmapped types | The raw JSON value passes through and FreeCAD rejects most of them. Assign a shape through `run_script`. |

@@ -66,6 +66,8 @@ An explicit attachment payload names the support and its mode. Verified on FreeC
 }
 ```
 
+`support` accepts the shared targets and must resolve to exactly one compatible plane or planar face: a whole object, a signed face reference, or a one-result query.
+
 The [Part Attachment](https://wiki.freecad.org/Part_EditAttachment) page documents attachment to faces, edges, vertices, and datum geometry. The typed `parameters` route that names a plane without `support` or `properties` is in [Common recipes](recipes.md); a `support` reference and that typed route are mutually exclusive attachment targets. [mcp-tools.md](mcp-tools.md) carries the exact `create_feature` attachment routing and its error.
 
 ## Attachment offset
@@ -76,17 +78,17 @@ Keep attachment offsets explicit and inspect them after edits. Where the attachm
 
 ## Canonical link values
 
-The MCP mapper accepts link values only in the canonical form. `References` take arrays of `{"object", "subelement"}` values:
+The MCP mapper accepts link values only in the shared target forms. A whole-object link is `{"object": "Name"}`; a subelement link is `{"object": "Name", "subelement": "<signed token>"}`, with tokens taken from `inspect_topology`; and a `LinkSubList` such as `References` takes arrays of these targets, where query entries expand in order:
 
 ```json
 {
   "References": [
-    {"object": "Base", "subelement": "Face1"}
+    {"object": "Pad", "query": [{"role": "face", "selector": "-Z"}]}
   ]
 }
 ```
 
-Use the internal `Name`, not the display `Label`, and verify that the subelement is the intended face or edge. Every other link form is rejected before the transaction opens; the complete property-type table is in [Property types](fundamentals.md#property-types). For complex `PropertyLinkSub` and attachment assignments the mapper rejects, use `run_script` with the exact FreeCAD property type.
+Use the internal `Name`, not the display `Label`, and read the operation's `resolvedSelections` receipt to confirm the signed references that were bound. Empty-string subelement sentinels and raw `FaceN`/`EdgeN` labels are rejected before the transaction opens; the complete property-type table is in [Property types](fundamentals.md#property-types). For complex `PropertyLinkSub` and attachment assignments the mapper rejects, use `run_script` with the exact FreeCAD property type.
 
 ## FreeCAD 1.1 orientation
 

@@ -68,7 +68,7 @@ Use existing FreeCAD and CAD knowledge first. Do not discover standard CAD opera
 | Native PartDesign feature | `create_feature` or `edit_feature` | Use `edit_object` only when the typed feature API does not cover the property. |
 | Existing native property change | `edit_object` or `edit_objects` | Use `edit_parameters` for dynamic properties and expressions. |
 | Independent scalar parameters | Supported `App::VarSet` plus `edit_parameters` | Use `Spreadsheet::Sheet` when formulas, aliases, or a parameter table matter. |
-| Stable exact CSG | Short `run_script` with `Part` | Do not script when structured tools express the same design clearly. |
+| Stable exact CSG | `create_object` with `Part::Cut` (`Base`/`Tool` links) or `Part::MultiFuse` (`Shapes`), gated by `expected_solids`/`expected_bounds`, then `validate_geometry` | Use `run_script` only for other Part shape operations; query targets are refused in `Base`/`Tool`. |
 | Imported STEP or STL | `import_model` | Use `run_script` only for unsupported formats or mesh repair. |
 | Fit or interference decision | `measure` plus `validate_geometry` | Use `inspect_topology` first when a specific face or edge matters. |
 | Manufacturing output | `export` | Do not use ad hoc writer code for STL, STEP, 3MF, or FCStd. |
@@ -107,7 +107,11 @@ The protocol also provides `server/discover`, `tools/list`, `tasks/get`, `tasks/
 - Require `cellContentsPersisted: true` after a spreadsheet write.
 - Pass `expected_generation` on object, sketch, or feature edits after an earlier inspection.
 - Pass `expected_solids` and `expected_bounds` when the design determines them.
-- Use canonical links: `{"object":"Name","subelement":"Face1"}`.
+- Address topology with the shared targets: whole object `{"object":"Name"}`, signed reference `{"object":"Name","subelement":"<token>"}` taken from `inspect_topology`, or declarative query `{"object":"Name","query":[{"role":"face","selector":">Z"}]}`.
+- Reuse one query descriptor across `measure` targets, `create_feature` subelement lists, link properties such as FEM `References`, and `capture_view` focus. A consumer that needs exactly one shape refuses `selection_empty` or `selection_ambiguous`; a set consumer expands the matches and reports `resolvedSelections` receipts carrying the selection-time generation.
+- Selectors use the bounded CadQuery grammar. Named views keep CadQuery meanings, not FreeCAD camera names: front=>Z, back=<Z, left=<X, right=>X, top=>Y, bottom=<Y. Never send a raw `FaceN`/`EdgeN` label as durable input; sign it through `inspect_topology` first.
+- Omit `response_detail` and `detail` for compact results; pass `"full"` explicitly when before/after deltas matter.
+- `edit_feature` edits nine kinds: `pad`, `pocket`, `hole`, `gear_profile`, `fillet`, `chamfer`, `linear_pattern`, `polar_pattern`, `revolve`.
 - Use document-space bounds: `[xmin,ymin,zmin,xmax,ymax,zmax]`.
 - Use plain numbers for mapped quantity properties.
 - Use quantity strings only where the schema requires strings, such as sketch datums or FEM material maps.
@@ -143,12 +147,11 @@ Require all applicable evidence:
 - The volume is positive when a solid is required.
 - The bounds match the design within a stated tolerance.
 - `measure(mode="difference")` reports the added or removed material when a change must be quantified (`difference_volume` is the material of `a` that `b` does not cover; an empty result reports `difference_volume` 0 with null bounds).
-- `measure(mode="distance")` confirms clearance magnitude.
-- `measure(mode="interference")` confirms no volumetric overlap.
+- `measure(mode="distance")` confirms clearance magnitude and `measure(mode="interference")` confirms no volumetric overlap, or record both decisions in one `validate_geometry` call with `checks`: `clearance_min` passes only when distance >= min AND the common volume is zero; `interference_max` passes when the common volume <= max.
 - `capture_view` in `overview` mode confirms the requested form and placement; `interior`/`fit` supplement where internal features matter.
 - The export readback matches the source bounds and solid intent.
 
-A positive distance alone does not prove separation. A zero common volume does not prove clearance. Use both modes for mating parts.
+A positive distance alone does not prove separation. A zero common volume does not prove clearance; it is contact evidence only. Use both measure modes, or `validate_geometry` with `clearance_min` plus `interference_max`, for mating parts.
 
 For FFF output, read `references/printability.md` before final geometry. Choose the build orientation before overhang-sensitive features. Mark unsourced fit values and uncalibrated clearances as assumptions.
 

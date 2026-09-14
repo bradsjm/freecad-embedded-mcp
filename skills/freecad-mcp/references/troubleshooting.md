@@ -49,7 +49,7 @@ Endpoint, modes, token, and path contract: [protocol-security.md](protocol-secur
 `edit_object` and `edit_objects` prevalidate every property before the transaction opens, so a failed call assigns nothing.
 
 1. Inspect names, types, and metadata with `inspect_objects(document, detail="full")`.
-2. Use plain numbers for quantity properties and canonical `{"object", "subelement"}` links for references.
+2. Use plain numbers for quantity properties and shared-target link values for references: `{"object"}` whole, `{"object", "subelement": "<token>"}` signed, or a one-result query.
 3. For a `Spreadsheet::Sheet`, read the row's `spreadsheet` inventory and write address or alias keys through `edit_object` `properties.cells`.
 4. Send feature-specific assignments the mapper cannot express through `run_script`.
 5. `reason: stale_generation` means the document changed since your last read. Re-inspect with `inspect_objects`, then retry with the current `expected_generation`.

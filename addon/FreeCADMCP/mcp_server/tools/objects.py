@@ -14,10 +14,12 @@ from __future__ import annotations
 import difflib
 import math
 import re
+from collections.abc import Mapping
 from typing import Any
 
 import FreeCAD
 
+from .. import topology_query as tq
 from ..object_validation import (
     dependent_count,
     document_bounds,
@@ -32,6 +34,7 @@ from ..protocol import (
     ToolError,
     fingerprint,
     stale_generation_details,
+    validate_schema,
 )
 
 _MAX_LIMIT = 500
@@ -202,7 +205,23 @@ def _value_defs() -> dict:
 
 
 _INPUT_VALUE = {"$ref": "#/$defs/value4"}
-_VALUE_DEFS = _value_defs()
+_VALUE_DEFS = {**_value_defs(), **tq.QUERY_DEFS}
+
+#: Nonrecursive link-aware property value: plain JSON values, a declarative
+#: query target, or an array of shared link targets (LinkSubList entries).
+#: Query definitions never reference valueN or inputPropertyValue, so the
+#: existing bounded recursion depth is unchanged.
+_INPUT_PROPERTY_VALUE = {
+    "anyOf": [
+        _INPUT_VALUE,
+        {"$ref": "#/$defs/topologyQueryTarget"},
+        {
+            "type": "array",
+            "items": {"$ref": "#/$defs/topologyTarget"},
+            "maxItems": 64,
+        },
+    ]
+}
 
 _XYZ = {
     "type": "object",
@@ -215,20 +234,15 @@ _XYZ = {
     },
 }
 
-_CANONICAL_REF = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["object"],
-    "properties": {
-        "object": {"type": "string", "minLength": 1},
-        "subelement": {"type": "string"},
-    },
-}
+#: Shared target vocabulary: whole object identity, a fresh signed
+#: reference, or a declarative query. Which forms a position accepts is
+#: decided by the resolver, not by this schema union.
+_CANONICAL_REF = {"$ref": "#/$defs/topologyTarget"}
 
 _DOCUMENT_FIELD = {"type": "string", "minLength": 1}
 _NAME_FIELD = {"type": "string", "minLength": 1}
 _EXPECTED_SOLIDS = {"type": "integer", "minimum": 0}
-_PROPERTIES_MAP = {"type": "object", "additionalProperties": _INPUT_VALUE}
+_PROPERTIES_MAP = {"type": "object", "additionalProperties": _INPUT_PROPERTY_VALUE}
 _GENERATION = {"type": "integer", "minimum": 0}
 _EXPECTED_GENERATION = {
     "type": ["integer", "null"],
@@ -338,12 +352,42 @@ _LINK_VALUE = {
     },
 }
 
+_UNAVAILABLE_LINK = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["object", "reason"],
+    "properties": {
+        "object": {"type": "string"},
+        "reason": {"type": "string"},
+        "nativeSubelement": {"type": "string"},
+    },
+}
+
+_WHOLE_LINK_OUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["object"],
+    "properties": {"object": {"type": "string", "minLength": 1}},
+}
+
+_SIGNED_LINK_OUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["object", "subelement"],
+    "properties": {
+        "object": {"type": "string", "minLength": 1},
+        "subelement": {"type": "string", "minLength": 1},
+    },
+}
+
 _PROPERTY_VALUE = {
     "anyOf": [
         *_json_scalars(),
         _XYZ,
         _PLACEMENT_VALUE,
-        _LINK_VALUE,
+        _WHOLE_LINK_OUT,
+        _SIGNED_LINK_OUT,
+        _UNAVAILABLE_LINK,
         {
             "type": "array",
             "items": {"anyOf": [{"type": "string"}, {"type": "number"}]},
@@ -356,6 +400,15 @@ _PROPERTY_VALUE = {
             "properties": {"unavailable": {"type": "string"}},
         },
     ]
+}
+
+#: Receipts for query-origin link/reference parameters. count equals the
+#: reference count; the handler enforces that and the operation-wide budget.
+_RESOLVED_SELECTIONS = {
+    "type": "array",
+    "items": {"$ref": "#/$defs/topologyResolvedSelection"},
+    "minItems": 1,
+    "maxItems": tq.MAX_QUERY_REFERENCES,
 }
 
 _SPREADSHEET_VALUE = {
@@ -633,6 +686,7 @@ _CHECKPOINT_RECEIPT = {
 _MUTATION_OUTPUT_DEFS = {
     "geometryReport": _GEOMETRY_REPORT,
     "objectIdentity": _OBJECT_IDENTITY,
+    **tq.QUERY_DEFS,
 }
 
 # ---------------------------------------------------------------------------
@@ -657,9 +711,8 @@ _BOUNDS_TOLERANCE = {
 _RESPONSE_DETAIL = {
     "type": "string",
     "enum": ["compact", "full"],
-    "default": "full",
+    "default": "compact",
 }
-_PROPERTIES_MAP = {"type": "object", "additionalProperties": _INPUT_VALUE}
 _INSPECT_INPUT = {
     "type": "object",
     "additionalProperties": False,
@@ -824,6 +877,7 @@ _MUTATED_OUTPUT = {
         "report": {"$ref": "#/$defs/geometryReport"},
         "applied": _APPLIED,
         "change": _CHANGE,
+        "resolvedSelections": _RESOLVED_SELECTIONS,
     },
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
@@ -871,6 +925,7 @@ _EDIT_OBJECTS_OUTPUT = {
             "maxItems": 32,
         },
         "applied": _APPLIED,
+        "resolvedSelections": _RESOLVED_SELECTIONS,
     },
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
@@ -955,6 +1010,7 @@ _CREATE_OBJECTS_OUTPUT = {
             "maxItems": 32,
         },
         "applied": _APPLIED,
+        "resolvedSelections": _RESOLVED_SELECTIONS,
     },
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
@@ -1599,42 +1655,337 @@ def _placement_value(value: Any, what: str) -> Any:
     )
 
 
-def _resolve_reference(ctx: Any, doc: Any, reference: dict):
+def _resolve_reference(ctx: Any, doc: Any, reference: dict, parameter: str = "reference"):
     # geometry.py is a sibling tool module; import lazily so this module
     # loads (and its tests run) regardless of registration order.
     from .geometry import resolve_reference
 
-    return resolve_reference(ctx, doc, reference)
+    return resolve_reference(ctx, doc, reference, parameter)
 
 
-def _resolve_one(ctx: Any, doc: Any, value: Any, what: str, *, allow_sub: bool) -> Any:
-    """Resolve one canonical link value; returns the object or (object, sub)."""
+_TARGET_VALIDATION_SCHEMA = {"$ref": "#/$defs/topologyTarget", "$defs": tq.QUERY_DEFS}
+
+
+def _validate_target(value: Any, what: str) -> None:
+    """Enforce the closed shared target union before any native access.
+
+    The generic ``value4`` alternative also admits loose dictionaries, so
+    every link-bearing value is checked against the closed queryTarget /
+    topologyTarget definitions here; empty subelement sentinels and numeric
+    label payloads cannot slip through the permissive union branch.
+    """
+
+    try:
+        validate_schema(value, _TARGET_VALIDATION_SCHEMA, _TARGET_VALIDATION_SCHEMA, what)
+    except ProtocolError as exc:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"{what} is not a valid shared link target: {exc}",
+            {"parameter": what},
+        ) from exc
+
+
+class _PreparedQueries:
+    """Operation-local prepared-resolution context for query link values.
+
+    Queries are resolved once per public operation, before the mutation
+    opens, and the context is passed explicitly to the property and feature
+    adapters; it is never module-global or persistent state. It also owns
+    the two receipts budgets: at most 64 receipts and at most 64 referenced
+    subshapes across the complete operation, refused with
+    ``selection_limit`` before the transaction.
+
+    Each resolution also snapshots the selected subshapes' document-space
+    geometry fingerprints, so a later re-verification can prove the
+    selection (object, role, index set and per-index geometry) without
+    holding native subshape objects that a recompute invalidates.
+    """
+
+    def __init__(self, ctx: Any, doc: Any) -> None:
+        self.ctx = ctx
+        self.doc = doc
+        self.generation = int(ctx.document_generation(doc))
+        self.resolutions: dict[tuple[str, str], tuple[Any, str, list[int]]] = {}
+        self.fingerprints: dict[tuple[str, str], dict[int, dict] | None] = {}
+        self.receipts: list[dict] = []
+        self.referenced_subshapes = 0
+
+    def resolve(self, path: str, value: Mapping, *, owner: str = "") -> tuple[Any, str, list[int]]:
+        """Resolve one query target once, reserving its receipt budget.
+
+        The cache key pairs the owning target with the parameter path: a
+        batch operation shares one context across several objects, so a
+        same-named property on another entry must never reuse this entry's
+        selection.
+        """
+
+        key = (owner, path)
+        if key in self.resolutions:
+            return self.resolutions[key]
+        _validate_target(value, path)
+        from .geometry import resolve_query
+
+        # The operation-start resolution enforces the caller's
+        # expected_generation before any native extraction; later
+        # re-verifications of the same selection are guarded by the
+        # index-set and subshape-identity comparison instead.
+        obj, role, indices = resolve_query(self.ctx, self.doc, value, path)
+        self.resolutions[key] = (obj, role, indices)
+        # Snapshot the selected subshapes' document-space fingerprints so a
+        # later re-verification can prove the geometry, not just the index
+        # set. Both failure modes (no placed shape, unreadable subshapes)
+        # record None, which re-verification refuses.
+        try:
+            from .geometry import placed_shape, subshape_fingerprints
+
+            self.fingerprints[key] = subshape_fingerprints(placed_shape(obj), role, indices)
+        except Exception:
+            self.fingerprints[key] = None
+        if indices:
+            from .geometry import make_reference
+
+            references = [make_reference(self.ctx, self.doc, obj, role, index) for index in indices]
+            self.receipts.append(
+                {
+                    "parameter": path,
+                    "document": str(getattr(self.doc, "Name", "")),
+                    "generation": self.generation,
+                    "references": references,
+                    "count": len(references),
+                }
+            )
+            self.referenced_subshapes += len(indices)
+        if len(self.receipts) > tq.MAX_QUERY_REFERENCES:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"the operation uses more than {tq.MAX_QUERY_REFERENCES} query "
+                "selections; refuse before any mutation",
+                {"reason": "selection_limit", "parameter": path},
+            )
+        if self.referenced_subshapes > tq.MAX_REFERENCED_SUBSHAPES:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"the operation selects more than {tq.MAX_REFERENCED_SUBSHAPES} "
+                "subshapes across query receipts",
+                {"reason": "selection_limit", "parameter": path},
+            )
+        return obj, role, indices
+
+    def fingerprints_for(self, path: str, *, owner: str = "") -> dict[int, dict] | None:
+        """The selection-time geometry fingerprints for one resolved query."""
+
+        return self.fingerprints.get((owner, path))
+
+    def reverify(self, path: str, value: Mapping, *, owner: str = "") -> tuple[Any, str, list[int]]:
+        """Re-run one query selection and compare it with the prepared one.
+
+        Returns the fresh resolution; raises ``selection_changed`` when the
+        matched object, role or index set differs from the selection-time
+        snapshot. The per-index geometry fingerprint is compared by the
+        caller, which owns the selection-time fingerprint snapshot.
+        """
+
+        from .geometry import resolve_query
+
+        # The generation guard was enforced once at operation start; the
+        # state change this re-verification follows (a base recompute)
+        # legitimately advances the generation, so the probe drops the
+        # expectation instead of failing against the tool's own side effect.
+        probe = {key: item for key, item in value.items() if key != "expected_generation"}
+        obj, role, indices = resolve_query(self.ctx, self.doc, probe, path)
+        expected = self.resolutions.get((owner, path))
+        if expected is not None:
+            expected_obj, expected_role, expected_indices = expected
+            if (
+                getattr(obj, "Name", "") != getattr(expected_obj, "Name", "")
+                or role != expected_role
+                or list(indices) != list(expected_indices)
+            ):
+                raise ToolError(
+                    VALIDATION_FAILED,
+                    f"{path} selected a different set after a state change; "
+                    "the operation was refused",
+                    {"reason": "selection_changed", "parameter": path},
+                )
+        return obj, role, indices
+
+    def scan_property(self, prop: str, value: Any, *, owner: str = "") -> None:
+        """Pre-resolve top-level and array-entry queries in one property."""
+
+        if isinstance(value, dict):
+            if self._looks_like_query_target(value):
+                self.resolve(prop, value, owner=owner)
+        elif isinstance(value, list):
+            for index, entry in enumerate(value):
+                if isinstance(entry, dict) and self._looks_like_query_target(entry):
+                    self.resolve(f"{prop}[{index}]", entry, owner=owner)
+
+    @staticmethod
+    def _looks_like_query_target(value: Mapping) -> bool:
+        """True for a shared query target, never for an unrelated map.
+
+        A shared target always names its object; requiring that string key
+        keeps maps such as a spreadsheet ``cells`` alias table (whose keys
+        are cell addresses or aliases) out of the scan.
+        """
+
+        return "query" in value and isinstance(value.get("object"), str)
+
+
+def _resolve_one(
+    ctx: Any,
+    doc: Any,
+    value: Any,
+    what: str,
+    *,
+    allow_sub: bool,
+    prepared: _PreparedQueries | None = None,
+    owner: str = "",
+) -> Any:
+    """Resolve one shared link target; returns the object or (object, subs).
+
+    Whole-object Link positions reject selected subshapes and queries with
+    ``subshape_not_allowed`` instead of stripping them down. A LinkSub
+    accepts exactly one query result; zero matches and ambiguity are named
+    refusals with bounded candidate evidence.
+    """
 
     if not isinstance(value, dict) or not isinstance(value.get("object"), str):
         raise ToolError(
             VALIDATION_FAILED,
-            f"{what} must be a canonical link object {'{object: <Name>, subelement: <token>}'}",
+            f"{what} must be a shared link target ({'{object}'} with an "
+            "optional signed subelement or declarative query)",
         )
-    name = value["object"]
-    if not name.strip():
+    if not value["object"].strip():
         raise ToolError(VALIDATION_FAILED, f"{what} must name an object")
-    subelement = value.get("subelement")
-    if subelement is None:
-        subelement = ""
-    if not isinstance(subelement, str):
-        raise ToolError(VALIDATION_FAILED, f"{what}.subelement must be a string")
-    if not allow_sub and subelement:
+    has_query = "query" in value
+    has_subelement = value.get("subelement") is not None
+    if not allow_sub and (has_query or has_subelement):
         raise ToolError(
             VALIDATION_FAILED,
-            f"{what} takes a plain object link and accepts no subelement",
+            f"{what} takes a plain object link and accepts no subshape",
+            {"parameter": what, "reason": "subshape_not_allowed"},
         )
-    resolved, native = _resolve_reference(ctx, doc, {"object": name, "subelement": subelement})
-    if allow_sub:
-        return (resolved, native)
-    return resolved
+    if not allow_sub:
+        _validate_target(value, what)
+        resolved = ctx.require_object(doc, value["object"])
+        return resolved
+    if has_query:
+        if prepared is not None:
+            obj, role, indices = prepared.resolve(what, value, owner=owner)
+        else:
+            _validate_target(value, what)
+            from .geometry import resolve_query
+
+            obj, role, indices = resolve_query(ctx, doc, value, what)
+        if not indices or len(indices) > 1:
+            from .geometry import _cardinality_error
+
+            raise _cardinality_error(
+                "selection_ambiguous" if len(indices) > 1 else "selection_empty",
+                (
+                    f"{what} matched {len(indices)} {role}s of {obj.Name}; a "
+                    "single-value link needs exactly one match"
+                    if indices
+                    else f"{what} matched no {role} of {obj.Name}"
+                ),
+                what,
+                ctx,
+                doc,
+                obj,
+                role,
+                indices,
+            )
+        native = ("Face" if role == "face" else "Edge") + str(indices[0])
+        return (obj, [native])
+    _validate_target(value, what)
+    resolved, native = _resolve_reference(ctx, doc, value, what)
+    return (resolved, [native] if native else [""])
 
 
-def _convert_value(ctx: Any, doc: Any, obj: Any, prop: str, value: Any) -> Any:
+def _resolve_link_sub_list(
+    ctx: Any,
+    doc: Any,
+    entries: list,
+    prop: str,
+    *,
+    prepared: _PreparedQueries | None = None,
+    owner: str = "",
+) -> list:
+    """Expand LinkSubList entries in order into native (object, subs) pairs.
+
+    Query entries expand to their full matched set, so a set consumer
+    accepts a multi-match query within the budget. Every entry is validated
+    and resolved before the first assignment and the expanded pair count is
+    capped at 64; overflow refuses before any mutation.
+    """
+
+    if len(entries) > tq.MAX_QUERY_REFERENCES:
+        raise ToolError(
+            VALIDATION_FAILED,
+            f"{prop} accepts at most {tq.MAX_QUERY_REFERENCES} entries",
+            {"parameter": prop},
+        )
+    pairs: list = []
+    for index, entry in enumerate(entries):
+        what = f"{prop}[{index}]"
+        if not isinstance(entry, dict) or not isinstance(entry.get("object"), str):
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"{what} must be a shared link target",
+            )
+        if not entry["object"].strip():
+            raise ToolError(VALIDATION_FAILED, f"{what} must name an object")
+        if "query" in entry:
+            if prepared is not None:
+                obj, role, indices = prepared.resolve(what, entry, owner=owner)
+            else:
+                _validate_target(entry, what)
+                from .geometry import resolve_query
+
+                obj, role, indices = resolve_query(ctx, doc, entry, what)
+            if not indices:
+                from .geometry import _cardinality_error
+
+                raise _cardinality_error(
+                    "selection_empty",
+                    f"{what} matched no {role} of {obj.Name}",
+                    what,
+                    ctx,
+                    doc,
+                    obj,
+                    role,
+                    indices,
+                )
+            for sub_index in indices:
+                pairs.append(
+                    (
+                        obj,
+                        [("Face" if role == "face" else "Edge") + str(sub_index)],
+                    )
+                )
+        else:
+            pairs.append(
+                _resolve_one(ctx, doc, entry, what, allow_sub=True, prepared=prepared, owner=owner)
+            )
+        if len(pairs) > tq.MAX_QUERY_REFERENCES:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"{prop} expands to more than {tq.MAX_QUERY_REFERENCES} pairs",
+                {"parameter": prop, "reason": "selection_limit"},
+            )
+    return pairs
+
+
+def _convert_value(
+    ctx: Any,
+    doc: Any,
+    obj: Any,
+    prop: str,
+    value: Any,
+    prepared: _PreparedQueries | None = None,
+    owner: str = "",
+) -> Any:
     """Convert one JSON value to the property's native FreeCAD value."""
 
     ptype = str(obj.getTypeIdOfProperty(prop))
@@ -1643,19 +1994,26 @@ def _convert_value(ctx: Any, doc: Any, obj: Any, prop: str, value: Any) -> Any:
     if ptype in _VECTOR_TYPES:
         return _vector_value(value, prop)
     if ptype in _LINK_TYPES:
-        return _resolve_one(ctx, doc, value, prop, allow_sub=False)
+        return _resolve_one(ctx, doc, value, prop, allow_sub=False, prepared=prepared, owner=owner)
     if ptype in _LINK_SUB_TYPES:
-        return _resolve_one(ctx, doc, value, prop, allow_sub=True)
+        return _resolve_one(ctx, doc, value, prop, allow_sub=True, prepared=prepared, owner=owner)
     if ptype in _LINK_LIST_TYPES:
         return [
-            _resolve_one(ctx, doc, entry, f"{prop}[{index}]", allow_sub=False)
+            _resolve_one(
+                ctx,
+                doc,
+                entry,
+                f"{prop}[{index}]",
+                allow_sub=False,
+                prepared=prepared,
+                owner=owner,
+            )
             for index, entry in enumerate(_as_array(value, prop))
         ]
     if ptype in _LINK_SUB_LIST_TYPES:
-        return [
-            _resolve_one(ctx, doc, entry, f"{prop}[{index}]", allow_sub=True)
-            for index, entry in enumerate(_as_array(value, prop))
-        ]
+        return _resolve_link_sub_list(
+            ctx, doc, _as_array(value, prop), prop, prepared=prepared, owner=owner
+        )
     if ptype in _COLOR_TYPES:
         return _color_value(value, prop)
     if ptype in _ENUM_TYPES:
@@ -1901,14 +2259,33 @@ def _check_document_property(obj: Any, prop: str) -> None:
         raise ToolError(VALIDATION_FAILED, f"property '{prop}' of object '{name}' is read-only")
 
 
-def _assign_converted(ctx: Any, doc: Any, obj: Any, prop: str, value: Any) -> None:
+def _assign_converted(
+    ctx: Any,
+    doc: Any,
+    obj: Any,
+    prop: str,
+    value: Any,
+    queries: _PreparedQueries | None = None,
+    owner: str = "",
+) -> None:
     """Convert and assign one document property (live path for create)."""
 
     _check_document_property(obj, prop)
-    setattr(obj, prop, _convert_value(ctx, doc, obj, prop, value))
+    setattr(
+        obj,
+        prop,
+        _convert_value(ctx, doc, obj, prop, value, prepared=queries, owner=owner),
+    )
 
 
-def _apply_properties(ctx: Any, doc: Any, obj: Any, properties: dict) -> None:
+def _apply_properties(
+    ctx: Any,
+    doc: Any,
+    obj: Any,
+    properties: dict,
+    queries: _PreparedQueries | None = None,
+    owner: str = "",
+) -> None:
     """Assign a properties map onto an existing object (create path)."""
 
     for prop, value in properties.items():
@@ -1927,11 +2304,16 @@ def _apply_properties(ctx: Any, doc: Any, obj: Any, properties: dict) -> None:
             _check_view_property(obj, view, "ShapeColor")
             view.ShapeColor = _color_value(value, "ShapeColor")
         else:
-            _assign_converted(ctx, doc, obj, prop, value)
+            _assign_converted(ctx, doc, obj, prop, value, queries=queries, owner=owner)
 
 
 def _prepare_properties(
-    ctx: Any, doc: Any, obj: Any, properties: dict
+    ctx: Any,
+    doc: Any,
+    obj: Any,
+    properties: dict,
+    queries: _PreparedQueries | None = None,
+    owner: str = "",
 ) -> list[tuple[str, str, Any]]:
     """Prevalidate and convert the whole edit map before any assignment.
 
@@ -1960,7 +2342,13 @@ def _prepare_properties(
             prepared.append(("view", "ShapeColor", _color_value(value, "ShapeColor")))
         else:
             _check_document_property(obj, prop)
-            prepared.append(("doc", prop, _convert_value(ctx, doc, obj, prop, value)))
+            prepared.append(
+                (
+                    "doc",
+                    prop,
+                    _convert_value(ctx, doc, obj, prop, value, prepared=queries, owner=owner),
+                )
+            )
     return prepared
 
 
@@ -2144,6 +2532,81 @@ def _unavailable(kind: str) -> dict:
     return {"unavailable": kind}
 
 
+_LINK_LABEL = re.compile(r"(Face|Edge)([1-9][0-9]*)")
+
+
+def _link_value(ctx: Any, doc: Any, raw: Any) -> Any | None:
+    """Serialize a native link value with a signed subshape readback.
+
+    Same-document whole-object links serialize as ``{object}``; supported
+    subshape links as ``{object, subelement: <signed token>}``. Cross-
+    document, unsupported, or stale native labels refuse through the closed
+    ``unavailableLink`` branch instead of publishing raw FaceN values or
+    fabricated references.
+    """
+
+    from .geometry import make_reference
+
+    if hasattr(raw, "Name") and hasattr(raw, "TypeId"):
+        if getattr(raw, "Document", None) is not doc:
+            return {
+                "unavailableLink": {
+                    "object": str(getattr(raw, "Name", "")),
+                    "reason": "cross_document",
+                }
+            }
+        return {"object": str(raw.Name)}
+    if isinstance(raw, (list, tuple)) and len(raw) == 2 and hasattr(raw[0], "Name"):
+        link, subs = raw[0], raw[1]
+        if getattr(link, "Document", None) is not doc:
+            return {
+                "unavailableLink": {
+                    "object": str(getattr(link, "Name", "")),
+                    "reason": "cross_document",
+                }
+            }
+        sub = subs
+        if isinstance(subs, (list, tuple)):
+            sub = subs[0] if subs else ""
+        if sub in (None, ""):
+            return {"object": str(link.Name)}
+        match = _LINK_LABEL.fullmatch(str(sub))
+        if match is None:
+            return {
+                "unavailableLink": {
+                    "object": str(link.Name),
+                    "reason": "unsupported_subelement",
+                    "nativeSubelement": str(sub),
+                }
+            }
+        role = "face" if match.group(1) == "Face" else "edge"
+        index = int(match.group(2))
+        try:
+            shape = link.Shape
+            count = len(shape.Faces) if role == "face" else len(shape.Edges)
+        except Exception:
+            return {
+                "unavailableLink": {
+                    "object": str(link.Name),
+                    "reason": "unresolvable",
+                    "nativeSubelement": str(sub),
+                }
+            }
+        if index > count:
+            return {
+                "unavailableLink": {
+                    "object": str(link.Name),
+                    "reason": "stale_subelement",
+                    "nativeSubelement": str(sub),
+                }
+            }
+        return {
+            "object": str(link.Name),
+            "subelement": make_reference(ctx, doc, link, role, index)["subelement"],
+        }
+    return None
+
+
 def _jsonify(value: Any) -> Any:
     """Convert one property value; document objects never stringify."""
 
@@ -2171,22 +2634,30 @@ def _jsonify(value: Any) -> Any:
         if hasattr(value, "UserString"):
             return str(value)
         if hasattr(value, "Name") and hasattr(value, "TypeId"):
-            # Inspection-only descriptive identity; mutation input keeps
-            # accepting opaque signed references.
-            return {"object": str(value.Name), "subelement": ""}
+            # Whole-object link identity; a signed subshape readback needs
+            # document context (see _link_value) and is never produced here.
+            return {"object": str(value.Name)}
     except Exception:
         return _unavailable(type(value).__name__)
     if isinstance(value, (list, tuple)):
         if len(value) == 2:
             first, second = value
             if hasattr(first, "Name") and hasattr(first, "TypeId"):
-                # A (link, subelement) pair: the native subelement string is
-                # descriptive only and is never an accepted edit selector.
+                # A (link, subelement) pair. The native label is descriptive
+                # only and never an accepted selector: without document
+                # context this serializer reports the link as unavailable
+                # instead of publishing a reusable-looking FaceN value.
                 sub = second
                 if isinstance(sub, (list, tuple)):
                     sub = sub[0] if sub else ""
                 if isinstance(sub, str):
-                    return {"object": str(first.Name), "subelement": sub}
+                    return {
+                        "unavailableLink": {
+                            "object": str(first.Name),
+                            "reason": "link_readback_unavailable",
+                            "nativeSubelement": sub,
+                        }
+                    }
         converted: list[Any] = []
         for item in value[:_PROPERTY_LIST_LIMIT]:
             if isinstance(item, (bool, int, str)) and not isinstance(item, float):
@@ -2321,8 +2792,14 @@ def _resolve_property_holder(obj: Any, name: str) -> tuple[Any, str] | None:
     return None
 
 
-def _property_page(obj: Any, names: list[str]) -> tuple[dict, dict, list[str]]:
-    """Values, metadata and over-limit list names for one property page."""
+def _property_page(
+    obj: Any, names: list[str], *, ctx: Any = None, doc: Any = None
+) -> tuple[dict, dict, list[str]]:
+    """Values, metadata and over-limit list names for one property page.
+
+    When inspection context is available, native link values serialize with
+    signed subelement references instead of the context-free fallback.
+    """
 
     properties: dict[str, Any] = {}
     metadata: dict[str, Any] = {}
@@ -2339,6 +2816,10 @@ def _property_page(obj: Any, names: list[str]) -> tuple[dict, dict, list[str]]:
         except Exception:
             raw = None
         value = _jsonify(raw)
+        if ctx is not None and doc is not None:
+            link_value = _link_value(ctx, doc, raw)
+            if link_value is not None:
+                value = link_value
         if _is_spreadsheet(holder) and isinstance(value, str):
             value, value_truncated = _truncate_text(value, _MAX_SPREADSHEET_CONTENT)
             if value_truncated:
@@ -2355,6 +2836,8 @@ def _row(
     detail: str,
     props: list[str],
     *,
+    ctx: Any = None,
+    doc: Any = None,
     property_offset: int = 0,
     property_limit: int = _MAX_PROPERTY_PAGE,
 ) -> dict:
@@ -2376,7 +2859,7 @@ def _row(
         following = property_offset + property_limit
         if following < property_count:
             next_property_offset = following
-        properties, property_metadata, truncated = _property_page(obj, page)
+        properties, property_metadata, truncated = _property_page(obj, page, ctx=ctx, doc=doc)
     row = {
         "name": str(getattr(obj, "Name", "")),
         "label": _label(obj),
@@ -2611,6 +3094,8 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
             obj,
             detail,
             props,
+            ctx=ctx,
+            doc=doc,
             property_offset=property_offset,
             property_limit=property_limit,
         )
@@ -2643,11 +3128,14 @@ def inspect_objects(ctx: Any, args: dict) -> dict:
 _DEFAULT_BOUNDS_TOLERANCE = 0.000001
 
 
-def _snapshot_requested(obj: Any, properties: dict) -> list[tuple[str, Any]]:
+def _snapshot_requested(
+    obj: Any, properties: dict, *, ctx: Any = None, doc: Any = None
+) -> list[tuple[str, Any]]:
     """Read the requested document/ViewObject properties for a delta row.
 
     Values pass through ``_jsonify`` so the rows use the same bounded
-    inspection encoding as ``inspect_objects``.
+    inspection encoding as ``inspect_objects``; with inspection context,
+    native link values serialize through the signed ``_link_value`` path.
     """
 
     rows: list[tuple[str, Any]] = []
@@ -2670,14 +3158,28 @@ def _snapshot_requested(obj: Any, properties: dict) -> list[tuple[str, Any]]:
             else:
                 rows.append((key, _unavailable("no-such-property")))
         else:
-            rows.append((key, _read_value(obj, key)))
+            holder = _resolve_property_holder(obj, key)
+            if holder is None:
+                rows.append((key, _unavailable("no-such-property")))
+                continue
+            read_holder, plain = holder
+            try:
+                raw = getattr(read_holder, plain, None)
+            except Exception:
+                raw = None
+            row_value = _jsonify(raw)
+            if ctx is not None and doc is not None:
+                link_value = _link_value(ctx, doc, raw)
+                if link_value is not None:
+                    row_value = link_value
+            rows.append((key, row_value))
     return rows
 
 
 def _change_summary(
     properties: list[dict],
     *,
-    detail: str = "full",
+    detail: str = "compact",
     solid_before: int | None,
     solid_after: int | None,
     volume_before: float | None,
@@ -2730,7 +3232,7 @@ def create_object(ctx: Any, args: dict) -> dict:
     obj_type = str(args["type"])
     requested_name = str(args["name"])
     properties = dict(args.get("properties") or {})
-    detail = str(args.get("response_detail") or "full")
+    detail = str(args.get("response_detail") or "compact")
     expected_solids = args.get("expected_solids")
     expected_bounds = args.get("expected_bounds")
     bounds_tolerance = args.get("bounds_tolerance")
@@ -2738,6 +3240,14 @@ def create_object(ctx: Any, args: dict) -> dict:
         bounds_tolerance = _DEFAULT_BOUNDS_TOLERANCE
 
     factory, factory_kwargs = _plan_create(ctx, doc, obj_type, properties)
+
+    # Native property metadata exists only after addObject, so every
+    # syntactically query-bearing property resolves and reserves its
+    # receipt/reference budget before the transaction; inside the mutation
+    # the conversion reuses the prepared resolution.
+    queries = _PreparedQueries(ctx, doc)
+    for prop, value in properties.items():
+        queries.scan_property(prop, value, owner=requested_name)
 
     created: list[Any] = []
     spreadsheet_writes: list[tuple[Any, str, str, str]] = []
@@ -2765,14 +3275,16 @@ def create_object(ctx: Any, args: dict) -> dict:
         if _is_spreadsheet(created[0]) and "cells" in properties:
             spreadsheet_writes.extend(_spreadsheet_write_receipt(created[0], properties["cells"]))
         if properties:
-            _apply_properties(ctx, doc, created[0], properties)
+            _apply_properties(
+                ctx, doc, created[0], properties, queries=queries, owner=requested_name
+            )
 
     obj = created[0]
     # The gate already reported this new object after its recompute; reusing
     # that report keeps the summary factual without a second shape probe.
     report = outcome["reports"][str(obj.Name)]
-    after_rows = _snapshot_requested(obj, properties)
-    return {
+    after_rows = _snapshot_requested(obj, properties, ctx=ctx, doc=doc)
+    result = {
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
         "object": {
@@ -2797,6 +3309,9 @@ def create_object(ctx: Any, args: dict) -> dict:
             cell_contents_persisted=bool(spreadsheet_writes),
         ),
     }
+    if queries.receipts:
+        result["resolvedSelections"] = queries.receipts
+    return result
 
 
 def edit_object(ctx: Any, args: dict) -> dict:
@@ -2811,15 +3326,16 @@ def edit_object(ctx: Any, args: dict) -> dict:
     bounds_tolerance = args.get("bounds_tolerance")
     if bounds_tolerance is None:
         bounds_tolerance = _DEFAULT_BOUNDS_TOLERANCE
-    detail = str(args.get("response_detail") or "full")
-    prepared = _prepare_properties(ctx, doc, obj, properties)
+    detail = str(args.get("response_detail") or "compact")
+    queries = _PreparedQueries(ctx, doc)
+    prepared = _prepare_properties(ctx, doc, obj, properties, queries=queries, owner=obj.Name)
     spreadsheet_writes = (
         _spreadsheet_write_receipt(obj, properties["cells"])
         if _is_spreadsheet(obj) and "cells" in properties
         else []
     )
 
-    before_rows = _snapshot_requested(obj, properties)
+    before_rows = _snapshot_requested(obj, properties, ctx=ctx, doc=doc)
     before_report = geometry_report(obj)
     bounds_before = document_bounds(obj)
     dependents = dependent_count([obj])
@@ -2839,11 +3355,11 @@ def edit_object(ctx: Any, args: dict) -> dict:
     ) as applied:
         _apply_prepared(obj, prepared)
 
-    after_rows = _snapshot_requested(obj, properties)
+    after_rows = _snapshot_requested(obj, properties, ctx=ctx, doc=doc)
     # The gate's post-recompute report for this target replaces a second
     # probe of the same shape.
     report = outcome["reports"][str(obj.Name)]
-    return {
+    result = {
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
         "object": {
@@ -2870,6 +3386,9 @@ def edit_object(ctx: Any, args: dict) -> dict:
             cell_contents_persisted=bool(spreadsheet_writes),
         ),
     }
+    if queries.receipts:
+        result["resolvedSelections"] = queries.receipts
+    return result
 
 
 #: Body containers hold their features in ``Group``; that membership is not
@@ -2980,7 +3499,8 @@ def edit_objects(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
     _require_expected_generation(ctx, doc, args)
     edits = args["edits"]
-    detail = str(args.get("response_detail") or "full")
+    detail = str(args.get("response_detail") or "compact")
+    queries = _PreparedQueries(ctx, doc)
     if not isinstance(edits, list) or not (1 <= len(edits) <= 32):
         raise ToolError(VALIDATION_FAILED, "edits must be an array of 1 to 32 entries")
     names: list[str] = []
@@ -3001,7 +3521,9 @@ def edit_objects(ctx: Any, args: dict) -> dict:
                 VALIDATION_FAILED,
                 f"edits list object '{obj.Name}' more than once",
             )
-        prepared[obj.Name] = _prepare_properties(ctx, doc, obj, properties)
+        prepared[obj.Name] = _prepare_properties(
+            ctx, doc, obj, properties, queries=queries, owner=obj.Name
+        )
         names.append(obj.Name)
         targets.append(obj)
 
@@ -3019,7 +3541,7 @@ def edit_objects(ctx: Any, args: dict) -> dict:
     before_reports: dict[str, dict] = {}
     before_bounds: dict[str, list[float] | None] = {}
     for obj, edit in zip(targets, edits, strict=True):
-        before_rows[obj.Name] = _snapshot_requested(obj, edit["properties"])
+        before_rows[obj.Name] = _snapshot_requested(obj, edit["properties"], ctx=ctx, doc=doc)
         before_reports[obj.Name] = geometry_report(obj)
         before_bounds[obj.Name] = document_bounds(obj)
     dependent_counts = {obj.Name: dependent_count([obj]) for obj in targets}
@@ -3048,7 +3570,7 @@ def edit_objects(ctx: Any, args: dict) -> dict:
 
     changes = []
     for obj, edit in zip(targets, edits, strict=True):
-        after_rows = _snapshot_requested(obj, edit["properties"])
+        after_rows = _snapshot_requested(obj, edit["properties"], ctx=ctx, doc=doc)
         # Per-target post-recompute report from the gate's single pass.
         report = outcome["reports"][str(obj.Name)]
         changes.append(
@@ -3071,7 +3593,7 @@ def edit_objects(ctx: Any, args: dict) -> dict:
                 cell_contents_persisted=spreadsheet_writes_by_object.get(obj.Name, False),
             )
         )
-    return {
+    result = {
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
         "objects": [
@@ -3085,11 +3607,15 @@ def edit_objects(ctx: Any, args: dict) -> dict:
         "changes": changes,
         "applied": applied,
     }
+    if queries.receipts:
+        result["resolvedSelections"] = queries.receipts
+    return result
 
 
 def create_objects(ctx: Any, args: dict) -> dict:
     doc = ctx.require_document(args["document"])
-    detail = str(args.get("response_detail") or "full")
+    detail = str(args.get("response_detail") or "compact")
+    queries = _PreparedQueries(ctx, doc)
     entries = args["entries"]
     if not isinstance(entries, list) or not (1 <= len(entries) <= 32):
         raise ToolError(VALIDATION_FAILED, "entries must be an array of 1 to 32 objects")
@@ -3103,6 +3629,10 @@ def create_objects(ctx: Any, args: dict) -> dict:
         properties = dict(entry.get("properties") or {})
         requested_names.add(requested_name)
         factory, factory_kwargs = _plan_create(ctx, doc, obj_type, properties)
+        for prop, value in properties.items():
+            # The requested name keys the resolution: batch entries may edit
+            # same-named properties on different future objects.
+            queries.scan_property(prop, value, owner=requested_name)
         plans.append(
             {
                 "type": obj_type,
@@ -3158,14 +3688,21 @@ def create_objects(ctx: Any, args: dict) -> dict:
                 spreadsheet_writes.extend(writes)
                 spreadsheet_writes_by_object[obj.Name] = bool(writes)
             if plan["properties"]:
-                _apply_properties(ctx, doc, obj, plan["properties"])
+                _apply_properties(
+                    ctx,
+                    doc,
+                    obj,
+                    plan["properties"],
+                    queries=queries,
+                    owner=plan["name"],
+                )
 
     identities = []
     changes = []
     for obj, plan in zip(created, plans, strict=True):
         # The gate already reported each new object after its recompute.
         report = outcome["reports"][str(obj.Name)]
-        after_rows = _snapshot_requested(obj, plan["properties"])
+        after_rows = _snapshot_requested(obj, plan["properties"], ctx=ctx, doc=doc)
         identities.append(
             {
                 "name": str(getattr(obj, "Name", "")),
@@ -3189,7 +3726,7 @@ def create_objects(ctx: Any, args: dict) -> dict:
                 cell_contents_persisted=spreadsheet_writes_by_object.get(obj.Name, False),
             )
         )
-    return {
+    result = {
         "document": str(getattr(doc, "Name", "")),
         "generation": int(ctx.document_generation(doc)),
         "objects": identities,
@@ -3197,6 +3734,9 @@ def create_objects(ctx: Any, args: dict) -> dict:
         "changes": changes,
         "applied": applied,
     }
+    if queries.receipts:
+        result["resolvedSelections"] = queries.receipts
+    return result
 
 
 HANDLERS = {

@@ -14,6 +14,7 @@ import sys
 import types
 from collections.abc import Iterator
 from contextlib import contextmanager
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -1373,6 +1374,31 @@ def test_recorded_symmetric_axis_form_plans(sketch_module) -> None:
     assert sketch.Constraints[0].Arguments == (0, 1, 1, 2, -1)
 
 
+def test_recorded_four_argument_tangent_form_plans(sketch_module) -> None:
+    # The endpoint-specific four-token Tangent is the form the composites
+    # generate, and a caller may send it directly: [geoA, posA, geoB,
+    # posB] with the second geometry's start point, the same pairing the
+    # slot and rounded_rectangle chains emit. Slot positions are 0..2 and
+    # geometry indices are >= 0, so the recorded role pattern polices
+    # both. The two-token form still plans for whole-geometry tangency.
+    sketch = FakeSketch()
+    ctx = FakeCtx(FakeDoc(sketch))
+
+    result = call_edit(
+        sketch_module,
+        ctx,
+        addConstraints=[
+            {"type": "Tangent", "arguments": [0, 2, 1, 1]},
+            {"type": "Tangent", "arguments": [0, 1]},
+        ],
+    )
+
+    assert result["addedConstraints"] == [0, 1]
+    assert sketch.Constraints[0].Type == "Tangent"
+    assert sketch.Constraints[0].Arguments == (0, 2, 1, 1)
+    assert sketch.Constraints[1].Arguments == (0, 1)
+
+
 def test_a_later_unrecorded_shape_refuses_the_whole_batch(sketch_module) -> None:
     # One bad entry refuses the batch: the recorded first entry and the
     # delete never reach a native method and the transaction never opens.
@@ -1728,3 +1754,519 @@ def test_native_index_mismatch_for_an_id_entry_rolls_the_batch_back(
     assert excinfo.value.details["actualIndex"] == 99
     assert excinfo.value.details["operationState"] == "rolled_back"
     assert doc.transactions[-1] == ("abort",)
+
+
+# ---------------------------------------------------------------------------
+# Slot and rounded-rectangle composites.
+# ---------------------------------------------------------------------------
+
+
+def element_endpoints(element: Any) -> tuple[tuple[float, float], tuple[float, float]]:
+    return (element.StartPoint.x, element.StartPoint.y), (
+        element.EndPoint.x,
+        element.EndPoint.y,
+    )
+
+
+def assert_chain_meets(elements: list[Any], tolerance: float = 1e-9) -> None:
+    """Every element's end coincides with the next element's start."""
+
+    for index, element in enumerate(elements):
+        _, end = element_endpoints(element)
+        start, _ = element_endpoints(elements[(index + 1) % len(elements)])
+        assert abs(end[0] - start[0]) <= tolerance
+        assert abs(end[1] - start[1]) <= tolerance
+
+
+def arc_extreme_points(arc: StubArcOfCircle) -> list[tuple[float, float]]:
+    """Endpoints plus every axis extreme the positive sweep passes."""
+
+    center, radius = arc.Circle.Center, arc.Circle.Radius
+    points = list(element_endpoints(arc))
+    for quadrant in range(4):
+        angle = quadrant * math.pi / 2
+        while angle < arc.FirstParameter:
+            angle += 2 * math.pi
+        if angle <= arc.LastParameter:
+            points.append(
+                (
+                    center.x + radius * math.cos(quadrant * math.pi / 2),
+                    center.y + radius * math.sin(quadrant * math.pi / 2),
+                )
+            )
+    return points
+
+
+def composite_bounds(elements: list[Any]) -> tuple[float, float, float, float]:
+    xs: list[float] = []
+    ys: list[float] = []
+    for element in elements:
+        points = (
+            arc_extreme_points(element)
+            if isinstance(element, StubArcOfCircle)
+            else list(element_endpoints(element))
+        )
+        xs.extend(point[0] for point in points)
+        ys.extend(point[1] for point in points)
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def composite_area(elements: list[Any]) -> float:
+    """Chain polygon area plus the circular segments the arcs bulge out."""
+
+    vertices = [start for start, _ in (element_endpoints(e) for e in elements)]
+    total = 0.0
+    for (x0, y0), (x1, y1) in pairwise([*vertices, vertices[0]]):
+        total += x0 * y1 - x1 * y0
+    area = abs(total) / 2
+    for element in elements:
+        if isinstance(element, StubArcOfCircle):
+            sweep = element.LastParameter - element.FirstParameter
+            radius = element.Circle.Radius
+            area += (radius**2 / 2) * (sweep - math.sin(sweep))
+    return area
+
+
+def geometry_facts(elements: list[Any]) -> list[tuple]:
+    facts = []
+    for element in elements:
+        if isinstance(element, StubArcOfCircle):
+            facts.append(
+                (
+                    "arcOfCircle",
+                    element.Circle.Center.x,
+                    element.Circle.Center.y,
+                    element.Circle.Radius,
+                    element.FirstParameter,
+                    element.LastParameter,
+                )
+            )
+        else:
+            (sx, sy), (ex, ey) = element_endpoints(element)
+            facts.append(("lineSegment", sx, sy, ex, ey))
+    return facts
+
+
+def constraint_types(sketch: FakeSketch) -> list[str]:
+    return [constraint.Type for constraint in sketch.Constraints]
+
+
+def add_one(sketch_module: types.ModuleType, entry: dict) -> tuple[FakeSketch, FakeDoc]:
+    sketch = FakeSketch()
+    doc = FakeDoc(sketch)
+    call_edit(sketch_module, FakeCtx(doc), addGeometry=[entry])
+    return sketch, doc
+
+
+def test_slot_omission_defaults_match_explicit(sketch_module) -> None:
+    omitted, _ = add_one(sketch_module, {"kind": "slot", "length": 10, "diameter": 6})
+    explicit, _ = add_one(
+        sketch_module,
+        {
+            "kind": "slot",
+            "length": 10,
+            "diameter": 6,
+            "center": [0, 0],
+            "rotation": 0,
+            "construction": False,
+        },
+    )
+    assert geometry_facts(omitted.Geometry) == geometry_facts(explicit.Geometry)
+    assert [omitted.construction_flags[i] for i in range(4)] == [False] * 4
+
+
+def test_rounded_rectangle_omission_defaults_match_explicit(sketch_module) -> None:
+    omitted, _ = add_one(
+        sketch_module,
+        {"kind": "rounded_rectangle", "width": 20, "height": 10, "corner_radius": 2},
+    )
+    explicit, _ = add_one(
+        sketch_module,
+        {
+            "kind": "rounded_rectangle",
+            "width": 20,
+            "height": 10,
+            "corner_radius": 2,
+            "origin": [0, 0],
+            "construction": False,
+        },
+    )
+    assert geometry_facts(omitted.Geometry) == geometry_facts(explicit.Geometry)
+    assert [omitted.construction_flags[i] for i in range(8)] == [False] * 8
+
+
+def test_composite_inputs_validate_against_the_input_schema(sketch_module) -> None:
+    definition = next(
+        tool for tool in sketch_module.TOOL_DEFINITIONS if tool["name"] == "edit_sketch"
+    )
+    # Omitted center/origin/rotation are legal: the defaults are handled
+    # by the boundary normalizer, not required by the schema.
+    validate_schema(
+        {
+            "document": "Doc",
+            "sketch": "Sketch",
+            "addGeometry": [{"kind": "slot", "length": 10, "diameter": 6}],
+        },
+        definition["inputSchema"],
+    )
+    validate_schema(
+        {
+            "document": "Doc",
+            "sketch": "Sketch",
+            "addGeometry": [
+                {"kind": "rounded_rectangle", "width": 20, "height": 10, "corner_radius": 2}
+            ],
+        },
+        definition["inputSchema"],
+    )
+    # Composites keep id disallowed, like the other profile kinds.
+    for entry in (
+        {"kind": "slot", "id": "loop", "length": 10, "diameter": 6},
+        {
+            "kind": "rounded_rectangle",
+            "id": "loop",
+            "width": 20,
+            "height": 10,
+            "corner_radius": 2,
+        },
+    ):
+        with pytest.raises(ProtocolError):
+            validate_schema(
+                {"document": "Doc", "sketch": "Sketch", "addGeometry": [entry]},
+                definition["inputSchema"],
+            )
+
+
+def test_slot_cap_centers_bounds_area_and_sweeps(sketch_module) -> None:
+    sketch, doc = add_one(
+        sketch_module,
+        {"kind": "slot", "center": [5, 5], "length": 10, "diameter": 6},
+    )
+    assert [type(element).__name__ for element in sketch.Geometry] == [
+        "StubLineSegment",
+        "StubArcOfCircle",
+        "StubLineSegment",
+        "StubArcOfCircle",
+    ]
+    left, right = sketch.Geometry[1], sketch.Geometry[3]
+    assert (left.Circle.Center.x, left.Circle.Center.y) == (3.0, 5.0)
+    assert (right.Circle.Center.x, right.Circle.Center.y) == (7.0, 5.0)
+    # Overall end-to-end length 10: caps sit at 5 -/+ (10 - 6) / 2.
+    assert composite_bounds(sketch.Geometry) == (0.0, 2.0, 10.0, 8.0)
+    assert_chain_meets(sketch.Geometry)
+    for arc in (left, right):
+        assert abs((arc.LastParameter - arc.FirstParameter) - math.pi) <= 1e-9
+    assert abs(composite_area(sketch.Geometry) - ((10 - 6) * 6 + math.pi * 3.0**2)) <= 1e-9
+    assert len(sketch.ops) == 9
+    assert doc.transactions[-1] == ("commit",)
+
+
+def test_slot_rotated_ninety_degrees_rotates_the_bounds(sketch_module) -> None:
+    sketch, _ = add_one(
+        sketch_module,
+        {"kind": "slot", "center": [5, 5], "length": 10, "diameter": 6, "rotation": 90},
+    )
+    left, right = sketch.Geometry[1], sketch.Geometry[3]
+    assert (left.Circle.Center.x, left.Circle.Center.y) == (5.0, 3.0)
+    assert (right.Circle.Center.x, right.Circle.Center.y) == (5.0, 7.0)
+    assert composite_bounds(sketch.Geometry) == (2.0, 0.0, 8.0, 10.0)
+    assert_chain_meets(sketch.Geometry)
+
+
+def test_slot_constraint_set(sketch_module) -> None:
+    sketch, _ = add_one(
+        sketch_module, {"kind": "slot", "center": [5, 5], "length": 10, "diameter": 6}
+    )
+    # Each of the four joins is one endpoint-specific Tangent:
+    # [geoA, end, geoB, start] makes geoA's end point coincide with
+    # geoB's start point while keeping the two geometries tangent. A
+    # separate Coincident at the same join is redundant, so the slot no
+    # longer emits one.
+    assert constraint_types(sketch) == ["Tangent"] * 4 + ["Parallel"]
+    assert [sketch.Constraints[index].Arguments for index in range(4)] == [
+        (0, 2, 1, 1),
+        (1, 2, 2, 1),
+        (2, 2, 3, 1),
+        (3, 2, 0, 1),
+    ]
+    assert sketch.Constraints[4].Type == "Parallel"
+    assert sketch.Constraints[4].Arguments == (0, 2)
+
+
+def test_slot_generates_no_two_argument_tangent_and_no_coincident(sketch_module) -> None:
+    # The solver reports a closed chain that carries both a Coincident
+    # and an endpoint Tangent at a join as redundant (live 1.1.3 evidence:
+    # solve() == -2, "Sketch with redundant constraints"). The two-token
+    # Tangent is valid on its own but does not constrain the shared end
+    # points, so a slot built from it alone stays at 13 DoF where the
+    # four-token form reaches 5 (live 1.1.3 evidence). Neither may be
+    # generated.
+    sketch, _ = add_one(
+        sketch_module, {"kind": "slot", "center": [5, 5], "length": 10, "diameter": 6}
+    )
+    assert "Coincident" not in constraint_types(sketch)
+    for constraint in sketch.Constraints:
+        assert constraint.Type != "Tangent" or len(constraint.Arguments) == 4
+
+
+def test_rounded_rectangle_boundary_area_and_sweeps(sketch_module) -> None:
+    sketch, doc = add_one(
+        sketch_module,
+        {
+            "kind": "rounded_rectangle",
+            "origin": [0, 0],
+            "width": 20,
+            "height": 10,
+            "corner_radius": 2,
+        },
+    )
+    assert len(sketch.Geometry) == 8
+    assert composite_bounds(sketch.Geometry) == (0.0, 0.0, 20.0, 10.0)
+    assert_chain_meets(sketch.Geometry)
+    for element in sketch.Geometry:
+        if isinstance(element, StubArcOfCircle):
+            assert abs((element.LastParameter - element.FirstParameter) - math.pi / 2) <= 1e-9
+    expected_area = 200 - (4 - math.pi) * 4
+    assert abs(composite_area(sketch.Geometry) - expected_area) <= 1e-9
+    assert len(sketch.ops) == 23
+    assert doc.transactions[-1] == ("commit",)
+
+
+def test_rounded_rectangle_constraint_set(sketch_module) -> None:
+    sketch, _ = add_one(
+        sketch_module,
+        {
+            "kind": "rounded_rectangle",
+            "origin": [0, 0],
+            "width": 20,
+            "height": 10,
+            "corner_radius": 2,
+        },
+    )
+    assert constraint_types(sketch) == (
+        ["Tangent"] * 8 + ["Horizontal"] * 2 + ["Vertical"] * 2 + ["Equal"] * 3
+    )
+    assert [sketch.Constraints[index].Arguments for index in range(8)] == [
+        (0, 2, 1, 1),
+        (1, 2, 2, 1),
+        (2, 2, 3, 1),
+        (3, 2, 4, 1),
+        (4, 2, 5, 1),
+        (5, 2, 6, 1),
+        (6, 2, 7, 1),
+        (7, 2, 0, 1),
+    ]
+    assert sketch.Constraints[8].Arguments == (0,)
+    assert sketch.Constraints[9].Arguments == (4,)
+    assert sketch.Constraints[10].Arguments == (2,)
+    assert sketch.Constraints[11].Arguments == (6,)
+    assert sketch.Constraints[12].Arguments == (1, 3)
+    assert sketch.Constraints[13].Arguments == (3, 5)
+    assert sketch.Constraints[14].Arguments == (5, 7)
+
+
+def test_rounded_rectangle_generates_no_two_argument_tangent_and_no_coincident(
+    sketch_module,
+) -> None:
+    sketch, _ = add_one(
+        sketch_module,
+        {
+            "kind": "rounded_rectangle",
+            "origin": [0, 0],
+            "width": 20,
+            "height": 10,
+            "corner_radius": 2,
+        },
+    )
+    assert "Coincident" not in constraint_types(sketch)
+    for constraint in sketch.Constraints:
+        assert constraint.Type != "Tangent" or len(constraint.Arguments) == 4
+
+
+def test_composite_operation_counts_across_batches(sketch_module) -> None:
+    slot = {"kind": "slot", "center": [5, 5], "length": 10, "diameter": 6}
+    rounded = {
+        "kind": "rounded_rectangle",
+        "origin": [0, 0],
+        "width": 20,
+        "height": 10,
+        "corner_radius": 2,
+    }
+
+    sketch = FakeSketch()
+    doc = FakeDoc(sketch)
+    call_edit(sketch_module, FakeCtx(doc), addGeometry=[rounded, rounded])
+    assert len(sketch.Geometry) == 16
+    assert len(sketch.Constraints) == 30
+    assert len(sketch.ops) == 46
+    # The second rectangle plans its indices after the first expansion.
+    assert sketch.Constraints[15].Arguments == (8, 2, 9, 1)
+    assert sketch.Constraints[27].Arguments == (9, 11)
+
+    sketch = FakeSketch()
+    doc = FakeDoc(sketch)
+    call_edit(sketch_module, FakeCtx(doc), addGeometry=[slot, rounded])
+    assert len(sketch.ops) == 32
+
+    # 46 + 3 points = 49 operations, still under the 64-operation cap, so
+    # the batch commits; the cap is what refuses a larger batch.
+    sketch = FakeSketch()
+    doc = FakeDoc(sketch)
+    call_edit(
+        sketch_module,
+        FakeCtx(doc),
+        addGeometry=[rounded, rounded] + [{"kind": "point", "x": 0, "y": 0} for _ in range(3)],
+    )
+    assert len(sketch.ops) == 49
+
+    # 46 + 27 points = 73 operations exceeds the limit of 64 before any
+    # transaction opens.
+    sketch = FakeSketch()
+    doc = FakeDoc(sketch)
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            FakeCtx(doc),
+            addGeometry=[rounded, rounded] + [{"kind": "point", "x": 0, "y": 0} for _ in range(27)],
+        )
+    assert "73 operations" in excinfo.value.message
+    assert doc.transactions == []
+    assert doc.recompute_count == 0
+
+
+def test_composite_offsets_after_deletion_and_following_geometry_id(
+    sketch_module,
+) -> None:
+    sketch = rectangle_sketch()  # four existing lines
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+    result = call_edit(
+        sketch_module,
+        ctx,
+        deleteGeometry=[1],
+        addGeometry=[
+            {"kind": "slot", "center": [5, 5], "length": 10, "diameter": 6},
+            {"kind": "circle", "id": "bore", "center": [5, 5], "radius": 1},
+        ],
+    )
+    # Base 3 = 4 existing - 1 deleted; the slot occupies 3..6 and the
+    # circle id plans after the expansion.
+    assert result["addedGeometry"] == [3, 4, 5, 6, 7]
+    assert result["addedGeometryIds"] == {"bore": 7}
+    assert sketch.Constraints[0].Arguments == (3, 2, 4, 1)
+    assert sketch.Constraints[3].Arguments == (6, 2, 3, 1)
+    assert sketch.Constraints[4].Arguments == (3, 5)
+
+    sketch = rectangle_sketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+    call_edit(
+        sketch_module,
+        ctx,
+        deleteGeometry=[0, 3],
+        addGeometry=[
+            {
+                "kind": "rounded_rectangle",
+                "origin": [1, 1],
+                "width": 8,
+                "height": 4,
+                "corner_radius": 1,
+            }
+        ],
+    )
+    # Base 2 = 4 existing - 2 deleted.
+    assert sketch.Constraints[0].Arguments == (2, 2, 3, 1)
+    assert sketch.Constraints[12].Arguments == (3, 5)
+    assert doc.transactions[-1] == ("commit",)
+
+
+def test_invalid_composite_dimensions_refuse_without_a_partial_plan(
+    sketch_module,
+) -> None:
+    sketch = rectangle_sketch()
+    geometry_before = list(sketch.Geometry)
+    constraints_before = list(sketch.Constraints)
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+    rejected = [
+        ({"kind": "slot", "length": 6, "diameter": 6}, "invalid_slot_dimensions"),
+        ({"kind": "slot", "length": 4, "diameter": 6}, "invalid_slot_dimensions"),
+        ({"kind": "slot", "length": 10, "diameter": -2}, "invalid_slot_dimensions"),
+        (
+            {
+                "kind": "rounded_rectangle",
+                "width": 20,
+                "height": 10,
+                "corner_radius": 5,
+            },
+            "invalid_corner_radius",
+        ),
+        (
+            {
+                "kind": "rounded_rectangle",
+                "width": 20,
+                "height": 10,
+                "corner_radius": 12,
+            },
+            "invalid_corner_radius",
+        ),
+    ]
+    for entry, reason in rejected:
+        with pytest.raises(ToolError) as excinfo:
+            call_edit(sketch_module, ctx, addGeometry=[entry])
+        assert excinfo.value.code == VALIDATION_FAILED
+        assert excinfo.value.details["reason"] == reason
+    assert sketch.Geometry == geometry_before
+    assert sketch.Constraints == constraints_before
+    assert sketch.ops == []
+    assert doc.transactions == []
+    assert doc.recompute_count == 0
+
+
+def test_non_finite_generated_slot_scalars_refuse_before_native_construction(
+    sketch_module,
+) -> None:
+    # Finite inputs whose cap centers overflow: the generated coordinates
+    # are checked before any native construction runs.
+    sketch = FakeSketch()
+    doc = FakeDoc(sketch)
+    ctx = FakeCtx(doc)
+    with pytest.raises(ToolError) as excinfo:
+        call_edit(
+            sketch_module,
+            ctx,
+            addGeometry=[
+                {
+                    "kind": "slot",
+                    "center": [1.7e308, 0.0],
+                    "length": 1.79e308,
+                    "diameter": 1e308,
+                }
+            ],
+        )
+    assert "not finite" in excinfo.value.message
+    assert sketch.ops == []
+    assert sketch.Geometry == []
+    assert doc.transactions == []
+
+
+def test_composite_construction_flag_reaches_every_expanded_element(
+    sketch_module,
+) -> None:
+    sketch = FakeSketch()
+    doc = FakeDoc(sketch)
+    call_edit(
+        sketch_module,
+        FakeCtx(doc),
+        addGeometry=[
+            {"kind": "slot", "length": 10, "diameter": 6, "construction": True},
+            {
+                "kind": "rounded_rectangle",
+                "width": 8,
+                "height": 4,
+                "corner_radius": 1,
+                "construction": True,
+            },
+        ],
+    )
+    assert [sketch.construction_flags[i] for i in range(12)] == [True] * 12

@@ -36,7 +36,9 @@ Every constructor and method argument below takes a plain number in the model's 
 
 ## Primitives and booleans
 
-Use `Part.makeBox`, `Part.makeCylinder`, `Part.makeSphere`, `Part.makeCone`, and related constructors for simple exact shapes. Combine shapes with `fuse`, `common`, `cut`, or `section` when the operation is geometrically appropriate:
+For document-level subtraction and fusion, prefer the structured wiring: `create_object` with `type: "Part::Cut"` and `properties: {"Base": {"object": "<A>"}, "Tool": {"object": "<B>"}}` (whole objects only; queries refuse `subshape_not_allowed`), or `type: "Part::MultiFuse"` with `{"Shapes": [{"object": "<A>"}, ...]}`. Gate with `expected_solids`/`expected_bounds`, then confirm with `validate_geometry`; the payload is in [Common recipes](recipes.md). This is verified server wiring, not live boolean validation — the `supportedTypes` inventory proves availability, not the correctness of a boolean result, and untested boolean variants are not promoted merely because `supportedTypes` lists them.
+
+Scripts cover the shape operations the structured wiring does not express. Use `Part.makeBox`, `Part.makeCylinder`, `Part.makeSphere`, `Part.makeCone`, and related constructors for simple exact shapes. Combine shapes with `fuse`, `common`, `cut`, or `section` when the operation is geometrically appropriate:
 
 ```python
 base = Part.makeBox(40, 30, 8)

@@ -180,14 +180,35 @@ class FakeShape:
         return self._cut
 
 
+class Plane:
+    """A native ``Part.Plane`` stand-in: the class name drives %TYPE."""
+
+
+class Cylinder:
+    def __init__(self, radius=None, axis=(0.0, 0.0, 1.0)):
+        self.Radius = radius
+        self.Axis = FakeVector(*axis)
+
+
 class FakeFace:
-    def __init__(self, *, area, bounds, normal=(0.0, 0.0, 1.0), center=(0.0, 0.0, 0.0)):
+    def __init__(
+        self,
+        *,
+        area,
+        bounds,
+        normal=(0.0, 0.0, 1.0),
+        center=(0.0, 0.0, 0.0),
+        surface=None,
+    ):
         self.Area = float(area)
         self.BoundBox = FakeBoundBox(*bounds)
         self.ParameterRange = (0.0, 10.0, 0.0, 10.0)
         self._normal = FakeVector(*normal)
         self._center = FakeVector(*center)
         self._distance = None
+        self.Surface = Plane() if surface is None else surface
+        self.CenterOfMass = FakeVector(*center)
+        self.Edges = []
 
     def normalAt(self, u, v):
         return self._normal
@@ -200,16 +221,63 @@ class FakeFace:
         return self._distance
 
 
+class Line:
+    """A native ``Part.Line`` stand-in: the class name drives %TYPE."""
+
+
+class Circle:
+    """A native ``Part.Circle`` stand-in: the class name drives %TYPE."""
+
+    def __init__(self, radius=None, axis=(0.0, 0.0, 1.0), center=(0.0, 0.0, 0.0)):
+        self.Radius = radius
+        self.Axis = FakeVector(*axis)
+        self.Center = FakeVector(*center)
+
+
 class FakeEdge:
-    def __init__(self, *, length, bounds, curve=None, closed=False, points=()):
+    def __init__(
+        self,
+        *,
+        length,
+        bounds,
+        curve=None,
+        closed=False,
+        points=(),
+        center=(0.0, 0.0, 0.0),
+    ):
         self.Length = float(length)
         self.BoundBox = FakeBoundBox(*bounds)
-        self.Curve = curve
+        self._default_curve = curve
         self._closed = bool(closed)
         self.Vertexes = [SimpleNamespace(Point=FakeVector(*point)) for point in points if point]
+        self.ParameterRange = (0.0, 1.0)
+        self.FirstParameter = 0.0
+        self.LastParameter = 1.0
+        self.Curve = Line() if curve is None else curve
+        self.CenterOfMass = FakeVector(*center)
+        # Mirror the native surface attribute so query records classify edges.
+        self._direction = (0.0, 0.0, 1.0)
 
     def isClosed(self):
         return self._closed
+
+    def tangentAt(self, parameter):
+        return FakeVector(*self._direction)
+
+    def valueAt(self, parameter):
+        """Linear interpolation between the stored endpoints, as a native edge does."""
+
+        fraction = float(parameter) - self.ParameterRange[0]
+        first = self.Vertexes[0].Point
+        last = self.Vertexes[-1].Point
+        return FakeVector(
+            first.x + fraction * (last.x - first.x),
+            first.y + fraction * (last.y - first.y),
+            first.z + fraction * (last.z - first.z),
+        )
+
+    def isSame(self, other):
+        return self is other
 
 
 class FakeObject:
@@ -519,13 +587,14 @@ def test_measure_distance_between_whole_objects():
     box_a.Shape._distance = (25.0, [(FakeVector(10, 0, 0), FakeVector(35, 0, 0))], None)
     ctx = FakeCtx({"BoxA": box_a, "BoxB": box_b})
     result = geometry.HANDLERS["measure"](
-        ctx, {"document": "Doc", "a": "BoxA", "mode": "distance", "b": "BoxB"}
+        ctx,
+        {"document": "Doc", "a": {"object": "BoxA"}, "mode": "distance", "b": {"object": "BoxB"}},
     )
     assert result["mode"] == "distance"
     assert result["distance"] == 25.0
     assert result["points"] == {"a": [10.0, 0.0, 0.0], "b": [35.0, 0.0, 0.0]}
-    assert result["a"] == {"object": "BoxA", "subelement": ""}
-    assert result["b"] == {"object": "BoxB", "subelement": ""}
+    assert result["a"] == {"object": "BoxA"}
+    assert result["b"] == {"object": "BoxB"}
     assert result["units"]["length"] == "mm"
     _assert_output_schema(result, "measure")
 
@@ -535,7 +604,9 @@ def test_measure_requires_b_for_distance_and_interference():
     ctx = FakeCtx({"Box": box})
     for mode in ("distance", "interference", "difference"):
         with pytest.raises(protocol.ToolError) as excinfo:
-            geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Box", "mode": mode})
+            geometry.HANDLERS["measure"](
+                ctx, {"document": "Doc", "a": {"object": "Box"}, "mode": mode}
+            )
         assert excinfo.value.code == protocol.VALIDATION_FAILED
         assert "'b'" in excinfo.value.message
 
@@ -546,14 +617,26 @@ def test_measure_interference_common_volume():
     box_a.Shape._common = FakeShape(volume=500.0, solids=0)
     ctx = FakeCtx({"BoxA": box_a, "BoxB": box_b})
     result = geometry.HANDLERS["measure"](
-        ctx, {"document": "Doc", "a": "BoxA", "mode": "interference", "b": "BoxB"}
+        ctx,
+        {
+            "document": "Doc",
+            "a": {"object": "BoxA"},
+            "mode": "interference",
+            "b": {"object": "BoxB"},
+        },
     )
     assert result["common_volume"] == 500.0
     assert result["overlaps"] is True
     assert result["units"]["volume"] == "mm3"
     box_a.Shape._common = FakeShape(volume=0.0, solids=0)
     result = geometry.HANDLERS["measure"](
-        ctx, {"document": "Doc", "a": "BoxA", "mode": "interference", "b": "BoxB"}
+        ctx,
+        {
+            "document": "Doc",
+            "a": {"object": "BoxA"},
+            "mode": "interference",
+            "b": {"object": "BoxB"},
+        },
     )
     assert result["common_volume"] == 0.0
     assert result["overlaps"] is False
@@ -569,7 +652,12 @@ def test_measure_interference_rejects_nonfinite_common_volume():
     with pytest.raises(protocol.ToolError) as excinfo:
         geometry.HANDLERS["measure"](
             ctx,
-            {"document": "Doc", "a": "BoxA", "mode": "interference", "b": "BoxB"},
+            {
+                "document": "Doc",
+                "a": {"object": "BoxA"},
+                "mode": "interference",
+                "b": {"object": "BoxB"},
+            },
         )
 
     assert excinfo.value.code == protocol.VALIDATION_FAILED
@@ -589,7 +677,8 @@ def test_measure_difference_volume_and_shape_facts():
     )
     ctx = FakeCtx({"BoxA": box_a, "BoxB": box_b})
     result = geometry.HANDLERS["measure"](
-        ctx, {"document": "Doc", "a": "BoxA", "mode": "difference", "b": "BoxB"}
+        ctx,
+        {"document": "Doc", "a": {"object": "BoxA"}, "mode": "difference", "b": {"object": "BoxB"}},
     )
     assert result["mode"] == "difference"
     assert result["difference_volume"] == 875.0
@@ -606,7 +695,8 @@ def test_measure_difference_empty_result():
     box_a.Shape._cut = FakeShape(volume=0.0, solids=0, is_null=True)
     ctx = FakeCtx({"BoxA": box_a, "BoxB": box_b})
     result = geometry.HANDLERS["measure"](
-        ctx, {"document": "Doc", "a": "BoxA", "mode": "difference", "b": "BoxB"}
+        ctx,
+        {"document": "Doc", "a": {"object": "BoxA"}, "mode": "difference", "b": {"object": "BoxB"}},
     )
     assert result["difference_volume"] == 0.0
     assert result["solid_count"] == 0
@@ -633,7 +723,8 @@ def test_measure_difference_reports_null_bounds_for_an_occ_empty_cut():
     )
     ctx = FakeCtx({"BoxA": box_a, "BoxB": box_b})
     result = geometry.HANDLERS["measure"](
-        ctx, {"document": "Doc", "a": "BoxA", "mode": "difference", "b": "BoxB"}
+        ctx,
+        {"document": "Doc", "a": {"object": "BoxA"}, "mode": "difference", "b": {"object": "BoxB"}},
     )
     assert result["difference_volume"] == 0.0
     assert result["solid_count"] == 0
@@ -651,7 +742,12 @@ def test_measure_difference_rejects_nonfinite_volume():
     with pytest.raises(protocol.ToolError) as excinfo:
         geometry.HANDLERS["measure"](
             ctx,
-            {"document": "Doc", "a": "BoxA", "mode": "difference", "b": "BoxB"},
+            {
+                "document": "Doc",
+                "a": {"object": "BoxA"},
+                "mode": "difference",
+                "b": {"object": "BoxB"},
+            },
         )
 
     assert excinfo.value.code == protocol.VALIDATION_FAILED
@@ -666,30 +762,38 @@ def test_measure_difference_rejects_nonfinite_volume():
 # ---------------------------------------------------------------------------
 
 
-def test_measure_face_selector_ambiguity_reports_candidates():
+def test_measure_query_ambiguity_reports_signed_candidates():
     shell = _two_face_object()
-    shell.Shape.Faces[1].BoundBox = FakeBoundBox(0.0, 0.0, 0.0, 10.0, 10.0, 1.0)
+    # Both faces share the same center height, so the >Z cluster holds two
+    # matches and a singleton consumer must refuse with bounded evidence.
+    shell.Shape.Faces[1].CenterOfMass = FakeVector(5.0, 5.0, 0.5)
     ctx = FakeCtx({"Shell": shell, "BoxB": FakeObject("BoxB", FakeShape())})
-    box = [0.0, 0.0, 0.0, 10.0, 10.0, 1.0]
     with pytest.raises(protocol.ToolError) as excinfo:
         geometry.HANDLERS["measure"](
             ctx,
             {
                 "document": "Doc",
-                "a": {"object": "Shell", "role": "face", "box": box},
+                "a": {"object": "Shell", "query": [{"role": "face", "selector": ">Z"}]},
                 "mode": "distance",
-                "b": "BoxB",
+                "b": {"object": "BoxB"},
             },
         )
     assert excinfo.value.code == protocol.VALIDATION_FAILED
-    candidates = excinfo.value.details["candidates"]
+    details = excinfo.value.details
+    assert details["reason"] == "selection_ambiguous"
+    assert details["matchCount"] == 2
+    assert details["nextTool"] == "inspect_topology"
+    candidates = details["candidates"]
     assert len(candidates) == 2
-    assert {candidate["subelement"] for candidate in candidates} == {"Face1", "Face2"}
+    assert all(candidate["object"] == "Shell" for candidate in candidates)
+    assert all("." in candidate["subelement"] for candidate in candidates)
 
 
-def test_measure_face_selector_resolves_unique_reference():
+def test_measure_query_resolves_unique_reference():
     shell = _two_face_object()
     other = FakeObject("BoxB", FakeShape(bounds=(20.0, 0.0, 5.0, 30.0, 10.0, 15.0)))
+    # The top face (z=5.5 center) needs a distinct center for >Z selection.
+    shell.Shape.Faces[1].CenterOfMass = FakeVector(5.0, 5.0, 5.5)
     shell.Shape.Faces[1]._distance = (
         10.0,
         [(FakeVector(10, 5, 5.5), FakeVector(20, 5, 5.5))],
@@ -700,13 +804,9 @@ def test_measure_face_selector_resolves_unique_reference():
         ctx,
         {
             "document": "Doc",
-            "a": {
-                "object": "Shell",
-                "role": "face",
-                "box": [0.0, 0.0, 5.0, 10.0, 10.0, 6.0],
-            },
+            "a": {"object": "Shell", "query": [{"role": "face", "selector": ">Z"}]},
             "mode": "distance",
-            "b": "BoxB",
+            "b": {"object": "BoxB"},
         },
     )
     assert result["distance"] == 10.0
@@ -719,42 +819,54 @@ def test_measure_face_selector_resolves_unique_reference():
     _assert_output_schema(result, "measure")
 
 
-def test_measure_face_selector_no_match():
+def test_measure_query_no_match_is_selection_empty():
     shell = _two_face_object()
+    # Neither face is circular, so %CIRCLE matches nothing: an empty query
+    # result is a named singleton refusal, not a silent zero.
     ctx = FakeCtx({"Shell": shell, "BoxB": FakeObject("BoxB", FakeShape())})
     with pytest.raises(protocol.ToolError) as excinfo:
         geometry.HANDLERS["measure"](
             ctx,
             {
                 "document": "Doc",
-                "a": {
-                    "object": "Shell",
-                    "role": "edge",
-                    "box": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-                },
+                "a": {"object": "Shell", "query": [{"role": "face", "selector": "%CIRCLE"}]},
                 "mode": "distance",
-                "b": "BoxB",
+                "b": {"object": "BoxB"},
             },
         )
     assert excinfo.value.code == protocol.VALIDATION_FAILED
-    assert "no edge" in excinfo.value.message
+    assert excinfo.value.details["reason"] == "selection_empty"
+    assert excinfo.value.details["matchCount"] == 0
 
 
-def test_measure_faces_rejects_edge_selector():
+def test_measure_rejects_removed_selector_forms():
+    """Bare strings and exact-box selectors are removed wire forms."""
+
+    definition = _definition("measure")
+    for removed in (
+        "Shell",
+        {"object": "Shell", "role": "face", "box": [0.0, 0.0, 0.0, 10.0, 10.0, 1.0]},
+        {"object": "Shell", "subelement": ""},
+        {"object": "Shell", "query": [{"role": "face"}], "subelement": "Face1"},
+    ):
+        with pytest.raises(protocol.ProtocolError):
+            protocol.validate_schema(
+                {"document": "Doc", "a": removed, "mode": "faces"},
+                definition["inputSchema"],
+            )
+
+
+def test_measure_faces_rejects_edge_target():
     shell = _two_face_object()
     ctx = FakeCtx({"Shell": shell})
+    edge = FakeEdge(length=1.0, bounds=(0.0, 0.0, 0.0, 1.0, 0.0, 0.0))
+    shell.Shape.Edges = [edge]
+    doc = ctx.require_document("Doc")
+    reference = geometry.make_reference(ctx, doc, shell, "edge", 1)
     with pytest.raises(protocol.ToolError) as excinfo:
         geometry.HANDLERS["measure"](
             ctx,
-            {
-                "document": "Doc",
-                "a": {
-                    "object": "Shell",
-                    "role": "edge",
-                    "box": [0.0, 0.0, 0.0, 10.0, 10.0, 1.0],
-                },
-                "mode": "faces",
-            },
+            {"document": "Doc", "a": reference, "mode": "faces"},
         )
     assert excinfo.value.code == protocol.VALIDATION_FAILED
 
@@ -768,16 +880,18 @@ def test_measure_section_requires_plane():
     box = FakeObject("Box", FakeShape())
     ctx = FakeCtx({"Box": box})
     with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Box", "mode": "section"})
+        geometry.HANDLERS["measure"](
+            ctx, {"document": "Doc", "a": {"object": "Box"}, "mode": "section"}
+        )
     assert "'plane'" in excinfo.value.message
     with pytest.raises(protocol.ToolError) as excinfo:
         geometry.HANDLERS["measure"](
             ctx,
             {
                 "document": "Doc",
-                "a": "Box",
+                "a": {"object": "Box"},
                 "mode": "section",
-                "b": "Box",
+                "b": {"object": "Box"},
                 "plane": {"z": 5.0},
             },
         )
@@ -791,7 +905,7 @@ def test_measure_section_rejects_zero_normal():
             ctx,
             {
                 "document": "Doc",
-                "a": "Box",
+                "a": {"object": "Box"},
                 "mode": "section",
                 "plane": {"normal": [0.0, 0.0, 0.0], "point": [0.0, 0.0, 0.0]},
             },
@@ -824,7 +938,7 @@ def test_measure_section_summarizes_curves(part_stub, freecad_stub):
     ctx = FakeCtx({"Box": box})
     result = geometry.HANDLERS["measure"](
         ctx,
-        {"document": "Doc", "a": "Box", "mode": "section", "plane": {"z": 5.0}},
+        {"document": "Doc", "a": {"object": "Box"}, "mode": "section", "plane": {"z": 5.0}},
     )
     assert result["plane"] == {
         "normal": [0.0, 0.0, 1.0],
@@ -841,7 +955,7 @@ def test_measure_section_summarizes_curves(part_stub, freecad_stub):
     assert circle_summary["radius"] == 1.0
     assert circle_summary["closed"] is False
     assert result["total_length"] == pytest.approx(10.0 + 2.0 * math.pi)
-    assert result["a"] == {"object": "Box", "subelement": ""}
+    assert result["a"] == {"object": "Box"}
     _assert_output_schema(result, "measure")
 
 
@@ -856,7 +970,7 @@ def test_measure_section_normal_and_point_plane(part_stub, freecad_stub):
         ctx,
         {
             "document": "Doc",
-            "a": "Box",
+            "a": {"object": "Box"},
             "mode": "section",
             "plane": {"normal": [0.0, 2.0, 0.0], "point": [5.0, 5.0, 5.0]},
         },
@@ -882,7 +996,7 @@ def test_section_total_length_sums_all_edges_beyond_curve_cap(part_stub, freecad
     ctx = FakeCtx({"Box": box})
     result = geometry.HANDLERS["measure"](
         ctx,
-        {"document": "Doc", "a": "Box", "mode": "section", "plane": {"z": 5.0}},
+        {"document": "Doc", "a": {"object": "Box"}, "mode": "section", "plane": {"z": 5.0}},
     )
     assert result["total_length"] == pytest.approx(40.0)
     assert (
@@ -902,7 +1016,9 @@ def test_section_total_length_sums_all_edges_beyond_curve_cap(part_stub, freecad
 def test_measure_faces_lists_areas_normals_and_references():
     shell = _two_face_object()
     ctx = FakeCtx({"Shell": shell})
-    result = geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Shell", "mode": "faces"})
+    result = geometry.HANDLERS["measure"](
+        ctx, {"document": "Doc", "a": {"object": "Shell"}, "mode": "faces"}
+    )
     assert result["mode"] == "faces"
     assert result["truncated"] is False
     assert result["face_count"] == 2
@@ -925,31 +1041,33 @@ def test_measure_faces_truncates_and_single_face_selection():
         FakeFace(
             area=float(index),
             bounds=(0.0, 0.0, float(index), 10.0, 10.0, float(index) + 1.0),
+            center=(0.0, 0.0, float(index) + 0.5),
         )
         for index in range(70)
     ]
     shell = FakeObject("Shell", FakeShape(volume=0.0, solids=0, faces=faces))
     ctx = FakeCtx({"Shell": shell})
-    result = geometry.HANDLERS["measure"](ctx, {"document": "Doc", "a": "Shell", "mode": "faces"})
+    result = geometry.HANDLERS["measure"](
+        ctx, {"document": "Doc", "a": {"object": "Shell"}, "mode": "faces"}
+    )
     limit = _definition("measure")["outputSchema"]["properties"]["faces"]["maxItems"]
     assert len(result["faces"]) == limit
     assert result["face_count"] == 70
     assert result["truncated"] is True
+    # Face 3's center sits at z=3.5, above the other 69 faces, so a query
+    # selects exactly it (the retired box selector is replaced by the
+    # shared query vocabulary).
     selected = geometry.HANDLERS["measure"](
         ctx,
         {
             "document": "Doc",
-            "a": {
-                "object": "Shell",
-                "role": "face",
-                "box": [0.0, 0.0, 3.0, 10.0, 10.0, 4.0],
-            },
+            "a": {"object": "Shell", "query": [{"role": "face", "selector": ">Z"}]},
             "mode": "faces",
         },
     )
     assert len(selected["faces"]) == 1
     assert selected["face_count"] == 1
-    assert selected["faces"][0]["area"] == 3.0
+    assert selected["faces"][0]["area"] == 69.0
     assert selected["truncated"] is False
 
 
@@ -968,10 +1086,13 @@ def test_reference_round_trip_and_whole_object():
     token = reference["subelement"]
     assert token and "." in token
     assert geometry.resolve_reference(ctx, doc, reference) == (box, "Edge1")
-    assert geometry.resolve_reference(ctx, doc, {"object": "Box", "subelement": ""}) == (
-        box,
-        "",
-    )
+    # A whole object is identity without a subelement; the empty-string
+    # sentinel is the retired form and is refused.
+    assert geometry.whole_reference(box) == {"object": "Box"}
+    assert geometry.resolve_reference(ctx, doc, {"object": "Box"}) == (box, "")
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.resolve_reference(ctx, doc, {"object": "Box", "subelement": ""})
+    assert excinfo.value.details["reason"] == "empty_subelement"
 
 
 def test_resolve_rejects_numeric_subelement():
@@ -1031,7 +1152,7 @@ def test_resolve_rejects_foreign_document_and_unknown_object():
         geometry.resolve_reference(ctx, doc, forged)
     assert excinfo.value.details["reason"] == "document_mismatch"
     with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.resolve_reference(ctx, doc, {"object": "Ghost", "subelement": ""})
+        geometry.resolve_reference(ctx, doc, {"object": "Ghost"})
     assert excinfo.value.code == protocol.OBJECT_NOT_FOUND
 
 
@@ -1050,17 +1171,16 @@ def test_resolve_rejects_out_of_range_index():
 # ---------------------------------------------------------------------------
 
 
-class FakeCylinderSurface:
-    def __init__(self):
-        self.Radius = 5.0
-        self.Axis = FakeVector(0.0, 0.0, 1.0)
+def _cylinder_surface(radius=5.0):
+    """A mapped analytic surface double (class name ``Cylinder``)."""
+
+    return Cylinder(radius=radius, axis=(0.0, 0.0, 1.0))
 
 
-class FakeCircleCurve:
-    def __init__(self):
-        self.Radius = 2.5
-        self.Center = FakeVector(1.0, 2.0, 3.0)
-        self.Axis = FakeVector(0.0, 0.0, 1.0)
+def _circle_curve(radius=2.5):
+    """A mapped analytic curve double (class name ``Circle``)."""
+
+    return Circle(radius=radius, center=(1.0, 2.0, 3.0), axis=(0.0, 0.0, 1.0))
 
 
 def _topology_doc(face_count=130, edge_count=2):
@@ -1071,24 +1191,27 @@ def _topology_doc(face_count=130, edge_count=2):
         )
         for index in range(1, face_count + 1)
     ]
-    faces[0].Surface = FakeCylinderSurface()
+    faces[0].Surface = _cylinder_surface()
     edges = [
         FakeEdge(
             length=4.0,
             bounds=(0.0, 0.0, 0.0, 4.0, 0.0, 0.0),
-            curve=FakeCircleCurve() if index == 1 else None,
+            curve=_circle_curve() if index == 1 else None,
             closed=index == 1,
             points=[(0.0, 0.0, 0.0), (4.0, 0.0, 0.0)],
         )
         for index in range(1, edge_count + 1)
     ]
+    # The cylinder face carries the circular root edge, so a face->edge
+    # query expands to it through native isSame correspondence.
+    faces[0].Edges = [edges[0]]
     shape = FakeShape(volume=10.0, faces=faces, edges=edges)
     return FakeCtx({"Shell": FakeObject("Shell", shape)})
 
 
 def test_inspect_topology_pages_every_face_once_through_signed_cursors():
     ctx = _topology_doc()
-    arguments = {"document": "Doc", "object": "Shell", "role": "face"}
+    arguments = {"document": "Doc", "target": {"object": "Shell"}}
 
     seen: list[int] = []
     cursor = None
@@ -1112,12 +1235,17 @@ def test_inspect_topology_pages_every_face_once_through_signed_cursors():
 
 def test_topology_limit_above_max_is_clamped():
     ctx = _topology_doc()
-    arguments = {"document": "Doc", "object": "Shell", "role": "face", "limit": 500}
-    protocol.validate_schema(arguments, _definition("inspect_topology")["inputSchema"])
-    result = geometry.HANDLERS["inspect_topology"](ctx, arguments)
+    arguments = {"document": "Doc", "target": {"object": "Shell"}, "limit": 500}
+    # The schema caps limit at 100; an out-of-range value never reaches the
+    # handler, so the clamp is exercised through the schema boundary.
+    with pytest.raises(protocol.ProtocolError):
+        protocol.validate_schema(arguments, _definition("inspect_topology")["inputSchema"])
+    result = geometry.HANDLERS["inspect_topology"](
+        ctx, {"document": "Doc", "target": {"object": "Shell"}, "limit": 100}
+    )
 
     _assert_output_schema(result, "inspect_topology")
-    assert result["count"] <= 100
+    assert result["count"] == 100
     assert result["total"] == 130
     assert result["nextCursor"] is not None
 
@@ -1125,7 +1253,7 @@ def test_topology_limit_above_max_is_clamped():
 def test_inspect_topology_face_items_carry_descriptive_data():
     ctx = _topology_doc()
     result = geometry.HANDLERS["inspect_topology"](
-        ctx, {"document": "Doc", "object": "Shell", "role": "face", "limit": 1}
+        ctx, {"document": "Doc", "target": {"object": "Shell"}, "limit": 1, "detail": "full"}
     )
 
     assert result["total"] == 130
@@ -1138,7 +1266,7 @@ def test_inspect_topology_face_items_carry_descriptive_data():
     assert item["area"] == 1.0
     assert item["center"] == [0.0, 0.0, 0.0]
     assert item["normal"] == [0.0, 0.0, 1.0]
-    assert item["surfaceType"] == "FakeCylinderSurface"
+    assert item["surfaceType"] == "Cylinder"
     assert item["radius"] == 5.0
     assert item["axis"] == [0.0, 0.0, 1.0]
     reference = item["reference"]
@@ -1149,18 +1277,24 @@ def test_inspect_topology_face_items_carry_descriptive_data():
 def test_inspect_topology_edge_items_carry_descriptive_data():
     ctx = _topology_doc()
     result = geometry.HANDLERS["inspect_topology"](
-        ctx, {"document": "Doc", "object": "Shell", "role": "edge"}
+        ctx,
+        {
+            "document": "Doc",
+            "target": {"object": "Shell", "query": [{"role": "edge"}]},
+            "detail": "full",
+        },
     )
 
+    assert result["role"] == "edge"
     assert result["total"] == 2
     first, second = result["items"]
-    assert first["curveType"] == "FakeCircleCurve"
+    assert first["curveType"] == "Circle"
     assert first["closed"] is True
     assert first["length"] == 4.0
     assert first["radius"] == 2.5
     assert first["center"] == [1.0, 2.0, 3.0]
     assert first["axis"] == [0.0, 0.0, 1.0]
-    assert second["curveType"] is None
+    assert second["curveType"] == "Line"
     assert second["closed"] is False
     assert second["start"] == [0.0, 0.0, 0.0]
     assert second["end"] == [4.0, 0.0, 0.0]
@@ -1169,7 +1303,7 @@ def test_inspect_topology_edge_items_carry_descriptive_data():
 
 def test_topology_cursor_rejects_generation_change_and_mismatched_arguments():
     ctx = _topology_doc()
-    arguments = {"document": "Doc", "object": "Shell", "role": "face", "limit": 50}
+    arguments = {"document": "Doc", "target": {"object": "Shell"}, "limit": 50}
     first = geometry.HANDLERS["inspect_topology"](ctx, arguments)
     cursor = first["nextCursor"]
     assert cursor is not None
@@ -1181,20 +1315,27 @@ def test_topology_cursor_rejects_generation_change_and_mismatched_arguments():
     assert stale.value.details["nextTool"] == "inspect_topology"
 
     ctx.generation -= 1
-    with pytest.raises(protocol.ToolError) as role_changed:
-        geometry.HANDLERS["inspect_topology"](ctx, {**arguments, "role": "edge", "cursor": cursor})
-    assert role_changed.value.details["reason"] == "stale_cursor"
-    assert role_changed.value.details["nextTool"] == "inspect_topology"
-
     with pytest.raises(protocol.ToolError) as limit_changed:
         geometry.HANDLERS["inspect_topology"](ctx, {**arguments, "limit": 10, "cursor": cursor})
     assert limit_changed.value.details["reason"] == "stale_cursor"
     assert limit_changed.value.details["nextTool"] == "inspect_topology"
 
+    # The cursor is bound to the canonical target: changing the selector is
+    # a different request and refuses as stale.
+    selector_changed = {
+        "document": "Doc",
+        "target": {"object": "Shell", "query": [{"role": "face", "selector": "%CYLINDER"}]},
+        "limit": 50,
+        "cursor": cursor,
+    }
+    with pytest.raises(protocol.ToolError) as changed:
+        geometry.HANDLERS["inspect_topology"](ctx, selector_changed)
+    assert changed.value.details["reason"] == "stale_cursor"
+
 
 def test_topology_cursor_rejects_malformed_indexes():
     ctx = _topology_doc()
-    arguments = {"document": "Doc", "object": "Shell", "role": "face", "limit": 50}
+    arguments = {"document": "Doc", "target": {"object": "Shell"}, "limit": 50}
 
     for bad_last in (0, -3, "7", True, 1.5):
         payload = {
@@ -1204,6 +1345,7 @@ def test_topology_cursor_rejects_malformed_indexes():
             "object": "Shell",
             "role": "face",
             "limit": 50,
+            "queryHash": protocol.fingerprint({"object": "Shell"}),
             "last": bad_last,
         }
         cursor = ctx.signer.sign("cursor", payload)
@@ -1220,8 +1362,7 @@ def test_topology_cursor_rejects_malformed_signed_token():
             ctx,
             {
                 "document": "Doc",
-                "object": "Shell",
-                "role": "face",
+                "target": {"object": "Shell"},
                 "cursor": "bogus.cursor",
             },
         )
@@ -1231,51 +1372,69 @@ def test_topology_cursor_rejects_malformed_signed_token():
     assert malformed.value.details["nextTool"] == "inspect_topology"
 
 
-def test_inspect_topology_indices_return_exact_rows_ascending():
+def test_inspect_topology_signed_target_returns_one_row():
+    ctx = _topology_doc()
+    page = geometry.HANDLERS["inspect_topology"](
+        ctx, {"document": "Doc", "target": {"object": "Shell"}, "limit": 2}
+    )
+    reference = page["items"][1]["reference"]
+
+    result = geometry.HANDLERS["inspect_topology"](ctx, {"document": "Doc", "target": reference})
+
+    _assert_output_schema(result, "inspect_topology")
+    assert result["total"] == 1
+    assert result["count"] == 1
+    assert [item["index"] for item in result["items"]] == [2]
+    assert result["items"][0]["reference"] == reference
+    assert result["nextCursor"] is None
+
+
+def test_inspect_topology_query_returns_final_stage_set_only():
     ctx = _topology_doc()
     result = geometry.HANDLERS["inspect_topology"](
-        ctx, {"document": "Doc", "object": "Shell", "role": "face", "indices": [5, 2]}
+        ctx,
+        {
+            "document": "Doc",
+            "target": {
+                "object": "Shell",
+                "query": [{"role": "face", "selector": "%CYLINDER"}, {"role": "edge"}],
+            },
+        },
     )
 
     _assert_output_schema(result, "inspect_topology")
-    assert [item["index"] for item in result["items"]] == [2, 5]
-    assert result["total"] == 130
-    assert result["count"] == 2
-    assert result["nextCursor"] is None
-    for item in result["items"]:
-        assert item["reference"]["object"] == "Shell"
+    assert result["role"] == "edge"
+    # One cylinder face contributes its one circular edge.
+    assert result["total"] == 1
+    assert result["items"][0]["curveType"] == "Circle"
 
 
-def test_inspect_topology_rejects_out_of_range_duplicate_and_cursor_mix():
-    ctx = _topology_doc()
-    base = {"document": "Doc", "object": "Shell", "role": "face"}
+def test_inspect_topology_rejects_removed_input_forms():
+    """Top-level object/role/indices are removed wire inputs."""
 
-    with pytest.raises(protocol.ToolError) as out_of_range:
-        geometry.HANDLERS["inspect_topology"](ctx, {**base, "indices": [131]})
-    assert out_of_range.value.details == {
-        "reason": "index_out_of_range",
-        "index": 131,
-        "total": 130,
-    }
-
-    with pytest.raises(protocol.ToolError) as duplicate:
-        geometry.HANDLERS["inspect_topology"](ctx, {**base, "indices": [3, 2, 3]})
-    assert duplicate.value.details == {"reason": "duplicate_index", "index": 3}
-
-    first = geometry.HANDLERS["inspect_topology"](ctx, {**base, "limit": 50})
-    with pytest.raises(protocol.ToolError) as mixed:
+    definition = _definition("inspect_topology")
+    for removed in (
+        {"document": "Doc", "object": "Shell", "role": "face"},
+        {"document": "Doc", "object": "Shell", "role": "face", "indices": [1]},
+    ):
+        with pytest.raises(protocol.ProtocolError):
+            protocol.validate_schema(removed, definition["inputSchema"])
+    # A raw numeric label is a resolvable-looking string, so the wire schema
+    # cannot reject it; the shared resolver refuses it as non-durable.
+    with pytest.raises(protocol.ToolError) as numeric:
         geometry.HANDLERS["inspect_topology"](
-            ctx, {**base, "indices": [2], "cursor": first["nextCursor"]}
+            ctx=_topology_doc(),
+            arguments={"document": "Doc", "target": {"object": "Shell", "subelement": "Face1"}},
         )
-    assert mixed.value.details == {"reason": "indices_with_cursor"}
+    assert numeric.value.code == protocol.VALIDATION_FAILED
+    assert "not durable" in numeric.value.message
 
 
 def test_inspect_topology_compact_rows_carry_only_the_compact_keys():
     ctx = _topology_doc()
 
     faces = geometry.HANDLERS["inspect_topology"](
-        ctx,
-        {"document": "Doc", "object": "Shell", "role": "face", "indices": [1], "detail": "compact"},
+        ctx, {"document": "Doc", "target": {"object": "Shell"}, "limit": 1}
     )
     assert set(faces["items"][0]) == {"index", "reference", "bounds", "surfaceType"}
 
@@ -1283,10 +1442,7 @@ def test_inspect_topology_compact_rows_carry_only_the_compact_keys():
         ctx,
         {
             "document": "Doc",
-            "object": "Shell",
-            "role": "edge",
-            "indices": [1, 2],
-            "detail": "compact",
+            "target": {"object": "Shell", "query": [{"role": "edge"}]},
         },
     )
     for item in edges["items"]:
@@ -1302,7 +1458,7 @@ def test_inspect_topology_unknown_object_is_object_not_found():
     ctx = _topology_doc()
     with pytest.raises(protocol.ToolError) as excinfo:
         geometry.HANDLERS["inspect_topology"](
-            ctx, {"document": "Doc", "object": "Ghost", "role": "face"}
+            ctx, {"document": "Doc", "target": {"object": "Ghost"}}
         )
     assert excinfo.value.code == protocol.OBJECT_NOT_FOUND
 
@@ -1310,7 +1466,7 @@ def test_inspect_topology_unknown_object_is_object_not_found():
 def test_measure_accepts_signed_topology_reference_selectors():
     ctx = _topology_doc(face_count=3)
     page = geometry.HANDLERS["inspect_topology"](
-        ctx, {"document": "Doc", "object": "Shell", "role": "face", "limit": 2}
+        ctx, {"document": "Doc", "target": {"object": "Shell"}, "limit": 2}
     )
     reference = page["items"][1]["reference"]
 
@@ -1330,7 +1486,11 @@ def test_measure_accepts_signed_topology_reference_selectors():
 def test_measure_rejects_reference_incompatible_with_mode():
     ctx = _topology_doc()
     page = geometry.HANDLERS["inspect_topology"](
-        ctx, {"document": "Doc", "object": "Shell", "role": "edge"}
+        ctx,
+        {
+            "document": "Doc",
+            "target": {"object": "Shell", "query": [{"role": "edge"}]},
+        },
     )
     edge_reference = page["items"][0]["reference"]
 
@@ -1381,7 +1541,7 @@ def test_reference_list_accepts_same_object_faces_in_order():
     resolved, labels = geometry.resolve_reference_list(
         ctx,
         doc,
-        {"object": "Base", "subelement": ""},
+        {"object": "Base"},
         [_face_reference(ctx, doc, base, 2), _face_reference(ctx, doc, base, 1)],
         "face",
     )
@@ -1397,7 +1557,7 @@ def test_reference_list_rejects_a_foreign_object():
         geometry.resolve_reference_list(
             ctx,
             doc,
-            {"object": "Base", "subelement": ""},
+            {"object": "Base"},
             [_face_reference(ctx, doc, other, 1)],
             "face",
         )
@@ -1412,7 +1572,7 @@ def test_reference_list_rejects_duplicates_and_wrong_role():
 
     with pytest.raises(protocol.ToolError) as dup:
         geometry.resolve_reference_list(
-            ctx, doc, {"object": "Base", "subelement": ""}, [duplicate, duplicate], "face"
+            ctx, doc, {"object": "Base"}, [duplicate, duplicate], "face"
         )
     assert "duplicates" in dup.value.message
 
@@ -1420,7 +1580,7 @@ def test_reference_list_rejects_duplicates_and_wrong_role():
         geometry.resolve_reference_list(
             ctx,
             doc,
-            {"object": "Base", "subelement": ""},
+            {"object": "Base"},
             [_face_reference(ctx, doc, base, 1)],
             "edge",
         )
@@ -1434,8 +1594,8 @@ def test_reference_list_rejects_a_whole_object_entry():
         geometry.resolve_reference_list(
             ctx,
             doc,
-            {"object": "Base", "subelement": ""},
-            [{"object": "Base", "subelement": ""}],
+            {"object": "Base"},
+            [{"object": "Base"}],
             "face",
         )
 
@@ -1449,7 +1609,7 @@ def test_reference_list_enforces_the_32_item_boundary():
     resolved, labels = geometry.resolve_reference_list(
         ctx,
         doc,
-        {"object": "Base", "subelement": ""},
+        {"object": "Base"},
         accepted,
         "face",
     )
@@ -1461,9 +1621,495 @@ def test_reference_list_enforces_the_32_item_boundary():
         geometry.resolve_reference_list(
             ctx,
             doc,
-            {"object": "Base", "subelement": ""},
+            {"object": "Base"},
             oversized,
             "face",
         )
     assert excinfo.value.code == protocol.VALIDATION_FAILED
     assert "at most 32" in excinfo.value.message
+
+
+# ---------------------------------------------------------------------------
+# validate_geometry: declarative acceptance checks.
+# ---------------------------------------------------------------------------
+
+
+def _solid(name, volume=1000.0, bounds=(0.0, 0.0, 0.0, 10.0, 10.0, 10.0)):
+    return FakeObject(name, FakeShape(volume=volume, bounds=bounds, solids=1))
+
+
+def test_validate_requires_objects_or_checks():
+    ctx = FakeCtx({"Box": _solid("Box")})
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.HANDLERS["validate_geometry"](ctx, {"document": "Doc"})
+    assert excinfo.value.code == protocol.VALIDATION_FAILED
+    assert "never defaults" in excinfo.value.message
+
+
+def test_volume_range_check_pass_and_fail():
+    ctx = FakeCtx({"Box": _solid("Box", volume=10.0)})
+    within = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [{"kind": "volume_range", "object": {"object": "Box"}, "min": 5.0}],
+        },
+    )
+    _assert_output_schema(within, "validate_geometry")
+    assert within["checks"][0]["id"] == "check-1"
+    assert within["checks"][0]["status"] == "pass"
+    assert within["checks"][0]["measured"] == 10.0
+    assert within["checksPassed"] is True
+    assert within["accepted"] is True
+    # The derived owner object report is present without an explicit objects.
+    assert [entry["name"] for entry in within["objects"]] == ["Box"]
+
+    above = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [{"kind": "volume_range", "object": {"object": "Box"}, "max": 5.0}],
+        },
+    )
+    assert above["checks"][0]["status"] == "fail"
+    assert above["checksPassed"] is False
+    assert above["accepted"] is False
+
+
+def test_volume_range_missing_bounds_refuses_before_evaluation():
+    ctx = FakeCtx({"Box": _solid("Box")})
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.HANDLERS["validate_geometry"](
+            ctx,
+            {"document": "Doc", "checks": [{"kind": "volume_range", "object": {"object": "Box"}}]},
+        )
+    assert excinfo.value.details["reason"] == "empty_volume_range"
+
+    with pytest.raises(protocol.ToolError) as inverted:
+        geometry.HANDLERS["validate_geometry"](
+            ctx,
+            {
+                "document": "Doc",
+                "checks": [
+                    {"kind": "volume_range", "object": {"object": "Box"}, "min": 5.0, "max": 1.0}
+                ],
+            },
+        )
+    assert inverted.value.details["reason"] == "invalid_volume_range"
+
+
+def test_check_ids_default_by_position_and_duplicates_refuse():
+    ctx = FakeCtx({"A": _solid("A"), "B": _solid("B")})
+    result = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [
+                {"kind": "volume_range", "object": {"object": "A"}, "min": 1.0},
+                {"kind": "volume_range", "object": {"object": "B"}, "min": 1.0},
+            ],
+        },
+    )
+    assert [row["id"] for row in result["checks"]] == ["check-1", "check-2"]
+
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.HANDLERS["validate_geometry"](
+            ctx,
+            {
+                "document": "Doc",
+                "checks": [
+                    {"kind": "volume_range", "object": {"object": "A"}, "min": 1.0, "id": "dup"},
+                    {"kind": "volume_range", "object": {"object": "B"}, "min": 1.0, "id": "dup"},
+                ],
+            },
+        )
+    assert excinfo.value.details["reason"] == "duplicate_check_id"
+
+
+def test_check_unknown_object_fails_the_call():
+    ctx = FakeCtx({"Box": _solid("Box")})
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.HANDLERS["validate_geometry"](
+            ctx,
+            {
+                "document": "Doc",
+                "checks": [{"kind": "volume_range", "object": {"object": "Ghost"}, "min": 1.0}],
+            },
+        )
+    assert excinfo.value.code == protocol.OBJECT_NOT_FOUND
+
+
+def test_check_shapeless_object_is_indeterminate():
+    shapeless = FakeObject("Sketch", None)
+    ctx = FakeCtx({"Sketch": shapeless})
+    result = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [{"kind": "volume_range", "object": {"object": "Sketch"}, "min": 1.0}],
+        },
+    )
+    _assert_output_schema(result, "validate_geometry")
+    row = result["checks"][0]
+    assert row["status"] == "indeterminate"
+    assert row["reason"] == "target_shapeless"
+    assert result["checksPassed"] is False
+    assert result["accepted"] is False
+
+
+def test_check_non_volumetric_shell_cannot_pass():
+    # A valid shell with no solids and zero volume must never satisfy a fit
+    # check: zero common volume is not clearance evidence.
+    shell = FakeObject("Shell", FakeShape(volume=0.0, solids=0, bounds=(0, 0, 0, 5, 5, 5)))
+    ctx = FakeCtx({"Shell": shell, "Box": _solid("Box")})
+    result = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [
+                {
+                    "kind": "interference_max",
+                    "a": {"object": "Shell"},
+                    "b": {"object": "Box"},
+                }
+            ],
+        },
+    )
+    row = result["checks"][0]
+    assert row["status"] == "indeterminate"
+    assert row["reason"] == "non_volumetric_target"
+
+
+def test_check_clearance_and_interference_semantics():
+    a = _solid("A")
+    b = _solid("B")
+    ctx = FakeCtx({"A": a, "B": b})
+
+    # Positive clearance: distance 2, no common volume.
+    a.Shape._distance = (2.0, [(FakeVector(0, 0, 0), FakeVector(2, 0, 0))], None)
+    a.Shape._common = FakeShape(volume=0.0, solids=0)
+    passed = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [
+                {"kind": "clearance_min", "a": {"object": "A"}, "b": {"object": "B"}, "min": 1.0}
+            ],
+        },
+    )
+    _assert_output_schema(passed, "validate_geometry")
+    row = passed["checks"][0]
+    assert row["status"] == "pass"
+    assert row["distance"] == 2.0
+    assert row["common_volume"] == 0.0
+    assert row["max_interference"] == 0
+
+    # Positive distance with overlapping volume is NOT clearance.
+    a.Shape._common = FakeShape(volume=1.0, solids=1)
+    overlapped = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [
+                {"kind": "clearance_min", "a": {"object": "A"}, "b": {"object": "B"}, "min": 1.0}
+            ],
+        },
+    )
+    assert overlapped["checks"][0]["status"] == "fail"
+    assert overlapped["checks"][0]["common_volume"] == 1.0
+
+    # Touching (zero distance, zero common volume) satisfies a zero-margin
+    # interference_max but never a positive clearance.
+    a.Shape._distance = (0.0, [(FakeVector(0, 0, 0), FakeVector(0, 0, 0))], None)
+    a.Shape._common = FakeShape(volume=0.0, solids=0)
+    touching_interference = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [{"kind": "interference_max", "a": {"object": "A"}, "b": {"object": "B"}}],
+        },
+    )
+    assert touching_interference["checks"][0]["status"] == "pass"
+    assert touching_interference["checks"][0]["max"] == 0
+    touching_clearance = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [
+                {"kind": "clearance_min", "a": {"object": "A"}, "b": {"object": "B"}, "min": 1.0}
+            ],
+        },
+    )
+    assert touching_clearance["checks"][0]["status"] == "fail"
+
+
+def test_clearance_min_rejects_a_zero_margin():
+    ctx = FakeCtx({"A": _solid("A"), "B": _solid("B")})
+    with pytest.raises(protocol.ToolError) as excinfo:
+        geometry.HANDLERS["validate_geometry"](
+            ctx,
+            {
+                "document": "Doc",
+                "checks": [
+                    {"kind": "clearance_min", "a": {"object": "A"}, "b": {"object": "B"}, "min": 0}
+                ],
+            },
+        )
+    assert excinfo.value.code == protocol.VALIDATION_FAILED
+    assert "greater than zero" in excinfo.value.message
+
+    definition = _definition("validate_geometry")
+    with pytest.raises(protocol.ProtocolError):
+        protocol.validate_schema(
+            {
+                "document": "Doc",
+                "checks": [
+                    {"kind": "clearance_min", "a": {"object": "A"}, "b": {"object": "B"}, "min": 0}
+                ],
+            },
+            definition["inputSchema"],
+        )
+
+
+def test_nonfinite_measurement_is_indeterminate_never_a_type_error():
+    a = _solid("A")
+    b = _solid("B")
+    # A nonfinite distance must not explode into a TypeError from a
+    # comparison, and must never count as a pass.
+    a.Shape._distance = (float("nan"), None, None)
+    a.Shape._common = FakeShape(volume=0.0, solids=0)
+    ctx = FakeCtx({"A": a, "B": b})
+    result = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [
+                {"kind": "clearance_min", "a": {"object": "A"}, "b": {"object": "B"}, "min": 1.0}
+            ],
+        },
+    )
+    _assert_output_schema(result, "validate_geometry")
+    row = result["checks"][0]
+    assert row["status"] == "indeterminate"
+    assert row["reason"] == "measurement_unavailable"
+    assert result["checksPassed"] is False
+
+
+def test_checks_absent_omits_check_only_fields():
+    ctx = FakeCtx({"Box": _solid("Box")})
+    result = geometry.HANDLERS["validate_geometry"](ctx, {"document": "Doc", "objects": ["Box"]})
+    _assert_output_schema(result, "validate_geometry")
+    for key in ("checks", "checksPassed", "accepted", "resolvedSelections"):
+        assert key not in result
+
+
+def test_query_check_targets_report_receipts():
+    a = _solid("A")
+    b = _solid("B")
+    face = FakeFace(area=1.0, bounds=(0.0, 0.0, 0.0, 1.0, 1.0, 1.0), center=(0.0, 0.0, 0.5))
+    a.Shape.Faces = [face]
+    a.Shape._distance = (2.0, [(FakeVector(0, 0, 0), FakeVector(2, 0, 0))], None)
+    a.Shape._common = FakeShape(volume=0.0, solids=0)
+    ctx = FakeCtx({"A": a, "B": b})
+    result = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [
+                {
+                    "kind": "clearance_min",
+                    "a": {"object": "A", "query": [{"role": "face", "selector": ">Z"}]},
+                    "b": {"object": "B"},
+                    "min": 1.0,
+                }
+            ],
+        },
+    )
+    _assert_output_schema(result, "validate_geometry")
+    row = result["checks"][0]
+    # A single face is not a volumetric target, so the row is indeterminate;
+    # the receipt still records the selection-time resolution.
+    assert row["status"] == "indeterminate"
+    assert row["reason"] == "non_volumetric_target"
+    receipts = result["resolvedSelections"]
+    assert receipts[0]["parameter"] == "checks.check-1.a"
+    assert receipts[0]["count"] == 1
+    assert receipts[0]["generation"] == ctx.generation
+
+
+def test_query_axis_predicate_matches_a_cylindrical_face():
+    """Analytic axis data is read for cylinder faces, not only cones/tori."""
+
+    bore = FakeFace(
+        area=1.0,
+        bounds=(0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+        center=(0.0, 0.0, 5.0),
+        surface=Cylinder(radius=4.0, axis=(0.0, 0.0, 1.0)),
+    )
+    shell = FakeObject("Shell", FakeShape(faces=[bore]))
+    ctx = FakeCtx({"Shell": shell})
+
+    def axis_query(direction):
+        return geometry.HANDLERS["inspect_topology"](
+            ctx,
+            {
+                "document": "Doc",
+                "target": {
+                    "object": "Shell",
+                    "query": [{"role": "face", "axis": {"direction": direction}}],
+                },
+            },
+        )
+
+    # Coaxial (and sign-insensitively opposite) matches; perpendicular does not.
+    assert axis_query([0.0, 0.0, 1.0])["total"] == 1
+    assert axis_query([0.0, 0.0, -1.0])["total"] == 1
+    assert axis_query([1.0, 0.0, 0.0])["total"] == 0
+
+
+def test_query_radius_predicate_matches_a_cylindrical_face():
+    bore = FakeFace(
+        area=1.0,
+        bounds=(0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+        center=(0.0, 0.0, 5.0),
+        surface=Cylinder(radius=4.0, axis=(0.0, 0.0, 1.0)),
+    )
+    shell = FakeObject("Shell", FakeShape(faces=[bore]))
+    ctx = FakeCtx({"Shell": shell})
+
+    def radius_query(minimum, maximum):
+        return geometry.HANDLERS["inspect_topology"](
+            ctx,
+            {
+                "document": "Doc",
+                "target": {
+                    "object": "Shell",
+                    "query": [{"role": "face", "radius": {"min": minimum, "max": maximum}}],
+                },
+            },
+        )
+
+    assert radius_query(3.0, 5.0)["total"] == 1
+    assert radius_query(5.0, 6.0)["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Subshape fingerprints (post-normalization correspondence evidence).
+# ---------------------------------------------------------------------------
+
+
+def _segment(length=10.0, *, curve=None, dims=(0.0, 0.0, 0.0)):
+    """A straight native edge double from the origin along +X."""
+
+    _, y, z = dims
+    return FakeEdge(
+        length=length,
+        bounds=(0.0, y, z, length, y, z),
+        curve=curve,
+        points=((0.0, y, z), (length, y, z)),
+        center=(length / 2.0, y, z),
+    )
+
+
+def test_fingerprint_is_plain_immutable_evidence():
+    """The fingerprint carries no native reference and no mutable field."""
+
+    fingerprint = geometry.subshape_fingerprint("edge", _segment())
+
+    assert fingerprint["role"] == "edge"
+    assert fingerprint["type"] == "LINE"
+    assert fingerprint["closed"] is False
+    assert fingerprint["bounds"] == (0.0, 0.0, 0.0, 10.0, 0.0, 0.0)
+    assert fingerprint["measure"] == 10.0
+    assert fingerprint["center"] == (5.0, 0.0, 0.0)
+    assert fingerprint["point"] == (5.0, 0.0, 0.0)
+    assert fingerprint["start"] == (0.0, 0.0, 0.0)
+    assert fingerprint["end"] == (10.0, 0.0, 0.0)
+    assert fingerprint["radius"] is None and fingerprint["axis"] is None
+    # No native object survives into the snapshot, so a recompute that
+    # replaces the shape cannot reach into it.
+    assert all(
+        isinstance(value, (str, bool, float, tuple, type(None))) for value in fingerprint.values()
+    )
+
+
+def test_fingerprints_match_regenerated_but_equivalent_edges():
+    """Equal regenerated geometry matches; the tolerance window governs floats."""
+
+    original = geometry.subshape_fingerprint("edge", _segment())
+
+    # A brand-new double with identical geometry.
+    assert geometry.fingerprints_match(original, geometry.subshape_fingerprint("edge", _segment()))
+    # Inside the shared tolerance the regenerated length still matches...
+    assert geometry.fingerprints_match(
+        original, geometry.subshape_fingerprint("edge", _segment(10.0 + 1e-9))
+    )
+    # ...and outside it the fingerprint refuses.
+    assert not geometry.fingerprints_match(
+        original, geometry.subshape_fingerprint("edge", _segment(10.0 + 1e-3))
+    )
+
+
+def test_fingerprints_compare_discrete_fields_exactly():
+    """Same coarse facts, different analytic type or direction: a mismatch."""
+
+    line = geometry.subshape_fingerprint("edge", _segment())
+    # Identical bounds, length, center and endpoints; only the mapped curve
+    # class differs.
+    circle = geometry.subshape_fingerprint(
+        "edge", _segment(curve=Circle(radius=5.0, axis=(0.0, 0.0, 1.0)))
+    )
+    assert circle["bounds"] == line["bounds"] and circle["measure"] == line["measure"]
+    assert not geometry.fingerprints_match(line, circle)
+    assert not geometry.fingerprints_match(circle, line)
+
+    # Reversed traversal (and therefore tangent) with the same bounds, length
+    # and center of mass.
+    reversed_edge = FakeEdge(
+        length=10.0,
+        bounds=(0.0, 0.0, 0.0, 10.0, 0.0, 0.0),
+        points=((10.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+        center=(5.0, 0.0, 0.0),
+    )
+    reversed_edge._direction = (-1.0, 0.0, 0.0)
+    mirrored = geometry.subshape_fingerprint("edge", reversed_edge)
+    assert mirrored["bounds"] == line["bounds"] and mirrored["center"] == line["center"]
+    assert not geometry.fingerprints_match(line, mirrored)
+
+
+def test_fingerprint_refuses_when_required_evidence_is_unreadable():
+    """An unreadable or inapplicable field is a gap, never a silent match."""
+
+    opaque = SimpleNamespace(Length=10.0)
+    fingerprint = geometry.subshape_fingerprint("edge", opaque)
+    assert fingerprint["type"] is None and fingerprint["bounds"] is None
+    # Two identical opaque doubles must still not match: neither can prove
+    # the geometry they stand for.
+    assert not geometry.fingerprints_match(
+        fingerprint, geometry.subshape_fingerprint("edge", SimpleNamespace(Length=10.0))
+    )
+    assert not geometry.fingerprints_match(
+        geometry.subshape_fingerprint("edge", _segment()), fingerprint
+    )
+
+
+def test_subshape_fingerprints_require_the_complete_index_set():
+    """An unreadable array or an out-of-range index yields no evidence."""
+
+    shape = FakeShape(edges=[_segment(), _segment(dims=(0.0, 5.0, 0.0))])
+
+    fingerprints = geometry.subshape_fingerprints(shape, "edge", [1, 2])
+    assert set(fingerprints) == {1, 2}
+    assert not geometry.fingerprints_match(fingerprints[1], fingerprints[2])
+
+    assert geometry.subshape_fingerprints(shape, "edge", [3]) is None
+    assert geometry.subshape_fingerprints(shape, "edge", [0]) is None
+
+
+def test_subshape_fingerprints_return_none_when_the_array_is_unreadable():
+    class UnreadableShape:
+        @property
+        def Edges(self):
+            raise RuntimeError("element map is gone")
+
+    assert geometry.subshape_fingerprints(UnreadableShape(), "edge", [1]) is None

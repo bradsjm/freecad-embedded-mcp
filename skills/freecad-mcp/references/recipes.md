@@ -15,7 +15,7 @@ Use this file for common payloads. Replace names, dimensions, paths, and expecta
 - [Import a reference model](#import-a-reference-model)
 - [Validate save and export](#validate-save-and-export)
 - [Run FEM](#run-fem)
-- [Use the Python escape hatch](#use-the-python-escape-hatch)
+- [Cut and fuse without scripts](#cut-and-fuse-without-scripts)
 
 ## Start or select a document
 
@@ -164,7 +164,7 @@ Create the pad:
 
 Prefer typed `parameters`. Do not combine `parameters` with raw `properties`.
 
-Edit a supported scalar feature after inspection:
+Edit a supported scalar feature after inspection. Omit `response_detail` for the compact default; pass `"full"` when the `parameterValues` rows must also carry their `before` state:
 
 ```json
 {
@@ -173,8 +173,7 @@ Edit a supported scalar feature after inspection:
   "object":"Pad",
   "parameters":{"extent":"distance","length":12},
   "expected_generation":4,
-  "expected_solids":1,
-  "response_detail":"compact"
+  "expected_solids":1
 }
 ```
 
@@ -266,30 +265,72 @@ Require `cellContentsPersisted: true` in the change result. Then inspect only th
 
 ## Inspect topology and measure fit
 
-Get stable data for selected faces:
+Enumerate an object's faces with a whole-object target:
 
 ```json
-{"document":"Assembly","object":"Housing","role":"faces","indices":[1,4],"detail":"full"}
+{"document":"Assembly","target":{"object":"Housing"},"detail":"full"}
 ```
 
-Use `inspect_topology`. Reinspect after an upstream geometry change because signed references bind to a generation.
-
-Check two mating objects with both modes:
+Select declaratively with shared query descriptors, and reuse the exact payload in every consumer that accepts its shape. Two cover the common cases: the face query `{"object":"Pad","query":[{"role":"face","selector":">Z"}]}` resolves to exactly the one face farthest along +Z, and the edge query `{"object":"Pad","query":[{"role":"edge","selector":"|Z"}]}` matches the four vertical edges of a box pad.
 
 ```json
-{"document":"Assembly","a":"Insert","b":"Housing","mode":"distance"}
+{"document":"Bracket","target":{"object":"Pad","query":[{"role":"face","selector":">Z"}]}}
 ```
 
+Use `inspect_topology` to resolve either descriptor and read its signed references; a two-step chain such as `faces >Z` then `edges %CIRCLE` narrows to the top perimeter. Reinspect after an upstream geometry change because signed references bind to a generation, and a pagination cursor refuses `stale_cursor` after a target or generation change.
+
+The face payload is reused verbatim as a `measure` target — it resolves to one shape, so the singleton consumer accepts it:
+
 ```json
-{"document":"Assembly","a":"Insert","b":"Housing","mode":"interference"}
+{"document":"Bracket","a":{"object":"Pad","query":[{"role":"face","selector":">Z"}]},"b":{"object":"Lid"},"mode":"distance"}
+```
+
+The edge payload is the same four-candidate set everywhere. `measure` needs exactly one shape, so it refuses with `selection_ambiguous`, `matchCount: 4`, and the bounded candidate list:
+
+```json
+{"document":"Bracket","a":{"object":"Pad","query":[{"role":"edge","selector":"|Z"}]},"b":{"object":"Lid"},"mode":"distance"}
 ```
 
 Use `measure`. Require the intended minimum distance and zero unintended common volume.
 
+A fillet subelement list is a set consumer: the same edge payload expands to its four matches within the 32-reference cap:
+
+```json
+{
+  "document":"Bracket",
+  "body":"Body",
+  "kind":"fillet",
+  "name":"EdgeRound",
+  "parameters":{
+    "base":{"object":"Pad"},
+    "subelements":[{"object":"Pad","query":[{"role":"edge","selector":"|Z"}]}],
+    "radius":2
+  }
+}
+```
+
+`capture_view` focus consumes exactly one result, so the same face payload drives the `detail` orientation:
+
+```json
+{"document":"Bracket","mode":"detail","focus":{"object":"Pad","query":[{"role":"face","selector":">Z"}]}}
+```
+
+Every operation that resolved a query reports `resolvedSelections`: the parameter path, the selection-time generation, and the signed references that were bound.
+
+Check two mating whole objects with both modes:
+
+```json
+{"document":"Assembly","a":{"object":"Insert"},"b":{"object":"Housing"},"mode":"distance"}
+```
+
+```json
+{"document":"Assembly","a":{"object":"Insert"},"b":{"object":"Housing"},"mode":"interference"}
+```
+
 To quantify material a change added or removed, use `difference` (`a.cut(b)`):
 
 ```json
-{"document":"Bracket","a":"BracketFinal","b":"BracketBlank","mode":"difference"}
+{"document":"Bracket","a":{"object":"BracketFinal"},"b":{"object":"BracketBlank"},"mode":"difference"}
 ```
 
 `difference_volume` is the material of `a` that `b` does not cover; a fully consumed `a` reports 0 with null bounds and no solids.
@@ -327,7 +368,7 @@ Use `validate_geometry`. Use actual schema shapes from `tools/list` if validatio
 Capture one review sheet:
 
 ```json
-{"tool": "capture_view", "arguments": {"document": "Bracket", "focus_object": "Body"}}
+{"tool": "capture_view", "arguments": {"document": "Bracket", "focus": {"object": "Body"}}}
 ```
 
 The default `overview` mode returns one labeled sheet covering `Isometric`, `Front`, `Top`, `Bottom`, and the side orientations, so the bed-facing view needs no second call. Use `interior` for internal features and `fit` for a mating interface when the question needs them.
@@ -356,7 +397,17 @@ Use the `export` readback as file evidence. Use `format:"step"` for solid exchan
 
 ## Run FEM
 
-Read `fem.md` first. Build the analysis graph with `create_object` and `edit_object`. Then call:
+Read `fem.md` first. Build the analysis graph with `create_object` and `edit_object`. Bind a constraint with the same edge query the fillet used — `References` are set consumers, and query entries expand in order:
+
+```json
+{
+  "document":"Bracket",
+  "object":"FixBase",
+  "properties":{"References":[{"object":"Pad","query":[{"role":"edge","selector":"|Z"}]}]}
+}
+```
+
+Use `edit_object`; the receipt reports the signed references chosen at selection time. Keep the `analysis` name explicit when the constraint joins the analysis group. Then call:
 
 ```json
 {"document":"Bracket","analysis":"Analysis","timeout_s":600}
@@ -364,16 +415,43 @@ Read `fem.md` first. Build the analysis graph with `create_object` and `edit_obj
 
 Use `run_fem`. Poll `tasks/get` if the call detaches. Do not interpret a successful solve as a manufacturing safety proof.
 
-## Use the Python escape hatch
+## Cut and fuse without scripts
 
-Use `run_script` only when no structured tool expresses the operation:
+Part booleans are document objects. Wire them with `create_object` through canonical links, gate the geometry, and keep scripts for the operations no structured tool covers.
+
+Create the operands (any supported Part route):
+
+```json
+{"document":"Bracket","type":"Part::Box","name":"Blank","properties":{"Length":40,"Width":30,"Height":10},"expected_solids":1}
+```
+
+```json
+{"document":"Bracket","type":"Part::Cylinder","name":"Bore","properties":{"Radius":4,"Height":10,"Placement":{"position":[20,15,0],"axis":[0,0,1],"angle_deg":0}},"expected_solids":1}
+```
+
+Subtract through `Part::Cut`. `Base` and `Tool` are `PropertyLink` positions and take whole objects only — query targets refuse `subshape_not_allowed`:
 
 ```json
 {
-  "session_id":"bracket-build",
-  "timeout_s":90,
-  "code":"import Part\ndoc = App.getDocument('Bracket')\nobj = doc.getObject('Final') or doc.addObject('Part::Feature', 'Final')\nobj.Shape = Part.makeBox(40, 30, 5).cut(Part.makeCylinder(4, 5, App.Vector(20, 15, 0)))\ndoc.recompute()\nprint(obj.Name, obj.Shape.isValid(), len(obj.Shape.Solids), obj.Shape.Volume)"
+  "document":"Bracket",
+  "type":"Part::Cut",
+  "name":"BracketFinal",
+  "properties":{"Base":{"object":"Blank"},"Tool":{"object":"Bore"}},
+  "expected_solids":1,
+  "expected_bounds":[0,0,0,40,30,10]
 }
 ```
 
-Use internal document names. Reuse one session only when persistent variables help. Inspect and validate the resulting document through structured tools.
+Fuse through `Part::MultiFuse` with `Shapes` (a `PropertyLinkList`) — here two overlapping operands intended to form one connected solid:
+
+```json
+{
+  "document":"Bracket",
+  "type":"Part::MultiFuse",
+  "name":"Joined",
+  "properties":{"Shapes":[{"object":"Left"},{"object":"Right"}]},
+  "expected_solids":1
+}
+```
+
+Gate with `expected_solids`/`expected_bounds`, then confirm with `validate_geometry`. Set `expected_solids` from the design: disjoint operands legitimately produce multiple solids, and a mismatching expectation refuses and rolls back the creation. This is verified server wiring, not live boolean validation: the `supportedTypes` inventory proves availability, not the correctness of a boolean result. Scripts remain the escape hatch for named Part shape operations the structured tools do not express (`common`, `section`, shape fillets, sweeps); read [the run_script contract](python-export.md), use internal document names, and inspect and validate the resulting document through structured tools afterward.

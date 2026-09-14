@@ -51,6 +51,8 @@ _SKETCH_TYPE_ID = "Sketcher::SketchObject"
 #: inside FreeCAD and terminates the process (crash report
 #: freecad-2026-09-10-090417.ips: ConstraintPy::PyInit ->
 #: Py::TypeError::throwFunc -> std::terminate -> abort).
+#: The recorded forms include both whole-geometry and endpoint-specific
+#: Tangent variants; the latter is the solver-valid composite join.
 _CONSTRAINT_FORM_ARITIES: dict[str, frozenset[int]] = {
     "Coincident": frozenset({4}),
     "Horizontal": frozenset({1}),
@@ -60,7 +62,18 @@ _CONSTRAINT_FORM_ARITIES: dict[str, frozenset[int]] = {
     "Parallel": frozenset({2}),
     "Perpendicular": frozenset({2}),
     "Equal": frozenset({2}),
-    "Tangent": frozenset({2}),
+    # The endpoint-specific four-token form is the one composite profiles
+    # generate: Tangent(geoA, 2, geoB, 1) joins geoA's end point to
+    # geoB's start point and, natively, makes those end points coincide
+    # as part of the tangency. The two-token form is still accepted; it
+    # asks the solver for whole-geometry tangency only and leaves the
+    # shared end points free (a slot built from it alone stays at 13 DoF
+    # against the four-token form's 5). Pairing it with the generated
+    # Coincident joins, or adding a Coincident alongside the four-token
+    # form, repeats the coincidence and is reported redundant
+    # (solve() == -2, State Touched, Invalid), which is why the
+    # composites emit neither.
+    "Tangent": frozenset({2, 4}),
     "Symmetric": frozenset({5, 6}),
     # The sweep rejected the documented one-edge [geo, posA, posB] form;
     # the accepted one-edge forms are [geo, pos] and [geo, pos] with a
@@ -89,7 +102,9 @@ _CONSTRAINT_ARGUMENT_ROLES: dict[str, dict[int, tuple[str, ...]]] = {
     "Parallel": {2: ("G", "G")},
     "Perpendicular": {2: ("G", "G")},
     "Equal": {2: ("G", "G")},
-    "Tangent": {2: ("G", "G")},
+    # The four-token form is [geoA, posA, geoB, posB], the same
+    # second-geometry-is-a-start-point pairing the composites generate.
+    "Tangent": {2: ("G", "G"), 4: ("G", "P", "G", "P")},
     # The sweep accepted Symmetric:[0, 1, 1, 2, -1], so the fifth slot of
     # the five-token form is an axis-or-geometry reference like the
     # second slot of Coincident.
@@ -233,6 +248,32 @@ _GEOMETRY_ADD_SCHEMA = {
                 "radius": {"type": "number", "exclusiveMinimum": 0},
                 "sides": {"type": "integer", "minimum": 3, "maximum": 32},
                 "rotation": {"type": "number", "default": 0},
+                "construction": _CONSTRUCTION,
+            },
+        },
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "length", "diameter"],
+            "properties": {
+                "kind": {"const": "slot"},
+                "length": {"type": "number", "exclusiveMinimum": 0},
+                "diameter": {"type": "number", "exclusiveMinimum": 0},
+                "center": {**_XY_PAIR, "default": [0.0, 0.0]},
+                "rotation": {"type": "number", "default": 0},
+                "construction": _CONSTRUCTION,
+            },
+        },
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "width", "height", "corner_radius"],
+            "properties": {
+                "kind": {"const": "rounded_rectangle"},
+                "width": {"type": "number", "exclusiveMinimum": 0},
+                "height": {"type": "number", "exclusiveMinimum": 0},
+                "corner_radius": {"type": "number", "exclusiveMinimum": 0},
+                "origin": {**_XY_PAIR, "default": [0.0, 0.0]},
                 "construction": _CONSTRUCTION,
             },
         },
@@ -991,6 +1032,8 @@ def _validate_geometry_add(entry: Any, what: str) -> dict:
         "rectangle",
         "polyline",
         "regularPolygon",
+        "slot",
+        "rounded_rectangle",
     ):
         raise _fail(f"{what} has unsupported kind {kind!r}")
     checked: dict = {"kind": kind, "construction": bool(entry.get("construction"))}
@@ -1065,6 +1108,77 @@ def _validate_geometry_add(entry: Any, what: str) -> dict:
             }
         )
         return checked
+    if kind == "slot":
+        length = _finite(entry.get("length"))
+        diameter = _finite(entry.get("diameter"))
+        if length is None or diameter is None or not length > diameter > 0:
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"{what} requires a finite length greater than a positive "
+                f"finite diameter; got length {entry.get('length')!r}, "
+                f"diameter {entry.get('diameter')!r}",
+                {
+                    "reason": "invalid_slot_dimensions",
+                    "nextTool": "inspect_sketch",
+                },
+            )
+        center = entry.get("center", [0.0, 0.0])
+        if not isinstance(center, (list, tuple)) or len(center) != 2:
+            raise _fail(f"{what}.center must be an [x, y] pair")
+        values = [_finite(value) for value in center]
+        if any(value is None for value in values):
+            raise _fail(f"{what}.center must contain finite numbers")
+        rotation = _finite(entry.get("rotation", 0.0))
+        if rotation is None:
+            raise _fail(f"{what}.rotation must be a finite number")
+        checked.update(
+            {
+                "length": length,
+                "diameter": diameter,
+                "center": [float(value) for value in values],
+                "rotation": rotation,
+            }
+        )
+        return checked
+    if kind == "rounded_rectangle":
+        width = _finite(entry.get("width"))
+        height = _finite(entry.get("height"))
+        corner_radius = _finite(entry.get("corner_radius"))
+        if (
+            width is None
+            or width <= 0
+            or height is None
+            or height <= 0
+            or corner_radius is None
+            or corner_radius <= 0
+            or corner_radius >= min(width, height) / 2
+        ):
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"{what} requires finite positive width and height and "
+                f"0 < corner_radius < min(width, height) / 2; got width "
+                f"{entry.get('width')!r}, height {entry.get('height')!r}, "
+                f"corner_radius {entry.get('corner_radius')!r}",
+                {
+                    "reason": "invalid_corner_radius",
+                    "nextTool": "inspect_sketch",
+                },
+            )
+        origin = entry.get("origin", [0.0, 0.0])
+        if not isinstance(origin, (list, tuple)) or len(origin) != 2:
+            raise _fail(f"{what}.origin must be an [x, y] pair")
+        values = [_finite(value) for value in origin]
+        if any(value is None for value in values):
+            raise _fail(f"{what}.origin must contain finite numbers")
+        checked.update(
+            {
+                "origin": [float(value) for value in values],
+                "width": width,
+                "height": height,
+                "corner_radius": corner_radius,
+            }
+        )
+        return checked
     for field in ("x", "y"):
         if field in entry:
             value = _finite(entry[field])
@@ -1098,7 +1212,13 @@ def _validate_geometry_add(entry: Any, what: str) -> dict:
 def _expand_geometry_entries(
     entries: list[dict], geometry_offset: int = 0
 ) -> tuple[list[dict], list[dict]]:
-    """Expand semantic profiles into proven line-segment operations."""
+    """Expand semantic profiles into line-segment and arc operations.
+
+    Composite kinds expand here together with their full generated
+    constraint sets, and every generated constraint passes the same
+    recorded-form gate as a caller-supplied ``addConstraints`` entry
+    before it reaches the plan.
+    """
 
     def _segment(start: list[float], end: list[float], construction: bool) -> dict:
         if not all(math.isfinite(value) for point in (start, end) for value in point):
@@ -1110,11 +1230,47 @@ def _expand_geometry_entries(
             "construction": construction,
         }
 
+    def _arc(
+        center: list[float],
+        radius: float,
+        start_angle: float,
+        end_angle: float,
+        construction: bool,
+    ) -> dict:
+        """Build one finite arcOfCircle expansion entry."""
+        if not all(math.isfinite(value) for value in (*center, radius, start_angle, end_angle)):
+            raise _fail("generated profile coordinates are not finite")
+        return {
+            "kind": "arcOfCircle",
+            "center": center,
+            "radius": radius,
+            "startAngle": start_angle,
+            "endAngle": end_angle,
+            "construction": construction,
+        }
+
     geometry: list[dict] = []
     constraints: list[dict] = []
 
     def coincident(first: int, second: int) -> dict:
         return {"type": "Coincident", "arguments": [first, 2, second, 1]}
+
+    def join(first: int, second: int) -> dict:
+        """Close one corner of a chain with an endpoint tangency.
+
+        Only the arc-bearing chains use this: a slot and a rounded
+        rectangle close by tangency alone because the native
+        endpoint-specific ``Tangent(first, 2, second, 1)`` joins
+        ``first``'s end point to ``second``'s start point and makes those
+        two points coincide as part of the tangency. Adding a separate
+        ``Coincident`` at the same join repeats that condition, and the
+        solver reports the whole sketch redundant (live 1.1.3 evidence:
+        ``solve() == -2`` and ``Touched, Invalid`` with the Coincident
+        rows named; the same chains without them return ``solve() == 0``
+        and ``Up-to-date``).
+        """
+
+        return {"type": "Tangent", "arguments": [first, 2, second, 1]}
 
     for entry in entries:
         kind = entry["kind"]
@@ -1158,32 +1314,113 @@ def _expand_geometry_entries(
                     for index in range(segment_count)
                 )
             continue
-        center_x, center_y = entry["center"]
-        points = [
-            [
-                center_x
-                + entry["radius"]
-                * math.cos(math.radians(entry["rotation"] + 360 * index / entry["sides"])),
-                center_y
-                + entry["radius"]
-                * math.sin(math.radians(entry["rotation"] + 360 * index / entry["sides"])),
-            ]
-            for index in range(entry["sides"])
-        ]
-        start = geometry_offset + len(geometry)
-        geometry.extend(
-            _segment(
-                points[index],
-                points[(index + 1) % entry["sides"]],
-                entry["construction"],
+        if kind == "slot":
+            center_x, center_y = entry["center"]
+            theta = math.radians(entry["rotation"] % 360)
+            direction = (math.cos(theta), math.sin(theta))
+            normal = (-math.sin(theta), math.cos(theta))
+            radius = entry["diameter"] / 2
+            half_gap = (entry["length"] - entry["diameter"]) / 2
+            cap1 = [center_x - half_gap * direction[0], center_y - half_gap * direction[1]]
+            cap2 = [center_x + half_gap * direction[0], center_y + half_gap * direction[1]]
+            top1 = [cap1[0] + radius * normal[0], cap1[1] + radius * normal[1]]
+            top2 = [cap2[0] + radius * normal[0], cap2[1] + radius * normal[1]]
+            bot1 = [cap1[0] - radius * normal[0], cap1[1] - radius * normal[1]]
+            bot2 = [cap2[0] - radius * normal[0], cap2[1] - radius * normal[1]]
+            start = geometry_offset + len(geometry)
+            construction = entry["construction"]
+            geometry.extend(
+                [
+                    _segment(top2, top1, construction),
+                    _arc(
+                        cap1,
+                        radius,
+                        theta + math.pi / 2,
+                        theta + 3 * math.pi / 2,
+                        construction,
+                    ),
+                    _segment(bot1, bot2, construction),
+                    _arc(
+                        cap2,
+                        radius,
+                        theta - math.pi / 2,
+                        theta + math.pi / 2,
+                        construction,
+                    ),
+                ]
             )
-            for index in range(entry["sides"])
-        )
-        constraints.extend(
-            coincident(start + index, start + (index + 1) % entry["sides"])
-            for index in range(entry["sides"])
-        )
-    return geometry, constraints
+            constraints.extend(join(start + index, start + (index + 1) % 4) for index in range(4))
+            constraints.append({"type": "Parallel", "arguments": [start, start + 2]})
+            continue
+        if kind == "rounded_rectangle":
+            x0, y0 = entry["origin"]
+            x1 = x0 + entry["width"]
+            y1 = y0 + entry["height"]
+            radius = entry["corner_radius"]
+            construction = entry["construction"]
+            start = geometry_offset + len(geometry)
+            geometry.extend(
+                [
+                    _segment([x0 + radius, y0], [x1 - radius, y0], construction),
+                    _arc([x1 - radius, y0 + radius], radius, -math.pi / 2, 0.0, construction),
+                    _segment([x1, y0 + radius], [x1, y1 - radius], construction),
+                    _arc([x1 - radius, y1 - radius], radius, 0.0, math.pi / 2, construction),
+                    _segment([x1 - radius, y1], [x0 + radius, y1], construction),
+                    _arc([x0 + radius, y1 - radius], radius, math.pi / 2, math.pi, construction),
+                    _segment([x0, y1 - radius], [x0, y0 + radius], construction),
+                    _arc(
+                        [x0 + radius, y0 + radius],
+                        radius,
+                        math.pi,
+                        3 * math.pi / 2,
+                        construction,
+                    ),
+                ]
+            )
+            constraints.extend(join(start + index, start + (index + 1) % 8) for index in range(8))
+            constraints.extend(
+                {"type": "Horizontal", "arguments": [start + index]} for index in (0, 4)
+            )
+            constraints.extend(
+                {"type": "Vertical", "arguments": [start + index]} for index in (2, 6)
+            )
+            constraints.extend(
+                {"type": "Equal", "arguments": [start + first, start + second]}
+                for first, second in ((1, 3), (3, 5), (5, 7))
+            )
+            continue
+        if kind == "regularPolygon":
+            center_x, center_y = entry["center"]
+            points = [
+                [
+                    center_x
+                    + entry["radius"]
+                    * math.cos(math.radians(entry["rotation"] + 360 * index / entry["sides"])),
+                    center_y
+                    + entry["radius"]
+                    * math.sin(math.radians(entry["rotation"] + 360 * index / entry["sides"])),
+                ]
+                for index in range(entry["sides"])
+            ]
+            start = geometry_offset + len(geometry)
+            geometry.extend(
+                _segment(
+                    points[index],
+                    points[(index + 1) % entry["sides"]],
+                    entry["construction"],
+                )
+                for index in range(entry["sides"])
+            )
+            constraints.extend(
+                coincident(start + index, start + (index + 1) % entry["sides"])
+                for index in range(entry["sides"])
+            )
+            continue
+    validated_constraints = [
+        _validate_constraint_add(entry, f"addGeometry generated constraint {position}")
+        for position, entry in enumerate(constraints)
+    ]
+    return geometry, validated_constraints
 
 
 def _validate_constraint_add(entry: Any, what: str) -> dict:

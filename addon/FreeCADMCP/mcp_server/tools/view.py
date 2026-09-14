@@ -6,9 +6,9 @@ tool derives the composition, so a language model never has to name a
 camera orientation or self-correct between image requests:
 
 - ``overview`` (default) captures a labeled 4x2 sheet of the seven named
-  orientations plus a legend cell. Without ``focus_object`` it frames the
-  whole visible document scene (``ViewFit``) and reports the visible root
-  objects; with ``focus_object`` it frames that object exactly. This is a
+  orientations plus a legend cell. Without ``focus`` it frames the whole
+  visible document scene (``ViewFit``) and reports the visible root
+  objects; with ``focus`` it frames that shared target exactly. This is a
   deliberate exception to the earlier "never fitAll" stance: document-scope
   overview captures must fit the visible scene, while every other mode
   still refuses a missing focus object with ``OBJECT_NOT_FOUND``.
@@ -22,8 +22,10 @@ camera orientation or self-correct between image requests:
 - ``fit`` captures a labeled 1x2 sheet of two objects: an uncut Isometric
   framing both plus one section panel whose plane contains the derived
   mating axis (coaxial cylinder pair) or the explicit section override.
-- A legacy call with ``view_name`` and no ``mode`` is the unchanged
-  single-view capture this module has always provided.
+- ``view_name`` is accepted for ``mode: "detail"`` only: it selects the
+  explicit single-view capture instead of the derived orientation. Another
+  mode carrying ``view_name`` is refused with
+  ``invalid_parameter_for_mode``; ``mode`` defaults to ``overview``.
 
 Exactly one labeled PNG is returned per call; the ``views`` manifest in
 structuredContent is authoritative for panel identity, camera axes and
@@ -47,12 +49,14 @@ import base64
 import math
 import os
 import tempfile
+from collections.abc import Mapping
 from typing import Any
 
 import FreeCAD
 
+from .. import topology_query as tq
 from ..gui_dispatch import _flush_gui_events
-from ..protocol import ToolError
+from ..protocol import VALIDATION_FAILED, ToolError
 
 # Orientation names accepted for capture_view, mapped to the View3DInventor
 # methods that set the camera. The names are exactly the plan's view enum.
@@ -1135,55 +1139,50 @@ def _restore_selection_snapshot(ctx: Any, snapshots: list[dict[str, Any]]) -> No
             ctx.Gui.Selection.addSelection(obj)
 
 
-def _validate_subelement(focus_obj: Any, name: str) -> str:
-    """Validate ``name`` as a canonical subelement of ``focus_obj``.
+def _native_subelement_label(selection: Mapping | None) -> str | None:
+    """The native FaceN/EdgeN label for a resolved subshape, or None.
 
-    Only ``FaceN``/``EdgeN`` references are supported. The index is checked
-    against the live shape so an out-of-range reference fails before any
-    view, selection or active document change.
+    Validated tokens and query results are mapped to native labels only
+    here, inside the private framing path; they are never accepted as
+    durable input.
     """
 
-    canonical = str(name)
-    kind = canonical[:4]
-    if kind not in ("Face", "Edge") or not canonical[4:].isdigit():
-        raise ToolError(
-            "VALIDATION_FAILED",
-            f"unsupported focus_subelement '{canonical}'",
-            {"supported": ["FaceN", "EdgeN"]},
-        )
-    try:
-        shape = focus_obj.Shape
-        count = len(shape.Faces) if kind == "Face" else len(shape.Edges)
-    except AttributeError as exc:
-        raise ToolError(
-            "VALIDATION_FAILED",
-            f"object '{focus_obj.Name}' has no Shape to resolve '{canonical}' against",
-            {},
-        ) from exc
-    if not 1 <= int(canonical[4:]) <= count:
-        raise ToolError(
-            "VALIDATION_FAILED",
-            f"{canonical} does not exist on '{focus_obj.Name}' ({count} {kind.lower()}s)",
-            {},
-        )
-    return canonical
+    if selection is None:
+        return None
+    return ("Face" if selection["role"] == "face" else "Edge") + str(selection["index"])
+
+
+def _resolved_reference(ctx: Any, doc: Any, obj: Any, selection: Mapping | None) -> dict:
+    """The canonical whole/signed target describing a resolution outcome."""
+
+    from .geometry import make_reference, whole_reference
+
+    if selection is None:
+        return whole_reference(obj)
+    return make_reference(ctx, doc, obj, selection["role"], selection["index"])
 
 
 def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     """``capture_view`` handler (GUI thread only).
 
     Order: closed routing rules and per-mode input refusals, document and
-    object resolution, pure derivation (detail orientation, interior
-    bounds, fit mating axis), the read-only clipping-plane probe, and only
-    then any view mutation. Session-scoped view state is restored in
-    ``finally`` through the restore guard.
+    target resolution (whole/signed/query focus and fit targets resolve
+    before any GUI state change), pure derivation (detail orientation,
+    interior bounds, fit mating axis), the read-only clipping-plane probe,
+    and only then any view mutation. Session-scoped view state is restored
+    in ``finally`` through the restore guard.
     """
+
+    from .geometry import _resolve_target
 
     document = arguments["document"]
     mode = arguments.get("mode")
+    if mode is None:
+        # mode defaults to overview regardless of view_name; a single-view
+        # capture is an explicit detail request with a view_name.
+        mode = "overview"
     view_name = arguments.get("view_name")
-    focus_name = arguments.get("focus_object")
-    subelement_name = arguments.get("focus_subelement")
+    focus_arguments = arguments.get("focus")
     width = arguments.get("width")
     height = arguments.get("height")
     a_arguments = arguments.get("a")
@@ -1191,14 +1190,14 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     section_axis = arguments.get("section_axis")
     section_point = arguments.get("section_point")
 
-    # Closed routing rules: ``view_name`` names one explicit single-view
-    # capture. It conflicts with the sheet modes' derived orientations and
-    # refines detail into an explicit single view instead of a derivation.
-    if view_name is not None and mode in ("overview", "interior", "fit"):
+    # Closed routing rules: view_name names one explicit single-view capture
+    # and refines detail only. Another mode carrying a view_name is a
+    # parameter-for-mode refusal, never an implicit mode switch.
+    if view_name is not None and mode != "detail":
         raise ToolError(
-            "VALIDATION_FAILED",
-            "view_name cannot be combined with mode 'overview', 'interior' or 'fit'",
-            {"reason": "view_name_mode_conflict", "mode": str(mode)},
+            VALIDATION_FAILED,
+            f"view_name applies to mode 'detail' only, not {mode!r}",
+            {"reason": "invalid_parameter_for_mode", "mode": str(mode)},
         )
     if view_name is not None and view_name not in _VIEW_METHODS:
         raise ToolError(
@@ -1206,43 +1205,29 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             f"unsupported view '{view_name}'",
             {"views": sorted(_VIEW_METHODS)},
         )
-    effective_mode = mode if mode is not None else ("overview" if view_name is None else "single")
 
     # Per-mode input refusals before any document or view access.
-    if effective_mode in ("detail", "interior") and focus_name is None:
+    if mode in ("detail", "interior") and focus_arguments is None:
         raise ToolError(
-            "VALIDATION_FAILED",
-            f"mode '{effective_mode}' requires focus_object",
-            {"mode": effective_mode},
+            VALIDATION_FAILED,
+            f"mode '{mode}' requires a focus target",
+            {"mode": str(mode)},
         )
-    if effective_mode == "single" and focus_name is None:
-        raise ToolError(
-            "VALIDATION_FAILED",
-            "a single-view capture (view_name without mode) requires focus_object",
-            {},
-        )
-    if focus_name is None and subelement_name is not None:
-        raise ToolError(
-            "VALIDATION_FAILED",
-            "focus_subelement requires focus_object",
-            {},
-        )
-    if effective_mode == "fit" and (focus_name is not None or subelement_name is not None):
-        # Fit frames the a and b selectors; an accepted-but-ignored focus
+    if mode == "fit" and focus_arguments is not None:
+        # Fit frames the a and b targets; an accepted-but-ignored focus
         # input would still be echoed into the manifest as if it had
         # framed the panels.
         raise ToolError(
-            "VALIDATION_FAILED",
-            "mode 'fit' frames the a and b selectors; "
-            "focus_object and focus_subelement do not apply",
+            VALIDATION_FAILED,
+            "mode 'fit' frames the a and b targets; focus does not apply",
             {"mode": "fit"},
         )
-    if effective_mode == "fit":
+    if mode == "fit":
         for selector_label, selector in (("a", a_arguments), ("b", b_arguments)):
-            if not isinstance(selector, dict) or not isinstance(selector.get("object"), str):
+            if not isinstance(selector, dict):
                 raise ToolError(
-                    "VALIDATION_FAILED",
-                    f"mode 'fit' requires selector '{selector_label}' as {{'object': <Name>}}",
+                    VALIDATION_FAILED,
+                    f"mode 'fit' requires target '{selector_label}'",
                     {"selector": selector_label},
                 )
         _validate_section_override(section_axis, section_point)
@@ -1250,27 +1235,27 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     doc = ctx.require_document(document)
     ctx.check_document_idle(doc)
 
-    # Prevalidate the focus object and optional subelement before any
-    # view, selection or active document change: a missing focus must
-    # fail without reframing.
+    # Resolve every shared target before any view, selection or active
+    # document change: a missing focus must fail without reframing.
     focus_obj = None
-    if focus_name is not None:
-        focus_obj = ctx.require_object(doc, focus_name)
-        if subelement_name is not None:
-            subelement_name = _validate_subelement(focus_obj, subelement_name)
+    focus_selection: Mapping | None = None
+    if focus_arguments is not None:
+        focus_obj, focus_selection = _resolve_target(ctx, doc, focus_arguments, "focus")
+        if mode == "interior" and focus_selection is not None:
+            # Interior sections the whole focus object; a selected subshape
+            # input is refused rather than silently sectioning its owner.
+            raise ToolError(
+                VALIDATION_FAILED,
+                "mode 'interior' requires a whole-object focus target",
+                {"reason": "subshape_not_allowed", "mode": "interior"},
+            )
     a_obj = None
     b_obj = None
-    a_subelement: str | None = None
-    b_subelement: str | None = None
-    if effective_mode == "fit":
-        a_obj = ctx.require_object(doc, str(a_arguments["object"]))
-        b_obj = ctx.require_object(doc, str(b_arguments["object"]))
-        a_subelement = a_arguments.get("subelement")
-        b_subelement = b_arguments.get("subelement")
-        if a_subelement is not None:
-            _validate_subelement(a_obj, str(a_subelement))
-        if b_subelement is not None:
-            _validate_subelement(b_obj, str(b_subelement))
+    a_selection: Mapping | None = None
+    b_selection: Mapping | None = None
+    if mode == "fit":
+        a_obj, a_selection = _resolve_target(ctx, doc, a_arguments, "a")
+        b_obj, b_selection = _resolve_target(ctx, doc, b_arguments, "b")
 
     gui_doc = _gui_document(ctx, document)
     view = getattr(gui_doc, "ActiveView", None)
@@ -1282,16 +1267,19 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         )
 
     generation = int(ctx.document_generation(doc))
+    focus_native = _native_subelement_label(focus_selection)
+    a_native = _native_subelement_label(a_selection)
+    b_native = _native_subelement_label(b_selection)
 
     # Sheet sizes resolve from the fixed layout totals; single-panel
     # captures keep the viewport-derived sizing. Both resolve before the
     # session opens so a size refusal never touches view state.
     size: tuple[int, ...]
-    if effective_mode == "overview":
+    if mode == "overview":
         size = _sheet_dimensions(4, 2, width, height)
-    elif effective_mode == "interior":
+    elif mode == "interior":
         size = _sheet_dimensions(2, 2, width, height)
-    elif effective_mode == "fit":
+    elif mode == "fit":
         size = _sheet_dimensions(2, 1, width, height)
     else:
         size = resolve_capture_size(ctx, view, document, width, height)
@@ -1302,12 +1290,12 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     section_center: tuple[float, float, float] | None = None
     mating_axis: tuple[float, float, float] | None = None
     mating_point: tuple[float, float, float] | None = None
-    if effective_mode == "interior":
+    if mode == "interior":
         bounds = _focus_document_bounds(focus_obj)
         view_object = getattr(focus_obj, "ViewObject", None)
         if view_object is None or not hasattr(view_object, "Transparency"):
             raise ToolError(
-                "VALIDATION_FAILED",
+                VALIDATION_FAILED,
                 "interior target cannot render an x-ray panel",
                 {
                     "reason": "interior_target_shapeless",
@@ -1320,7 +1308,7 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             (bounds[2] + bounds[5]) / 2.0,
         )
         _require_no_clipping_plane(view)
-    elif effective_mode == "fit":
+    elif mode == "fit":
         if section_axis is not None:
             mating_axis = _vec_normalize(
                 (
@@ -1335,9 +1323,7 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
                 float(section_point[2]),
             )
         else:
-            mating_axis, mating_point = _derive_mating_axis(
-                a_obj, b_obj, a_subelement, b_subelement
-            )
+            mating_axis, mating_point = _derive_mating_axis(a_obj, b_obj, a_native, b_native)
         _require_no_clipping_plane(view)
 
     # Session state the mode may set: the clipping plane this call
@@ -1348,11 +1334,11 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     truncated = False
     apply_camera: Any = None
 
-    if effective_mode == "detail" and view_name is None:
-        derivation = _derive_detail_orientation(focus_obj, subelement_name)
+    if mode == "detail" and view_name is None:
+        derivation = _derive_detail_orientation(focus_obj, focus_native)
         if derivation is None:
             raise ToolError(
-                "VALIDATION_FAILED",
+                VALIDATION_FAILED,
                 "the orientation for this detail target could not be derived; "
                 "pass view_name explicitly",
                 {"reason": "orientation_not_derivable", "suggestions": ["view_name"]},
@@ -1371,7 +1357,7 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
             )
             if derived_string is None:
                 raise ToolError(
-                    "VALIDATION_FAILED",
+                    VALIDATION_FAILED,
                     "the orientation for this detail target could not be derived; "
                     "pass view_name explicitly",
                     {"reason": "orientation_not_derivable", "suggestions": ["view_name"]},
@@ -1393,19 +1379,7 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     completed = False
     try:
         try:
-            if effective_mode == "single":
-                png_bytes, views_manifest, resolved_width, resolved_height = _capture_single_view(
-                    ctx,
-                    view,
-                    document,
-                    focus_obj,
-                    subelement_name,
-                    str(view_name),
-                    _VIEW_METHODS[str(view_name)],
-                    False,
-                    size,
-                )
-            elif effective_mode == "detail":
+            if mode == "detail":
                 if view_name is not None:
                     png_bytes, views_manifest, resolved_width, resolved_height = (
                         _capture_single_view(
@@ -1413,7 +1387,7 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
                             view,
                             document,
                             focus_obj,
-                            subelement_name,
+                            focus_native,
                             str(view_name),
                             _VIEW_METHODS[str(view_name)],
                             False,
@@ -1427,7 +1401,7 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
                             view,
                             document,
                             focus_obj,
-                            subelement_name,
+                            focus_native,
                             "Detail",
                             None,
                             True,
@@ -1435,7 +1409,7 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
                             apply_camera=apply_camera,
                         )
                     )
-            elif effective_mode == "overview":
+            elif mode == "overview":
                 (
                     png_bytes,
                     views_manifest,
@@ -1444,9 +1418,9 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
                     captured_objects,
                     truncated,
                 ) = _capture_overview(
-                    ctx, view, document, doc, focus_obj, subelement_name, size, generation
+                    ctx, view, document, doc, focus_obj, focus_native, size, generation
                 )
-            elif effective_mode == "interior":
+            elif mode == "interior":
                 png_bytes, views_manifest, resolved_width, resolved_height = _capture_interior(
                     ctx, view, document, focus_obj, section_center, size, session
                 )
@@ -1502,13 +1476,19 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         "height": resolved_height,
         "document": str(document),
         "generation": generation,
-        "mode": effective_mode,
-        "focus_object": str(focus_name) if focus_name is not None else None,
-        "focus_subelement": subelement_name,
+        "mode": mode,
+        "focus": (
+            _resolved_reference(ctx, doc, focus_obj, focus_selection)
+            if focus_obj is not None
+            else None
+        ),
         "view_name": str(view_name) if view_name is not None else None,
         "views": views_manifest,
     }
-    if effective_mode == "overview" and focus_name is None:
+    if mode == "fit":
+        result["a"] = _resolved_reference(ctx, doc, a_obj, a_selection)
+        result["b"] = _resolved_reference(ctx, doc, b_obj, b_selection)
+    if mode == "overview" and focus_obj is None:
         result["captured_objects"] = captured_objects
         result["truncated"] = truncated
     return result
@@ -2087,18 +2067,6 @@ _VECTOR3_SCHEMA = {
     "maxItems": 3,
 }
 
-#: One fit selector: an object name plus an optional canonical FaceN/EdgeN
-#: subelement that narrows the mating-axis derivation to that face.
-_FIT_SELECTOR_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "object": {"type": "string", "minLength": 1, "maxLength": 256},
-        "subelement": {"type": "string", "minLength": 5, "maxLength": 12},
-    },
-    "required": ["object"],
-    "additionalProperties": False,
-}
-
 #: One ``views`` manifest entry: panel identity, live camera axes, the
 #: section plane when the panel is cut, the panel rect on the sheet and
 #: whether its orientation was derived rather than named.
@@ -2144,87 +2112,93 @@ _VIEW_MANIFEST_ITEM = {
     "additionalProperties": False,
 }
 
-_TOOL_INPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "document": {"type": "string", "minLength": 1, "maxLength": 256},
-        "mode": {
-            "type": "string",
-            "enum": ["overview", "detail", "interior", "fit"],
+#: Capture targets are the shared vocabulary: whole-object identity, a
+#: fresh signed reference, or a declarative query resolved to exactly one
+#: subshape before any GUI state changes.
+_TOOL_INPUT_SCHEMA = tq.merge_query_defs(
+    {
+        "type": "object",
+        "properties": {
+            "document": {"type": "string", "minLength": 1, "maxLength": 256},
+            "mode": {
+                "type": "string",
+                "enum": ["overview", "detail", "interior", "fit"],
+                "default": "overview",
+            },
+            "focus": {"$ref": "#/$defs/topologyTarget"},
+            "view_name": {
+                "type": "string",
+                "enum": sorted(_VIEW_METHODS),
+            },
+            "a": {"$ref": "#/$defs/topologyTarget"},
+            "b": {"$ref": "#/$defs/topologyTarget"},
+            "section_axis": _VECTOR3_SCHEMA,
+            "section_point": _VECTOR3_SCHEMA,
+            "width": {"type": "integer", "minimum": 1, "maximum": MAX_EXPLICIT_EDGE},
+            "height": {"type": "integer", "minimum": 1, "maximum": MAX_EXPLICIT_EDGE},
         },
-        "focus_object": {"type": "string", "minLength": 1, "maxLength": 256},
-        "focus_subelement": {
-            "type": "string",
-            "minLength": 5,
-            "maxLength": 12,
-        },
-        "view_name": {
-            "type": "string",
-            "enum": sorted(_VIEW_METHODS),
-        },
-        "a": _FIT_SELECTOR_SCHEMA,
-        "b": _FIT_SELECTOR_SCHEMA,
-        "section_axis": _VECTOR3_SCHEMA,
-        "section_point": _VECTOR3_SCHEMA,
-        "width": {"type": "integer", "minimum": 1, "maximum": MAX_EXPLICIT_EDGE},
-        "height": {"type": "integer", "minimum": 1, "maximum": MAX_EXPLICIT_EDGE},
-    },
-    "required": ["document"],
-    "additionalProperties": False,
+        "required": ["document"],
+        "additionalProperties": False,
+    }
+)
+
+#: One resolved whole/signed target, or null when the mode frames none.
+_TARGET_OUT = {
+    "anyOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/topologyWholeTarget"},
+        {"$ref": "#/$defs/topologyReferenceTarget"},
+    ]
 }
 
-_TOOL_OUTPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "mimeType": {"type": "string", "const": "image/png"},
-        "data": {"type": "string", "minLength": 1},
-        "width": {"type": "integer", "minimum": 1, "maximum": MAX_EXPLICIT_EDGE},
-        "height": {"type": "integer", "minimum": 1, "maximum": MAX_EXPLICIT_EDGE},
-        "document": {"type": "string", "minLength": 1, "maxLength": 256},
-        "generation": {"type": "integer", "minimum": 0},
-        "mode": {
-            "type": "string",
-            "enum": ["overview", "detail", "interior", "fit", "single"],
+_TOOL_OUTPUT_SCHEMA = tq.merge_query_defs(
+    {
+        "type": "object",
+        "properties": {
+            "mimeType": {"type": "string", "const": "image/png"},
+            "data": {"type": "string", "minLength": 1},
+            "width": {"type": "integer", "minimum": 1, "maximum": MAX_EXPLICIT_EDGE},
+            "height": {"type": "integer", "minimum": 1, "maximum": MAX_EXPLICIT_EDGE},
+            "document": {"type": "string", "minLength": 1, "maxLength": 256},
+            "generation": {"type": "integer", "minimum": 0},
+            "mode": {
+                "type": "string",
+                "enum": ["overview", "detail", "interior", "fit"],
+            },
+            "focus": _TARGET_OUT,
+            "a": _TARGET_OUT,
+            "b": _TARGET_OUT,
+            "view_name": {
+                "type": ["string", "null"],
+                "minLength": 3,
+                "maxLength": 12,
+            },
+            "views": {
+                "type": "array",
+                "items": _VIEW_MANIFEST_ITEM,
+                "minItems": 1,
+                "maxItems": 8,
+            },
+            "captured_objects": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 256},
+                "maxItems": 16,
+            },
+            "truncated": {"type": "boolean"},
         },
-        "focus_object": {
-            "type": ["string", "null"],
-            "minLength": 1,
-            "maxLength": 256,
-        },
-        "focus_subelement": {
-            "type": ["string", "null"],
-            "minLength": 5,
-            "maxLength": 12,
-        },
-        "view_name": {
-            "type": ["string", "null"],
-            "minLength": 3,
-            "maxLength": 12,
-        },
-        "views": {
-            "type": "array",
-            "items": _VIEW_MANIFEST_ITEM,
-            "minItems": 1,
-            "maxItems": 8,
-        },
-        "captured_objects": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1, "maxLength": 256},
-            "maxItems": 16,
-        },
-        "truncated": {"type": "boolean"},
-    },
-    "required": [
-        "mimeType",
-        "data",
-        "width",
-        "height",
-        "document",
-        "generation",
-        "mode",
-    ],
-    "additionalProperties": False,
-}
+        "required": [
+            "mimeType",
+            "data",
+            "width",
+            "height",
+            "document",
+            "generation",
+            "mode",
+            "focus",
+        ],
+        "additionalProperties": False,
+    }
+)
 
 TOOL_DEFINITIONS = [
     {
@@ -2234,29 +2208,31 @@ TOOL_DEFINITIONS = [
             "visual inspection, chosen by inspection intent instead of "
             "camera names. mode 'overview' (default) captures a labeled "
             "sheet of the seven named orientations plus a legend; without "
-            "focus_object it frames the whole visible document and reports "
-            "captured_objects, with focus_object it frames that object "
-            "(optionally one FaceN/EdgeN subelement). mode 'detail' "
-            "captures one enlarged view of the focus target; without "
-            "view_name the orientation derives from a planar FaceN target, "
-            "with view_name it is the explicit single-view override. mode "
-            "'interior' captures mid-plane sections through the focus "
-            "object plus an x-ray panel. mode 'fit' captures two objects "
-            "uncut plus a section through their derived mating axis "
-            "(coaxial cylindrical faces, narrowable with FaceN selectors) "
-            "or the explicit section_axis/section_point. Sheet panels "
-            "scale to explicit width/height with the label strips "
-            "constant; single-panel captures honor explicit sizes and "
-            "otherwise follow the active viewport. Section and x-ray panels are "
-            "qualitative: occlusion and cut-surface appearance are not "
-            "guaranteed; measure and inspect_topology remain the "
-            "authoritative evidence. structuredContent reports the mode, "
-            "document generation, per-panel camera axes, section planes "
-            "and rects, and image dimensions. The caller's camera, "
-            "selection, active document, clipping plane, focus "
-            "transparency and navigation-animation preference are "
-            "restored; a restore "
-            "failure discards the image."
+            "focus it frames the whole visible document and reports "
+            "captured_objects, with focus it frames that shared target "
+            "(whole object, signed reference or a query resolved to one "
+            "subshape). mode 'detail' captures one enlarged view of the "
+            "focus target; without view_name the orientation derives from "
+            "a planar face target, with view_name it is the explicit "
+            "single-view override (view_name is accepted for detail "
+            "only). mode 'interior' captures mid-plane sections through a "
+            "whole-object focus plus an x-ray panel; a subshape focus is "
+            "refused. mode 'fit' captures two shared targets uncut plus a "
+            "section through their derived mating axis (coaxial "
+            "cylindrical faces, narrowable with signed or query targets) "
+            "or the explicit section_axis/section_point; fit refuses "
+            "focus. Sheet panels scale to explicit width/height with the "
+            "label strips constant; single-panel captures honor explicit "
+            "sizes and otherwise follow the active viewport. Section and "
+            "x-ray panels are qualitative: occlusion and cut-surface "
+            "appearance are not guaranteed; measure and inspect_topology "
+            "remain the authoritative evidence. structuredContent reports "
+            "the mode, resolved focus/a/b targets, document generation, "
+            "per-panel camera axes, section planes and rects, and image "
+            "dimensions. The caller's camera, selection, active document, "
+            "clipping plane, focus transparency and navigation-animation "
+            "preference are restored; a restore failure discards the "
+            "image."
         ),
         "inputSchema": _TOOL_INPUT_SCHEMA,
         "outputSchema": _TOOL_OUTPUT_SCHEMA,

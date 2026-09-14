@@ -32,7 +32,7 @@ Read [FEM Analysis](https://wiki.freecad.org/FEM_Analysis), [FEM Mesh Gmsh From 
 3. `create_object` with type `Fem::FemAnalysis`.
 4. `create_object` with type `Fem::MaterialCommon`; set its `Material` map values with `edit_object` and add it to the analysis.
 5. Create the `Fem::FemMeshGmsh` through `run_script`: add the object, link its `Shape` to the solid, set `CharacteristicLengthMax`/`CharacteristicLengthMin`, add it to the analysis, and recompute so Gmsh generates elements.
-6. `create_object` with the `Fem::ConstraintFixed`, `Fem::ConstraintForce`, or `Fem::ConstraintPressure` types; pass canonical `References` and add each constraint to the analysis group.
+6. `create_object` with the `Fem::ConstraintFixed`, `Fem::ConstraintForce`, or `Fem::ConstraintPressure` types; pass `References` as shared targets (whole objects, signed references, or query entries) and add each constraint to the analysis group.
 7. Inspect all FEM objects and their `References` with `inspect_objects(detail="full")`.
 8. Use `run_script` for any feature-specific assignment the structured tools reject.
 9. Call `run_fem(document, analysis, timeout_s)` with an appropriate timeout; keep no parallel document work while it runs.
@@ -60,10 +60,10 @@ Key spellings have differed between server versions. Inspect the created object 
 `edit_object` handles the common cases directly:
 
 - `Fem::ConstraintForce.Force` is a quantity property; assign a plain number (internal unit, newtons for force) through `edit_object`.
-- `Fem::ConstraintForce.Direction` is a link/subelement property; assign the canonical form `{"object": "<Name>", "subelement": "Edge1"}`.
-- `References` take arrays of canonical `{"object", "subelement"}` values.
+- `Fem::ConstraintForce.Direction` is a link/subelement property; assign a signed reference `{"object": "<Name>", "subelement": "<token>"}` or a query that resolves to exactly one edge.
+- `References` take arrays of shared targets; query entries expand in order and the operation reports `resolvedSelections` receipts with the selection-time generation.
 
-Use internal object names and actual face/edge identifiers. Resolve faces deliberately, for example by inspecting face centers or bounding boxes through `run_script`; do not guess that `Face1` is the correct load face. When a property assignment is still rejected, inspect its type in `propertyMetadata` and assign it through `run_script`.
+Use internal object names, and resolve faces deliberately with an `inspect_topology` query — for example `{"role": "face", "selector": "-Z"}` for the lowest face — reusing that descriptor or its signed reference in `References`; do not guess that `Face1` is the correct load face. When a property assignment is still rejected, inspect its type in `propertyMetadata` and assign it through `run_script`.
 
 ## Mesh and solver limits
 

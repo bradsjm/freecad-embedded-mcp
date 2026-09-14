@@ -62,8 +62,31 @@ The [Sketcher scripting](https://wiki.freecad.org/Sketcher_scripting) page defin
 | `rectangle` | `origin`, `width`, `height` | Expands to four line segments. Width and height are positive. |
 | `polyline` | `points`, `closed` | 2–32 `[x, y]` points; `closed: true` needs 3+. No adjacent duplicate points and no repeated closing point. |
 | `regularPolygon` | `center`, `radius`, `sides` | 3–32 sides; `radius` is the circumscribed radius; optional `rotation` in degrees. |
+| `slot` | `length`, `diameter` | `length` is the OVERALL end-to-end length; the cap-center gap is `length - diameter`. Requires `length > diameter > 0`. Optional `center` (default `[0, 0]`), `rotation` in degrees (default 0), `construction`. |
+| `rounded_rectangle` | `width`, `height`, `corner_radius` | Axis-aligned, with the `rectangle` corner-origin convention and no separate center or rotation. Requires `0 < corner_radius < min(width, height) / 2`. Optional `origin` (default `[0, 0]`), `construction`. |
 
-The composite kinds (`rectangle`, `polyline`, `regularPolygon`) are semantic profiles: `edit_sketch` expands them into proven `lineSegment` operations and appends the closing constraints for you — `Coincident` joints on every composite, plus `Horizontal`/`Vertical` on a rectangle. The expanded geometry consumes one geometry index per segment. In the same batch, the explicit `addConstraints` take the lower constraint indices and the auto constraints follow them. Expansion also counts against the 64-entry cap: a rectangle is 10 operations (4 geometry, 6 constraints). Read `addedGeometry` and `addedConstraints` from the response to learn the real indices.
+The composite kinds (`rectangle`, `polyline`, `regularPolygon`, `slot`, `rounded_rectangle`) are semantic profiles: `edit_sketch` expands them into proven `lineSegment` and arc operations and appends the closing constraints for you — `Coincident` joints on `rectangle`, `polyline`, and `regularPolygon`, endpoint-specific `Tangent` joins on `slot` and `rounded_rectangle`, plus `Horizontal`/`Vertical` on a rectangle. The expanded geometry consumes one geometry index per segment or arc. In the same batch, the explicit `addConstraints` take the lower constraint indices and the auto constraints follow them. Expansion also counts against the 64-entry cap: a rectangle is 12 operations (4 geometry, 8 constraints), a slot 9, a rounded rectangle 23, and a slot plus a rounded rectangle in one batch 32. Read `addedGeometry` and `addedConstraints` from the response to learn the real indices.
+
+`slot` emits two line segments and two pi-sweep cap arcs — 4 geometry entries plus 5 constraints (4 `Tangent`, 1 `Parallel` between the two parallel sides). Its `length` is the overall end-to-end length, not the cap-center distance: with `center [5, 5]`, `length 10`, and `diameter 6`, the cap centers sit at `[3, 5]` and `[7, 5]` and the unrotated bounds run from `[0, 2]` to `[10, 8]`. A refused `length`/`diameter` pair answers `invalid_slot_dimensions`. `rounded_rectangle` emits the counterclockwise chain of four line segments and four pi/2-sweep corner arcs — 8 geometry entries plus 15 constraints (8 `Tangent`, `Horizontal` on the top and bottom segments, `Vertical` on the side segments, and 3 `Equal` chaining the four arcs). Its area is `width * height - (4 - pi) * corner_radius^2`; a degenerate radius answers `invalid_corner_radius`. Both composites expand through the same recorded constructor forms as explicit entries — generated constraints pass the recorded-form gate — and the solver's DoF and redundancy verdict for a generated profile is native evidence: confirm it with `inspect_sketch` after the batch.
+
+Each of those `Tangent` joins is the four-argument endpoint form `[geoA, endPoint, geoB, startPoint]` (`Tangent(geoA, 2, geoB, 1)` natively). It keeps the two geometries tangent and makes the shared end points coincide, which is what closes the chain. It is the solver-valid closing form: on FreeCAD 1.1.3 a slot and a rounded rectangle built this way return `solve() == 0` with `State Up-to-date`, each is a single closed wire, and the slot lands at 5 DoF. A `Coincident` at the same join repeats that coincidence and leaves the sketch reported as redundant (`solve() == -2`, `State Touched, Invalid`), so `slot` and `rounded_rectangle` generate no `Coincident`. The two-argument `Tangent(geoA, geoB)` is accepted by the solver but constrains only the whole geometries, not the shared end points: a slot built from it alone stays at 13 DoF, so it is not used either.
+
+One batch can carry both composites:
+
+```json
+{
+  "document": "Part",
+  "sketch": "Profile",
+  "addGeometry": [
+    {"kind": "slot", "center": [5, 5], "length": 10, "diameter": 6, "rotation": 0},
+    {"kind": "rounded_rectangle", "origin": [0, 0], "width": 20, "height": 10, "corner_radius": 2}
+  ]
+}
+```
+
+The slot costs 9 operations with cap centers at `[3, 5]` and `[7, 5]` and unrotated bounds `[0, 2]` to `[10, 8]`; the rounded rectangle costs 23 and keeps the `[0, 0]` to `[20, 10]` boundary. Omitted `center`/`origin` and `rotation` default to `[0, 0]` and `0`, and `construction` defaults to false.
+
+Composites accept no `id`; their positions, rotations, and dimensions are not datum-pinned. Give explicit rows an `id` when constraints must reference them, and read composite indices from `addedGeometry`.
 
 Every entry accepts `construction: true` for construction geometry. `inspect_sketch` reports the flag from the native `getConstruction(index)` call. Confirm the angle unit on the same call. Passing `startAngle: 0` and `endAngle: 180` produced a native arc that ends at 4.07 radians, which is 180 radians reduced modulo 2π.
 
@@ -78,7 +101,8 @@ Send `{"type": ..., "arguments": [...], "datum": ...}`. `datum` is optional exce
 | `Coincident` | `[geoA, posA, geoB, posB]`. `[0, 1, -1, 1]` locks the start point to the X axis. | no |
 | `Horizontal`, `Vertical`, `Block` | `[geo]` | no |
 | `PointOnObject` | `[pointGeo, pos, targetGeo]` | no |
-| `Parallel`, `Perpendicular`, `Equal`, `Tangent` | `[geoA, geoB]` | no |
+| `Tangent` | `[geoA, geoB]`, or the endpoint-specific `[geoA, posA, geoB, posB]` — `[geoA, 2, geoB, 1]` joins `geoA`'s end point to `geoB`'s start point | no |
+| `Parallel`, `Perpendicular`, `Equal` | `[geoA, geoB]` | no |
 | `Symmetric` | `[geoA, posA, geoB, posB, axisGeo]` or `[geoA, posA, geoB, posB, geoA2, posA2]` | no |
 | `DistanceX`, `DistanceY` | `[geoA, posA, geoB, posB]`, or `[geo, pos]` for one edge | required |
 | `Distance` | `[geo, pos]`, `[geo, posA, posB]`, or `[geoA, posA, geoB, posB]` | required |

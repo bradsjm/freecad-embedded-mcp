@@ -103,6 +103,19 @@ class FakeShape:
     def isValid(self) -> bool:
         return self._valid
 
+    def copy(self) -> Any:
+        """A placement-bearing copy, as the native global-shape path needs."""
+
+        copied = FakeShape(
+            list(object.__getattribute__(self, "_faces")),
+            list(object.__getattribute__(self, "_edges")),
+            valid=self._valid,
+            solids=self._solids,
+            volume=self.Volume,
+            bounds=self._bounds,
+        )
+        return copied
+
     @property
     def Solids(self) -> list[Any]:
         return [object()] * self._solids
@@ -133,6 +146,75 @@ class FakeShape:
         return 1e-7
 
 
+class Line:
+    """A native ``Part.Line`` stand-in: the class name drives the mapped type."""
+
+
+class _NativeEdge:
+    """A readable native edge double: a straight segment.
+
+    Post-normalization re-verification compares document-space geometry
+    fingerprints, so an edge double must expose what a native ``Part.Edge``
+    does: the mapped ``Curve`` class, length, bounds, center of mass, a
+    parameter range with its midpoint value, the tangent, the closed status
+    and both endpoint vertices.
+    """
+
+    def __init__(
+        self,
+        start: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        end: tuple[float, float, float] = (10.0, 0.0, 0.0),
+    ) -> None:
+        self._start = tuple(float(value) for value in start)
+        self._end = tuple(float(value) for value in end)
+        delta = [self._end[axis] - self._start[axis] for axis in range(3)]
+        self._delta = tuple(delta)
+        self.Curve = Line()
+        self.Length = float(sum(value * value for value in delta) ** 0.5)
+        self.ParameterRange = (0.0, 1.0)
+        self.FirstParameter = 0.0
+        self.LastParameter = 1.0
+        self.CenterOfMass = StubVector(*self._at(0.5))
+        self.Vertexes = [
+            types.SimpleNamespace(Point=StubVector(*self._start)),
+            types.SimpleNamespace(Point=StubVector(*self._end)),
+        ]
+        self.BoundBox = types.SimpleNamespace(
+            **{
+                f"{axis}{bound}": value
+                for axis, index in (("X", 0), ("Y", 1), ("Z", 2))
+                for bound, value in (
+                    ("Min", min(self._start[index], self._end[index])),
+                    ("Max", max(self._start[index], self._end[index])),
+                )
+            }
+        )
+
+    def _at(self, fraction: float) -> list[float]:
+        return [
+            self._start[axis] + fraction * (self._end[axis] - self._start[axis])
+            for axis in range(3)
+        ]
+
+    def isClosed(self) -> bool:
+        return False
+
+    def valueAt(self, parameter: float) -> StubVector:
+        return StubVector(*self._at(float(parameter)))
+
+    def tangentAt(self, parameter: float) -> StubVector:
+        return StubVector(*self._delta)
+
+
+def _native_edges(count: int) -> list[Any]:
+    """``count`` distinct native edge doubles, one per root index."""
+
+    return [
+        _NativeEdge(start=(0.0, float(index), 0.0), end=(10.0, float(index), 0.0))
+        for index in range(count)
+    ]
+
+
 class FakeFeature:
     def __init__(
         self,
@@ -161,6 +243,11 @@ class FakeFeature:
     def isValid(self) -> bool:
         return True
 
+    def getGlobalPlacement(self) -> Any:
+        """Identity global placement: the doubles have no ancestors."""
+
+        return types.SimpleNamespace()
+
     def getStatusString(self) -> str:
         return ""
 
@@ -180,6 +267,18 @@ class FakeFeature:
         object.__getattribute__(self, "_values").setdefault("_expressions", {})
         object.__getattribute__(self, "_values")["_expressions"][prop] = expression
         self.history.append(("expression", (prop, expression)))
+
+    def getExpression(self, prop: str) -> Any:
+        """Fake expression readback: the persisted binding or ``None``."""
+        return object.__getattribute__(self, "_values").get("_expressions", {}).get(prop)
+
+    @property
+    def ExpressionEngine(self) -> list[tuple[str, str]]:
+        """Live bindings only: a cleared (``None``) entry leaves the engine."""
+        bindings = object.__getattribute__(self, "_values").get("_expressions", {})
+        return [
+            (path, expression) for path, expression in bindings.items() if expression is not None
+        ]
 
     def __getattr__(self, name: str) -> Any:
         values = object.__getattribute__(self, "_values")
@@ -389,6 +488,21 @@ class FakeApp:
         return None
 
 
+def _snapshot_values(feature: FakeFeature) -> dict:
+    """Snapshot one feature's values with the expression map cloned.
+
+    ``setExpression`` mutates the ``_expressions`` map in place, so a bare
+    ``dict(...)`` copy would alias it and a rollback could not restore the
+    pre-mutation binding.
+    """
+
+    snapshot = dict(feature._values)
+    expressions = snapshot.get("_expressions")
+    if isinstance(expressions, dict):
+        snapshot["_expressions"] = dict(expressions)
+    return snapshot
+
+
 class FakeDoc:
     def __init__(self, body: FakeBody, *, supported: tuple[str, ...]) -> None:
         self.Name = "Doc"
@@ -419,6 +533,13 @@ class FakeDoc:
                 if isinstance(obj, FakeBody)
             },
             "tips": {obj.Name: obj.Tip for obj in self.Objects if isinstance(obj, FakeBody)},
+            # Native undo also restores property values and expression
+            # bindings, so a rolled-back edit reads as it did before.
+            "values": {
+                obj.Name: _snapshot_values(obj)
+                for obj in self.Objects
+                if isinstance(obj, FakeFeature)
+            },
         }
         self.transactions.append(("open", label))
 
@@ -433,6 +554,9 @@ class FakeDoc:
                 if isinstance(obj, FakeBody):
                     obj._values["Group"] = [*self._undo["groups"][obj.Name]]
                     object.__setattr__(obj, "_tip", self._undo["tips"][obj.Name])
+                if isinstance(obj, FakeFeature):
+                    obj._values.clear()
+                    obj._values.update(self._undo["values"][obj.Name])
         self.transactions.append(("abort",))
 
     def removeObject(self, name: str) -> None:
@@ -603,7 +727,7 @@ def test_support_requires_explicit_map_mode() -> None:
                 ctx,
                 kind="sketch",
                 name="Sketch002",
-                support={"object": "Sketch", "subelement": ""},
+                support={"object": "Sketch"},
             )
 
         assert "explicit properties.MapMode" in excinfo.value.message
@@ -645,7 +769,8 @@ def test_sketch_is_created_through_body_new_object() -> None:
         assert result["applied"] == ["Body", "Sketch002"]
         assert doc.transactions == [("open", "create_feature:Body"), ("commit",)]
         assert [entry.Name for entry in body.Group] == ["Sketch", "Sketch002"]
-        assert result["change"]["geometry"]["solidCountBefore"] is None
+        # response_detail defaults to compact: no before-state geometry deltas.
+        assert set(result["change"]) == {"properties"}
 
 
 def test_pad_requires_tip_update_and_reports_body_report() -> None:
@@ -698,7 +823,7 @@ def test_create_feature_compact_response_detail_keeps_body_report() -> None:
         validate_schema(result, definition["outputSchema"])
 
 
-def test_edit_feature_compact_response_detail_keeps_body_report() -> None:
+def test_edit_feature_compact_detail_reports_uniform_rows() -> None:
     with load_features() as module:
         shape = FakeShape()
         pad = _QuantityPad(
@@ -724,9 +849,15 @@ def test_edit_feature_compact_response_detail_keeps_body_report() -> None:
             },
         )
 
-        change = result["change"]
-        assert set(change) == {"properties"}
-        assert change["properties"] == [{"name": "length", "after": "25 mm"}]
+        # The removed creation-report fields never appear on an edit result.
+        assert "change" not in result
+        assert "applied" not in result
+        assert "geometryChange" not in result
+        (row,) = result["parameterValues"]
+        assert row["parameter"] == "length"
+        assert row["property"] == "Length"
+        assert row["after"] == {"value": "25 mm", "expression": None}
+        assert "before" not in row
         assert result["bodyReport"]["ok"] is True
         definition = next(
             entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "edit_feature"
@@ -736,15 +867,15 @@ def test_edit_feature_compact_response_detail_keeps_body_report() -> None:
 
 def test_edit_feature_reports_supported_kinds_for_unsupported_feature() -> None:
     with load_features() as module:
-        fillet = FakeFeature(
-            "Fillet",
-            "PartDesign::Fillet",
-            properties=("Base", "Radius"),
+        thickness = FakeFeature(
+            "Thickness",
+            "PartDesign::Thickness",
+            properties=("Base", "Value", "Reversed"),
             shape=FakeShape(),
         )
-        body = FakeBody(members=[fillet], tip=fillet, shape=fillet.Shape)
+        body = FakeBody(members=[thickness], tip=thickness, shape=thickness.Shape)
         doc = FakeDoc(body, supported=SUPPORTED)
-        doc.Objects.append(fillet)
+        doc.Objects.append(thickness)
         ctx = FakeCtx(doc)
 
         with pytest.raises(ToolError) as excinfo:
@@ -753,19 +884,26 @@ def test_edit_feature_reports_supported_kinds_for_unsupported_feature() -> None:
                 {
                     "document": "Doc",
                     "body": "Body",
-                    "object": "Fillet",
+                    "object": "Thickness",
                     "parameters": {"radius": 2},
                 },
             )
 
         error = excinfo.value
         assert error.code == VALIDATION_FAILED
-        assert "pad, pocket, hole, gear_profile" in error.message
-        assert error.details == {
-            "typeId": "PartDesign::Fillet",
-            "supportedKinds": ["pad", "pocket", "hole", "gear_profile"],
-            "nextTool": "edit_object",
-        }
+        assert error.details["typeId"] == "PartDesign::Thickness"
+        assert error.details["nextTool"] == "edit_object"
+        assert error.details["supportedKinds"] == [
+            "pad",
+            "pocket",
+            "hole",
+            "gear_profile",
+            "fillet",
+            "chamfer",
+            "linear_pattern",
+            "polar_pattern",
+            "revolve",
+        ]
         assert doc.transactions == []
 
 
@@ -856,7 +994,7 @@ def test_support_and_properties_apply_to_the_created_feature() -> None:
             ctx,
             kind="sketch",
             name="Sketch002",
-            support={"object": "Sketch", "subelement": ""},
+            support={"object": "Sketch"},
             properties={"MapMode": "FlatFace"},
         )
 
@@ -880,7 +1018,7 @@ def test_support_without_attachment_properties_is_rejected() -> None:
                 kind="pad",
                 name="Pad",
                 profile="Sketch",
-                support={"object": "Sketch", "subelement": ""},
+                support={"object": "Sketch"},
                 properties={"MapMode": "FlatFace"},
             )
 
@@ -942,7 +1080,7 @@ def test_dressup_requires_a_subelement_list_before_the_transaction() -> None:
                 kind="fillet",
                 name="Fillet",
                 parameters={
-                    "base": {"object": "Sketch", "subelement": ""},
+                    "base": {"object": "Sketch"},
                     "subelements": [],
                     "radius": 1,
                 },
@@ -1056,7 +1194,7 @@ def test_fillet_resolves_base_and_subelements_into_one_link() -> None:
             kind="fillet",
             name="Fillet",
             parameters={
-                "base": {"object": "Plate", "subelement": ""},
+                "base": {"object": "Plate"},
                 "subelements": references,
                 "radius": 1.5,
             },
@@ -1093,7 +1231,7 @@ def test_fillet_rejects_a_foreign_base_before_the_transaction() -> None:
                 kind="fillet",
                 name="Fillet",
                 parameters={
-                    "base": {"object": "Plate", "subelement": ""},
+                    "base": {"object": "Plate"},
                     "subelements": [geometry.make_reference(ctx, doc, outsider, "edge", 1)],
                     "radius": 1,
                 },
@@ -1162,7 +1300,7 @@ def test_nonpositive_dressup_scalar_is_refused_pretransaction() -> None:
                 kind="fillet",
                 name="Fillet",
                 parameters={
-                    "base": {"object": "Sketch", "subelement": ""},
+                    "base": {"object": "Sketch"},
                     "subelements": [{"object": "Sketch", "subelement": "token"}],
                     "radius": 0,
                 },
@@ -1459,7 +1597,7 @@ def test_subshape_binder_binds_whole_object_and_signed_face() -> None:
         ctx = FakeCtx(doc)
 
         references = [
-            {"object": "Plate", "subelement": ""},
+            {"object": "Plate"},
             geometry.make_reference(ctx, doc, plate, "face", 3),
         ]
 
@@ -1891,9 +2029,13 @@ def test_edit_feature_applies_hole_cut_and_reports_rows() -> None:
         assert hole.HoleCutType == "Countersink"
         assert hole.HoleCutDiameter == 8.0
         assert hole.HoleCutCountersinkAngle == 90.0
-        rows = {row["name"]: row for row in result["change"]["properties"]}
-        assert rows["cut"]["after"] == "Countersink"
-        assert rows["countersink_diameter"]["after"] == 8.0
+        rows = {row["parameter"]: row for row in result["parameterValues"]}
+        assert rows["cut"]["property"] == "HoleCutType"
+        assert rows["cut"]["after"] == {"value": "Countersink", "expression": None}
+        assert rows["countersink_diameter"]["property"] == "HoleCutDiameter"
+        assert rows["countersink_diameter"]["after"]["value"] == 8.0
+        assert rows["countersink_angle"]["property"] == "HoleCutCountersinkAngle"
+        assert rows["countersink_angle"]["after"]["value"] == 90.0
         assert doc.transactions[-1] == ("commit",)
 
 
@@ -1929,13 +2071,18 @@ def test_edit_feature_updates_thread_size_on_existing_threaded_hole() -> None:
                 "body": "Body",
                 "object": "Hole",
                 "parameters": {"thread_size": "M8"},
+                "response_detail": "full",
             },
         )
 
         assert hole.ThreadSize == "M8"
-        assert "thread_size->ThreadSize=M8" in result["applied"]
-        rows = {row["name"]: row for row in result["change"]["properties"]}
-        assert rows["thread_size"] == {"name": "thread_size", "before": "M6", "after": "M8"}
+        # Full detail is requested explicitly: the before-state delta is
+        # opt-in evidence, not the default.
+        (row,) = result["parameterValues"]
+        assert row["parameter"] == "thread_size"
+        assert row["property"] == "ThreadSize"
+        assert row["before"] == {"value": "M6", "expression": None}
+        assert row["after"] == {"value": "M8", "expression": None}
         assert doc.transactions[-1] == ("commit",)
 
 
@@ -1992,8 +2139,8 @@ def test_edit_feature_accepts_a_native_quantity_length() -> None:
 
     assert pad.Length.Value == 25.0
     assert doc.transactions[-1] == ("commit",)
-    rows = {row["name"]: row for row in result["change"]["properties"]}
-    assert rows["length"]["after"] == "25 mm"
+    rows = {row["parameter"]: row for row in result["parameterValues"]}
+    assert rows["length"]["after"] == {"value": "25 mm", "expression": None}
 
 
 def test_edit_feature_stale_expected_generation_refuses_before_the_transaction() -> None:
@@ -2027,3 +2174,876 @@ def test_edit_feature_stale_expected_generation_refuses_before_the_transaction()
         }
         assert doc.transactions == []
         assert pad.Length == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 semantic edits: five new kinds, uniform parameterValues readback,
+# and forced-expression rollback.
+# ---------------------------------------------------------------------------
+
+
+class _AngleQuantity:
+    """A native ``Angle`` quantity double: reads back via ``getValueAs``."""
+
+    def __init__(self, degrees: float) -> None:
+        self._degrees = float(degrees)
+        self.UserString = f"{self._degrees:g} deg"
+
+    def __str__(self) -> str:
+        return self.UserString
+
+    def getValueAs(self, unit: str) -> Any:
+        return types.SimpleNamespace(Value=self._degrees)
+
+    @property
+    def Value(self) -> float:
+        return self._degrees
+
+
+class _RecomputeDoc(FakeDoc):
+    """A document whose recompute resolves bound expressions like native FreeCAD.
+
+    ``bindings`` maps a stored expression string onto the value its property
+    must read after the recompute; expressions without an entry leave the
+    property untouched, like a sketch constraint the fake cannot evaluate.
+    """
+
+    def __init__(
+        self, body: FakeBody, *, supported: tuple[str, ...], bindings: dict[str, Any]
+    ) -> None:
+        super().__init__(body, supported=supported)
+        self.bindings = dict(bindings)
+
+    def recompute(self) -> None:
+        super().recompute()
+        for obj in self.Objects:
+            if not isinstance(obj, FakeFeature):
+                continue
+            for prop, expression in obj._values.get("_expressions", {}).items():
+                resolved = self.bindings.get(expression)
+                if expression is not None and resolved is not None:
+                    setattr(obj, prop, resolved)
+
+
+def make_edit_doc(
+    name: str,
+    type_id: str,
+    properties: tuple[str, ...],
+    values: dict[str, Any],
+    *,
+    bindings: dict[str, Any] | None = None,
+) -> tuple[FakeFeature, FakeDoc]:
+    feature = FakeFeature(name, type_id, properties=properties, shape=FakeShape())
+    object.__setattr__(feature, "_values", dict(values))
+    body = FakeBody(members=[feature], tip=feature, shape=feature.Shape)
+    if bindings is None:
+        doc: FakeDoc = FakeDoc(body, supported=SUPPORTED)
+    else:
+        doc = _RecomputeDoc(body, supported=SUPPORTED, bindings=bindings)
+    doc.Objects.append(feature)
+    return feature, doc
+
+
+def edit(module: types.ModuleType, ctx: FakeCtx, **arguments: Any):
+    arguments.setdefault("document", "Doc")
+    arguments.setdefault("body", "Body")
+    return module.HANDLERS["edit_feature"](ctx, arguments)
+
+
+def _parameter_rows(result: dict) -> dict[str, dict]:
+    return {row["parameter"]: row for row in result["parameterValues"]}
+
+
+_EDIT_KIND_FIXTURES = [
+    (
+        "fillet",
+        "PartDesign::Fillet",
+        ("Base", "Radius"),
+        {"Radius": 1.0},
+        {"radius": 2.5},
+        {"radius": ("Radius", 2.5)},
+    ),
+    (
+        "chamfer",
+        "PartDesign::Chamfer",
+        ("Base", "Size"),
+        {"Size": 1.0},
+        {"size": 1.5},
+        {"size": ("Size", 1.5)},
+    ),
+    (
+        "linear_pattern",
+        "PartDesign::LinearPattern",
+        ("Originals", "Direction", "Length", "Occurrences"),
+        {"Length": 20.0, "Occurrences": 3},
+        {"length": 30, "count": 4},
+        {"length": ("Length", 30.0), "count": ("Occurrences", 4)},
+    ),
+    (
+        "polar_pattern",
+        "PartDesign::PolarPattern",
+        ("Originals", "Axis", "Angle", "Occurrences"),
+        {"Angle": 360.0, "Occurrences": 3},
+        {"angle": 270, "count": 6},
+        {"angle": ("Angle", 270.0), "count": ("Occurrences", 6)},
+    ),
+    (
+        "revolve",
+        "PartDesign::Revolution",
+        ("Profile", "ReferenceAxis", "Angle", "Reversed"),
+        {"Angle": 360.0, "Reversed": False},
+        {"angle": 90, "reversed": True},
+        {"angle": ("Angle", 90.0), "reversed": ("Reversed", True)},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("kind", "type_id", "properties", "values", "parameters", "expected"),
+    _EDIT_KIND_FIXTURES,
+)
+def test_edit_feature_new_kinds_write_native_values(
+    kind: str,
+    type_id: str,
+    properties: tuple[str, ...],
+    values: dict[str, Any],
+    parameters: dict[str, Any],
+    expected: dict[str, tuple[str, Any]],
+) -> None:
+    with load_features() as module:
+        feature, doc = make_edit_doc("Target", type_id, properties, values)
+        ctx = FakeCtx(doc)
+
+        result = edit(module, ctx, object="Target", parameters=parameters)
+
+        assert result["object"]["typeId"] == type_id
+        assert result["bodyTip"] == "Target"
+        assert result["bodyReport"]["ok"] is True
+        rows = _parameter_rows(result)
+        assert sorted(rows) == sorted(parameters)
+        for parameter, (prop, native) in expected.items():
+            assert rows[parameter]["property"] == prop
+            assert rows[parameter]["after"] == {"value": native, "expression": None}
+            assert getattr(feature, prop) == native
+        assert doc.transactions[-1] == ("commit",)
+        definition = next(
+            entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "edit_feature"
+        )
+        validate_schema(result, definition["outputSchema"])
+
+
+def test_edit_feature_refuses_a_wrong_kind_parameter() -> None:
+    with load_features() as module:
+        feature, doc = make_edit_doc(
+            "Pad",
+            "PartDesign::Pad",
+            ("Profile", "Length", "Type", "Reversed"),
+            {"Length": 10.0, "Type": "Length"},
+        )
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            edit(module, ctx, object="Pad", parameters={"radius": 2})
+
+        error = excinfo.value
+        assert error.code == VALIDATION_FAILED
+        assert error.details["kind"] == "pad"
+        assert error.details["parameter"] == "radius"
+        assert error.details["nextTool"] == "inspect_objects"
+        assert error.details["supportedParameters"] == [
+            "extent",
+            "face",
+            "length",
+            "reversed",
+            "symmetric",
+        ]
+        assert doc.transactions == []
+        assert feature.Length == 10.0
+
+
+def test_edit_feature_refuses_pattern_count_on_a_revolve() -> None:
+    with load_features() as module:
+        feature, doc = make_edit_doc(
+            "Rev",
+            "PartDesign::Revolution",
+            ("Profile", "ReferenceAxis", "Angle", "Reversed"),
+            {"Angle": 360.0, "Reversed": False},
+        )
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            edit(module, ctx, object="Rev", parameters={"count": 4})
+
+        error = excinfo.value
+        assert error.code == VALIDATION_FAILED
+        assert error.details["kind"] == "revolve"
+        assert error.details["parameter"] == "count"
+        assert error.details["supportedParameters"] == ["angle", "reversed"]
+        assert error.details["nextTool"] == "inspect_objects"
+        assert doc.transactions == []
+        assert feature.Angle == 360.0
+
+
+def test_edit_feature_angle_expression_past_360_rolls_back() -> None:
+    """A recompute resolving an angle expression to 400 degrees refuses."""
+    with load_features() as module:
+        feature, doc = make_edit_doc(
+            "Rev",
+            "PartDesign::Revolution",
+            ("Profile", "ReferenceAxis", "Angle", "Reversed"),
+            {"Angle": 360.0, "Reversed": False},
+            bindings={"Sketch.Constraints.sweep": _AngleQuantity(400)},
+        )
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            edit(
+                module,
+                ctx,
+                object="Rev",
+                parameters={"angle": {"expression": "Sketch.Constraints.sweep"}},
+            )
+
+        error = excinfo.value
+        assert error.code == VALIDATION_FAILED
+        assert error.details["operationState"] == "rolled_back"
+        assert "resolved" in error.message
+        assert "abort" in [transaction[0] for transaction in doc.transactions]
+        # The rollback restores the pre-mutation value and clears the binding.
+        assert feature.Angle == 360.0
+        assert feature.getExpression("Angle") is None
+
+
+def test_edit_feature_failed_expression_restores_prior_binding() -> None:
+    """A rejected replacement expression preserves the previous binding."""
+
+    with load_features() as module:
+        feature, doc = make_edit_doc(
+            "Rev",
+            "PartDesign::Revolution",
+            ("Profile", "ReferenceAxis", "Angle", "Reversed"),
+            {"Angle": _AngleQuantity(135), "Reversed": False},
+            bindings={"Sketch.Valid": _AngleQuantity(135), "Sketch.Invalid": _AngleQuantity(400)},
+        )
+        feature.setExpression("Angle", "Sketch.Valid")
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            edit(
+                module,
+                ctx,
+                object="Rev",
+                parameters={"angle": {"expression": "Sketch.Invalid"}},
+            )
+
+        assert excinfo.value.details["operationState"] == "rolled_back"
+        assert feature.getExpression("Angle") == "Sketch.Valid"
+        assert feature.Angle.Value == 135
+
+
+class _RestoreFailingDoc(_RecomputeDoc):
+    """A document whose recompute refuses the post-rollback restore pass.
+
+    Opt-in and count-keyed so no shared ``FakeDoc``/``_RecomputeDoc`` behavior
+    changes. ``recompute_count`` is the number of recomputes already finished,
+    so the override delegates and succeeds on counts 0 and 1 — the mutation's
+    own post-body recompute and the gate's rollback recompute — and raises
+    from count 2 onward, which is the recompute ``_restore_parameter_expressions``
+    issues once the transaction has already aborted. Failing at count 1 instead
+    would break the gate's rollback recompute, exercising rollback stage
+    ``recompute`` rather than the restore path under test. The increment before
+    the raise keeps the count truthful and fails every later call too.
+    """
+
+    def recompute(self) -> None:
+        if self.recompute_count >= 2:
+            self.recompute_count += 1
+            raise RuntimeError("the restore recompute refused to run")
+        super().recompute()
+
+
+def test_edit_feature_expression_restore_failure_reports_rollback_failed() -> None:
+    """A failed restore after a rolled-back edit never reads as a clean rollback."""
+
+    with load_features() as module:
+        feature = FakeFeature(
+            "Rev",
+            "PartDesign::Revolution",
+            properties=("Profile", "ReferenceAxis", "Angle", "Reversed"),
+            shape=FakeShape(),
+        )
+        object.__setattr__(feature, "_values", {"Angle": _AngleQuantity(135), "Reversed": False})
+        body = FakeBody(members=[feature], tip=feature, shape=feature.Shape)
+        doc = _RestoreFailingDoc(
+            body,
+            supported=SUPPORTED,
+            bindings={"Sketch.Valid": _AngleQuantity(135), "Sketch.Invalid": _AngleQuantity(400)},
+        )
+        doc.Objects.append(feature)
+        feature.setExpression("Angle", "Sketch.Valid")
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            edit(
+                module,
+                ctx,
+                object="Rev",
+                parameters={"angle": {"expression": "Sketch.Invalid"}},
+            )
+
+        error = excinfo.value
+        details = error.details
+        assert error.code == VALIDATION_FAILED
+        # The gate rolled the mutation back, but the expression restore that
+        # follows it did not run: the caller must not read this as rolled_back.
+        assert details["operationState"] == "rollback_failed"
+        assert details["rollbackFailed"] is True
+        assert details["rollbackStage"] == "restore_expressions"
+        assert details["originalError"].startswith("ToolError: ")
+        assert "angle resolved to 400.0 degrees" in details["originalError"]
+        assert details["originalDetails"] == {
+            "operationState": "rolled_back",
+            "nextAction": "retry_from_original_state",
+        }
+        assert "restoring the prior expression bindings also failed" in error.message
+        assert "the restore recompute refused to run" in error.message
+        # Two recomputes succeeded before the third one raised, so the failure
+        # landed on the restoration call and not on the gate's rollback stage.
+        assert doc.recompute_count == 3
+        assert ("commit",) not in doc.transactions
+
+
+def test_edit_feature_length_expression_resolving_to_zero_rolls_back() -> None:
+    """A recompute resolving a length expression to zero refuses the edit."""
+    with load_features() as module:
+        feature, doc = make_edit_doc(
+            "Pattern",
+            "PartDesign::LinearPattern",
+            ("Originals", "Direction", "Length", "Occurrences"),
+            {"Length": 20.0, "Occurrences": 3},
+            bindings={"Sketch.Constraints.pitch": 0.0},
+        )
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            edit(
+                module,
+                ctx,
+                object="Pattern",
+                parameters={"length": {"expression": "Sketch.Constraints.pitch"}},
+            )
+
+        error = excinfo.value
+        assert error.code == VALIDATION_FAILED
+        assert error.details["operationState"] == "rolled_back"
+        assert "resolved" in error.message
+        assert "abort" in [transaction[0] for transaction in doc.transactions]
+        assert feature.Length == 20.0
+        assert feature.Occurrences == 3
+        assert feature.getExpression("Length") is None
+
+
+def test_edit_feature_valid_expression_reports_binding_and_resolved_value() -> None:
+    with load_features() as module:
+        feature, doc = make_edit_doc(
+            "Rev",
+            "PartDesign::Revolution",
+            ("Profile", "ReferenceAxis", "Angle", "Reversed"),
+            {"Angle": 360.0, "Reversed": False},
+            bindings={"Sketch.Constraints.sweep": _AngleQuantity(90)},
+        )
+        ctx = FakeCtx(doc)
+
+        result = edit(
+            module,
+            ctx,
+            object="Rev",
+            parameters={"angle": {"expression": "Sketch.Constraints.sweep"}},
+            response_detail="full",
+        )
+
+        (row,) = result["parameterValues"]
+        assert row["property"] == "Angle"
+        # The persisted binding AND the resolved value, not a setter receipt.
+        assert row["after"]["expression"] == "Sketch.Constraints.sweep"
+        assert row["after"]["value"] == "90 deg"
+        assert row["before"] == {"value": 360.0, "expression": None}
+        assert feature.Angle.Value == 90.0
+        assert doc.transactions[-1] == ("commit",)
+        definition = next(
+            entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "edit_feature"
+        )
+        validate_schema(result, definition["outputSchema"])
+
+
+def test_edit_feature_numeric_write_clears_a_prior_expression() -> None:
+    with load_features() as module:
+        feature, doc = make_edit_doc(
+            "Pad",
+            "PartDesign::Pad",
+            ("Profile", "Length", "Type"),
+            {"Length": 10.0, "Type": "Length"},
+        )
+        feature.setExpression("Length", "Sketch.Constraints.width")
+        ctx = FakeCtx(doc)
+
+        result = edit(module, ctx, object="Pad", parameters={"length": 25})
+
+        assert feature.Length == 25.0
+        assert feature.getExpression("Length") is None
+        rows = _parameter_rows(result)
+        assert rows["length"]["after"] == {"value": 25.0, "expression": None}
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_edit_feature_omitted_parameters_preserve_scalars_and_links() -> None:
+    with load_features() as module:
+        sketch = FakeFeature("Sketch", "Sketcher::SketchObject", properties=())
+        direction = (sketch, ["H_Axis"])
+        feature, doc = make_edit_doc(
+            "Pattern",
+            "PartDesign::LinearPattern",
+            ("Originals", "Direction", "Length", "Occurrences"),
+            {"Length": 20.0, "Occurrences": 4, "Direction": direction},
+        )
+        ctx = FakeCtx(doc)
+
+        result = edit(module, ctx, object="Pattern", parameters={"count": 3})
+
+        assert feature.Occurrences == 3
+        assert feature.Length == 20.0
+        assert feature.Direction is direction
+        rows = _parameter_rows(result)
+        assert sorted(rows) == ["count"]
+        assert rows["count"]["after"] == {"value": 3, "expression": None}
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_edit_feature_omitted_parameters_preserve_a_live_expression() -> None:
+    with load_features() as module:
+        feature, doc = make_edit_doc(
+            "Rev",
+            "PartDesign::Revolution",
+            ("Profile", "ReferenceAxis", "Angle", "Reversed"),
+            {"Angle": 360.0, "Reversed": False},
+        )
+        feature.setExpression("Angle", "Sketch.Constraints.sweep")
+        ctx = FakeCtx(doc)
+
+        result = edit(module, ctx, object="Rev", parameters={"reversed": True})
+
+        assert feature.Reversed is True
+        assert feature.Angle == 360.0
+        assert feature.getExpression("Angle") == "Sketch.Constraints.sweep"
+        rows = _parameter_rows(result)
+        assert sorted(rows) == ["reversed"]
+        assert rows["reversed"]["property"] == "Reversed"
+        assert rows["reversed"]["after"] == {"value": True, "expression": None}
+        assert doc.transactions[-1] == ("commit",)
+
+
+def test_edit_feature_full_detail_adds_deltas_and_geometry_change() -> None:
+    with load_features() as module:
+        _feature, doc = make_edit_doc(
+            "Fillet",
+            "PartDesign::Fillet",
+            ("Base", "Radius"),
+            {"Radius": 1.0},
+        )
+        ctx = FakeCtx(doc)
+
+        full = edit(
+            module, ctx, object="Fillet", parameters={"radius": 2.0}, response_detail="full"
+        )
+        compact = edit(module, ctx, object="Fillet", parameters={"radius": 3.0})
+
+        full_row = _parameter_rows(full)["radius"]
+        assert full_row["before"] == {"value": 1.0, "expression": None}
+        assert full_row["after"]["value"] == 2.0
+        assert full["geometryChange"]["solidCountBefore"] == 1
+        assert full["geometryChange"]["solidCountAfter"] == 1
+
+        compact_row = _parameter_rows(compact)["radius"]
+        assert "before" not in compact_row
+        assert compact_row["after"]["value"] == 3.0
+        assert "geometryChange" not in compact
+
+        definition = next(
+            entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "edit_feature"
+        )
+        for result in (full, compact):
+            validate_schema(result, definition["outputSchema"])
+
+
+# ---------------------------------------------------------------------------
+# Query-origin references resolve once per operation.
+# ---------------------------------------------------------------------------
+
+
+class _AdvancingCtx(FakeCtx):
+    """A context whose document generation advances on every recompute.
+
+    Native FreeCAD bumps the generation when the tool creates an object or
+    recomputes the document, so a second resolution of the caller's
+    expected_generation would abort a documented call. The prepared query
+    context must serve both the preflight and the applier.
+    """
+
+    def __init__(self, doc: FakeDoc) -> None:
+        super().__init__(doc)
+        self.generation = 1
+        original = doc.recompute
+
+        def recompute() -> None:
+            self.generation += 1
+            original()
+
+        doc.recompute = recompute  # type: ignore[method-assign]
+
+    def document_generation(self, doc: FakeDoc) -> int:
+        return self.generation
+
+
+def test_fillet_query_subelements_survive_the_base_recompute() -> None:
+    """A generation-stating query subelement list is not re-guarded."""
+
+    with load_features() as module:
+        edge_shape = FakeShape(solids=1, edges=_native_edges(2))
+        plate = FakeFeature(
+            "Plate", "PartDesign::Pad", properties=("Profile", "Length"), shape=edge_shape
+        )
+        body = FakeBody(members=[plate], shape=edge_shape)
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.append(plate)
+        ctx = _AdvancingCtx(doc)
+        # The caller states the generation it inspected, as the schema allows.
+        stated = ctx.document_generation(doc)
+
+        result = call(
+            module,
+            ctx,
+            kind="fillet",
+            name="Fillet",
+            parameters={
+                "base": {"object": "Plate"},
+                "subelements": [
+                    {
+                        "object": "Plate",
+                        "query": [{"role": "edge"}],
+                        "expected_generation": stated,
+                    }
+                ],
+                "radius": 1.5,
+            },
+        )
+
+        feature = doc.getObject("Fillet")
+        assert result["object"]["typeId"] == "PartDesign::Fillet"
+        linked_obj, labels = feature.Base
+        assert linked_obj is plate
+        assert labels == ["Edge1", "Edge2"]
+        # The receipt names the parameter and its selection-time count.
+        assert result["resolvedSelections"][0]["parameter"] == "subelements[0]"
+        assert result["resolvedSelections"][0]["count"] == 2
+
+
+def test_pad_up_to_face_query_survives_the_creation_generation_bump() -> None:
+    """The applier consumes the prepared selection, not a second query run."""
+
+    with load_features() as module:
+        face_shape = FakeShape(solids=1, faces=[object()])
+        sketch = FakeFeature("Sketch", "Sketcher::SketchObject", properties=("Profile",))
+        plate = FakeFeature(
+            "Plate", "PartDesign::Pad", properties=("Profile", "Length"), shape=face_shape
+        )
+        body = FakeBody(members=[plate, sketch], shape=face_shape)
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.extend([plate, sketch])
+        # The harness's Pad fallback omits UpToFace; add it for this case.
+        original_new_object = body.newObject
+
+        def new_object(type_id: str, name: str) -> Any:
+            feature = original_new_object(type_id, name)
+            if type_id == "PartDesign::Pad":
+                feature.PropertiesList.append("UpToFace")
+            return feature
+
+        object.__setattr__(body, "newObject", new_object)
+        ctx = _AdvancingCtx(doc)
+        stated = ctx.document_generation(doc)
+
+        call(
+            module,
+            ctx,
+            kind="pad",
+            name="Pad",
+            profile="Sketch",
+            parameters={
+                "extent": "up_to_face",
+                "face": {
+                    "object": "Plate",
+                    "query": [{"role": "face"}],
+                    "expected_generation": stated,
+                },
+            },
+        )
+
+        feature = doc.getObject("Pad")
+        assert feature is not None
+        linked_obj, labels = feature.UpToFace
+        assert linked_obj is plate
+        assert labels == ["Face1"]
+
+
+def _touching_edge_plate(module: types.ModuleType, *, edges: int = 2) -> tuple[Any, ...]:
+    """A dress-up base whose normalization actually runs native touch().
+
+    A real PartDesign feature exposes ``touch``, so ``_apply_base_list``
+    recomputes the base and advances the generation; a fixture without it
+    would never exercise the re-verification path.
+    """
+
+    edge_shape = FakeShape(solids=1, edges=_native_edges(edges))
+    plate = FakeFeature(
+        "Plate", "PartDesign::Pad", properties=("Profile", "Length"), shape=edge_shape
+    )
+    plate.touch = lambda: None
+    body = FakeBody(members=[plate], shape=edge_shape)
+    doc = FakeDoc(body, supported=SUPPORTED)
+    doc.Objects.append(plate)
+    return plate, body, doc
+
+
+def test_query_subelements_survive_a_real_base_touch_and_recompute() -> None:
+    """The post-normalization re-verification is not blocked by the guard."""
+
+    with load_features() as module:
+        plate, _body, doc = _touching_edge_plate(module)
+        ctx = _AdvancingCtx(doc)
+        stated = ctx.document_generation(doc)
+
+        result = call(
+            module,
+            ctx,
+            kind="fillet",
+            name="Fillet",
+            parameters={
+                "base": {"object": "Plate"},
+                "subelements": [
+                    {
+                        "object": "Plate",
+                        "query": [{"role": "edge"}],
+                        "expected_generation": stated,
+                    }
+                ],
+                "radius": 1.5,
+            },
+        )
+
+        feature = doc.getObject("Fillet")
+        linked_obj, labels = feature.Base
+        assert linked_obj is plate
+        assert labels == ["Edge1", "Edge2"]
+        assert result["resolvedSelections"][0]["count"] == 2
+
+
+def test_stale_generation_still_refuses_at_operation_start() -> None:
+    """The operation-start guard survives; only re-verification drops it."""
+
+    with load_features() as module:
+        _plate, _body, doc = _touching_edge_plate(module)
+        ctx = _AdvancingCtx(doc)
+        stale = ctx.document_generation(doc) - 1
+
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                ctx,
+                kind="fillet",
+                name="Fillet",
+                parameters={
+                    "base": {"object": "Plate"},
+                    "subelements": [
+                        {
+                            "object": "Plate",
+                            "query": [{"role": "edge"}],
+                            "expected_generation": stale,
+                        }
+                    ],
+                    "radius": 1.5,
+                },
+            )
+
+        assert excinfo.value.details["reason"] == "stale_generation"
+        # Refused before the transaction: no abort, no created feature.
+        assert doc.transactions == []
+        assert doc.getObject("Fillet") is None
+
+
+def _regenerating_plate(
+    edges: list[Any],
+    *,
+    regenerated: list[Any] | None = None,
+) -> tuple[Any, Any, Any]:
+    """A base whose normalization replaces its subshapes with fresh doubles.
+
+    The base's native re-execution regenerates the element map, so the
+    edges the dress-up re-resolves are brand-new objects with no identity
+    relation (not even ``isSame``) to the selection-time ones. Fingerprint
+    comparison is what decides whether they still bind.
+    """
+
+    edge_shape = FakeShape(solids=1, edges=list(edges))
+    plate = FakeFeature(
+        "Plate", "PartDesign::Pad", properties=("Profile", "Length"), shape=edge_shape
+    )
+
+    def regenerate_edges() -> None:
+        fresh = FakeShape(solids=1, edges=list(regenerated if regenerated is not None else edges))
+        object.__setattr__(plate, "_shape", fresh)
+        body._values["_shape"] = fresh
+
+    plate.touch = regenerate_edges
+    body = FakeBody(members=[plate], shape=edge_shape)
+    doc = FakeDoc(body, supported=SUPPORTED)
+    doc.Objects.append(plate)
+    return plate, body, doc
+
+
+def _coarse_facts(edge: Any) -> tuple:
+    """The coarse geometry two edges may share while their paths differ."""
+
+    box = edge.BoundBox
+    return (
+        edge.Length,
+        (box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax),
+        (edge.CenterOfMass.x, edge.CenterOfMass.y, edge.CenterOfMass.z),
+    )
+
+
+def _fillet_edges(module: types.ModuleType, ctx: FakeCtx, *, name: str = "Fillet") -> Any:
+    """Create a fillet over the whole `Plate` edge query."""
+
+    return call(
+        module,
+        ctx,
+        kind="fillet",
+        name=name,
+        parameters={
+            "base": {"object": "Plate"},
+            "subelements": [{"object": "Plate", "query": [{"role": "edge"}]}],
+            "radius": 1.5,
+        },
+    )
+
+
+def test_dressup_accepts_regenerated_but_geometrically_identical_edges() -> None:
+    """A recompute that regenerates equal geometry still binds the selection.
+
+    The base's normalization re-executes the feature, so the edges the
+    dress-up re-resolves are new native objects that no ``isSame`` call
+    could relate to the selection-time ones (the doubles define none).
+    Their document-space fingerprints are identical, so the same indices
+    must still be accepted.
+    """
+
+    with load_features() as module:
+        selected = _native_edges(2)
+        plate, _body, doc = _regenerating_plate(
+            selected,
+            # Identical geometry, deliberately different objects.
+            regenerated=_native_edges(2),
+        )
+        original_shape = plate.Shape
+        ctx = _AdvancingCtx(doc)
+
+        result = _fillet_edges(module, ctx)
+
+        # The regeneration really happened: different shape, different edges.
+        assert plate.Shape is not original_shape
+        assert plate.Shape.Edges[0] is not selected[0]
+        feature = doc.getObject("Fillet")
+        assert feature is not None
+        linked_obj, labels = feature.Base
+        assert linked_obj is plate
+        assert labels == ["Edge1", "Edge2"]
+        assert result["resolvedSelections"][0]["count"] == 2
+
+
+def test_dressup_refuses_when_edge_geometry_changes_across_normalization() -> None:
+    """A recompute that moves the selected edges refuses the dress-up."""
+
+    with load_features() as module:
+        _plate, _body, doc = _regenerating_plate(
+            _native_edges(2),
+            # Same edge count and index set; the segments are twice as long.
+            regenerated=[
+                _NativeEdge(start=(0.0, float(index), 0.0), end=(20.0, float(index), 0.0))
+                for index in range(2)
+            ],
+        )
+        ctx = _AdvancingCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            _fillet_edges(module, ctx)
+
+        assert excinfo.value.details["reason"] == "selection_changed"
+        assert excinfo.value.details["parameter"] == "subelements[0]"
+        assert doc.getObject("Fillet") is None
+        # Refused inside the mutation gate: the transaction rolled back.
+        assert ("abort",) in doc.transactions
+
+
+def test_dressup_refuses_endpoint_change_within_the_same_coarse_bounds() -> None:
+    """Bounds, length and center agree; the endpoints do not.
+
+    A reversed segment has the identical bounding box, length and center of
+    mass, so only endpoint (and tangent) evidence can tell the two apart.
+    """
+
+    with load_features() as module:
+        original = _NativeEdge(start=(0.0, 0.0, 0.0), end=(10.0, 0.0, 0.0))
+        reversed_edge = _NativeEdge(start=(10.0, 0.0, 0.0), end=(0.0, 0.0, 0.0))
+        # Only the traversal direction differs: every coarse fact agrees, so
+        # bounds/length/center evidence alone could not separate them.
+        assert _coarse_facts(reversed_edge) == _coarse_facts(original)
+        _plate, _body, doc = _regenerating_plate(
+            [original, _native_edges(2)[1]],
+            regenerated=[reversed_edge, _native_edges(2)[1]],
+        )
+        ctx = _AdvancingCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            _fillet_edges(module, ctx)
+
+        assert excinfo.value.details["reason"] == "selection_changed"
+        assert doc.getObject("Fillet") is None
+
+
+def test_dressup_refuses_when_the_selection_geometry_is_unreadable() -> None:
+    """An absent fingerprint is never a match.
+
+    The doubles expose no readable geometry, so neither the selection-time
+    snapshot nor the re-resolved one carries enough evidence to prove the
+    correspondence; the dress-up refuses instead of binding blind.
+    """
+
+    with load_features() as module:
+
+        class _UnreadableEdge:
+            """A native edge double whose every geometry read fails."""
+
+            def __getattr__(self, name: str) -> Any:
+                raise RuntimeError(f"unreadable {name}")
+
+        _plate, _body, doc = _regenerating_plate(
+            [_UnreadableEdge(), _UnreadableEdge()],
+            regenerated=[_UnreadableEdge(), _UnreadableEdge()],
+        )
+        ctx = _AdvancingCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            _fillet_edges(module, ctx)
+
+        assert excinfo.value.details["reason"] == "selection_changed"
+        assert doc.getObject("Fillet") is None

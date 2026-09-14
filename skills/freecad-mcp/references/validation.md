@@ -28,7 +28,7 @@ Pass explicit `objects`. Default to compact detail. Use full detail only for sel
 
 After a spreadsheet edit, inspect the sheet with full detail. Confirm the target cell's content, formula, alias, value, and error state.
 
-The MCP add-on itself recomputes after create/edit and rejects objects reporting `invalid`, `error`, or `touched` state, or `isValid()==False`. Treat that as a stop condition, not a warning. Call `validate_geometry(document, objects=["Final"])` for the structured report: state, validity, solid count, volume, bounds, `shape.check` diagnostics, and maximum tolerance, optionally against `expected_solids` and `expected_bounds`.
+The MCP add-on itself recomputes after create/edit and rejects objects reporting `invalid`, `error`, or `touched` state, or `isValid()==False`. Treat that as a stop condition, not a warning. Call `validate_geometry(document, objects=["Final"])` for the structured report: state, validity, solid count, volume, bounds, `shape.check` diagnostics, and maximum tolerance, optionally against `expected_solids` and `expected_bounds`. The same call accepts a `checks` array of named acceptance checks (see [Measure fit and clearance](#5-measure-fit-and-clearance-with-both-modes)).
 
 ## 2. Validate the BRep
 
@@ -89,11 +89,34 @@ print({
 - `distance` returns the raw `distToShape` value. Treat a positive distance as necessary but not sufficient evidence of separation: OCC can report a positive distance while the shapes intersect (upstream issue: [distToShape returns positive value for intersecting parts](https://github.com/FreeCAD/FreeCAD/issues/25158)).
 - `interference` returns the common volume and reports `overlaps: true` only when that volume is positive. Surface-only, edge-only, or tangential contact has zero common volume and reports `overlaps: false`.
 - `difference` returns the volume of `a` that `b` does not cover (`a.cut(b)`), plus the result's `solid_count`, `bounds`, and `shape_valid`. Use it to quantify added or removed material, a protrusion, or a before/after delta. A fully consumed `a` reports `difference_volume` 0 with null bounds and no solids; the answer is a volume, not a clearance.
-- Use `distance` for clearance magnitude, `interference` for volumetric overlap, and both together with the stated tolerance for a fit decision. Report which modes a decision used.
+- Use `distance` for clearance magnitude, `interference` for volumetric overlap, and both together with the stated tolerance for a fit decision — or record the decision in one call with the `clearance_min` and `interference_max` checks below. Report which modes a decision used.
 
 For an inherited assembly, measure the unmodified model first. Treat its interference as the baseline, not automatically as a defect.
 
 After a change, attribute each interference delta to named geometry before you accept or reject it.
+
+### Named acceptance checks
+
+When a fit decision must be recorded as evidence in one call, pass `checks` (1–16) to `validate_geometry`. Each check is one of three closed kinds; an optional `id` (1–64 characters) defaults to `check-<one-based input position>`, and duplicate effective ids refuse with `duplicate_check_id`. Targets use the shared whole/signed/query union, so a query target resolves to exactly one shape and adds a `resolvedSelections` receipt.
+
+```json
+{
+  "document": "Assembly",
+  "checks": [
+    {"kind": "volume_range", "id": "lid-volume", "object": {"object": "Lid"}, "min": 5000, "max": 6000},
+    {"kind": "clearance_min", "a": {"object": "Lid"}, "b": {"object": "Box"}, "min": 0.2},
+    {"kind": "interference_max", "a": {"object": "Lid"}, "b": {"object": "Box"}}
+  ]
+}
+```
+
+- `volume_range`: the object's volume must lie inside `min` and/or `max` (mm³, inclusive; at least one bound is required; an empty or inverted range refuses before evaluation).
+- `clearance_min`: `min` is a strictly positive distance in mm. The check measures BOTH minimum distance and common volume and passes only when distance >= `min` AND the common volume is zero. A zero requested clearance is refused — use `interference_max` to permit touching.
+- `interference_max`: passes when the common volume <= `max` (mm³, default 0). Zero common volume permits contact and is never evidence of positive clearance.
+
+`objects` may be omitted when `checks` are supplied: the owner objects of the check targets are then reported in first-use order (capped at 100). An explicit `objects` list stays the exact report scope; with no checks, `objects` is required and the check-only fields are absent. The tool never defaults validation to every document object.
+
+Every fit target must be a valid solid with positive finite volume. A face, shell, or edge alone reports the row `indeterminate` with `reason: non_volumetric_target`; a malformed or invalid shape reports `target_invalid`; a missing shape reports `target_shapeless`; an unreadable measurement reports `measurement_unavailable` — never a pass and never a crash. Result rows carry `status: pass|fail|indeterminate`; `checksPassed` is true only when every check passed, and `accepted` combines `all_valid` (the object reports) with `checksPassed`. `accepted` is the single overall summary, never a substitute for the raw evidence.
 
 ## 6. Prove shape-preserving changes
 
@@ -107,7 +130,7 @@ For a refactor, compare the changed model with the accepted physical baseline.
 
 ## 7. Review the result visually
 
-Inspect the result with one `capture_view(document, focus_object=<final object>)` call: the default `overview` mode returns one labeled sheet with the `Isometric`, `Front`, `Back`, `Left`, `Right`, `Top`, and `Bottom` views, which catches accidental rotations, offsets, or missed features. Add `interior` when internal features matter and `fit` for a mating interface.
+Inspect the result with one `capture_view(document, focus={"object": <final object>})` call: the default `overview` mode returns one labeled sheet with the `Isometric`, `Front`, `Back`, `Left`, `Right`, `Top`, and `Bottom` views, which catches accidental rotations, offsets, or missed features. Add `interior` when internal features matter and `fit` for a mating interface.
 
 Read the capture against this list, and report the answer for each group:
 

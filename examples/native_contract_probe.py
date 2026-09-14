@@ -396,6 +396,7 @@ DOCUMENTED_FORMS: list[tuple[str, tuple, str]] = [
     ("Perpendicular", (0, 1), "none"),
     ("Equal", (2, 3), "none"),
     ("Tangent", (0, 2), "none"),
+    ("Tangent", (0, 2, 1, 1), "none"),
     ("Symmetric", (0, 1, 1, 2, -1), "none"),
     ("Symmetric", (0, 1, 1, 2, 0, 2), "none"),
     ("DistanceX", (0, 1, 1, 2), "mm"),
@@ -1722,10 +1723,12 @@ def measure_difference_payload(runner: Runner) -> dict:
         runner, doc, "ContractDiffSmall", "Part::Box", {"Length": 5.0, "Width": 5.0, "Height": 5.0}
     )
     forward = runner.client.call_tool(
-        "measure", {"document": doc, "a": big, "mode": "difference", "b": small}
+        "measure",
+        {"document": doc, "a": {"object": big}, "mode": "difference", "b": {"object": small}},
     )
     reverse = runner.client.call_tool(
-        "measure", {"document": doc, "a": small, "mode": "difference", "b": big}
+        "measure",
+        {"document": doc, "a": {"object": small}, "mode": "difference", "b": {"object": big}},
     )
     cleanup_failures = _delete_objects(runner, doc, [big, small])
     forward_volume = forward.get("difference_volume")
@@ -1777,7 +1780,7 @@ def delete_reroute_payload(runner: Runner) -> dict:
         for row in before["objects"]
         if row["name"] == third
     }
-    # A link property reads back as a canonical ``{object, subelement}``
+    # A whole-object link property reads back as a canonical ``{object}``
     # reference, and as null when the link is empty.
     linked_to = (link_before.get(third) or {}).get("object")
     body_before = runner.client.call_tool(
@@ -2077,7 +2080,11 @@ def run_probe_sequence(runner: Runner, payloads: dict, sweep: bool) -> None:
         "measure.difference",
         {
             "tool": "measure",
-            "arguments": {"mode": "difference", "a": "<10mm box>", "b": "<5mm box>"},
+            "arguments": {
+                "mode": "difference",
+                "a": {"object": "<10mm box>"},
+                "b": {"object": "<5mm box>"},
+            },
         },
         lambda: measure_difference_payload(runner),
     )[0]
@@ -2161,6 +2168,8 @@ def build_sweep_record(payloads: dict, version: str) -> dict:
     forms = payloads.get("constraint.forms")
     if forms is not None:
         probes["constraint.forms"] = forms
+        existing["freecad"] = version
+        existing["captured"] = now_iso()
     existing["probes"] = probes
     return existing
 
