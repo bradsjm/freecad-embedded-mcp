@@ -391,6 +391,7 @@ def expensive_feature_present(targets: list[Any]) -> bool:
 
 
 def _fail(message: str, details: dict | None = None) -> ToolError:
+    """Build a VALIDATION_FAILED tool error with the given message."""
     return ToolError(VALIDATION_FAILED, message, details)
 
 
@@ -491,6 +492,7 @@ def check_workload(ctx: Any, targets: list[Any]) -> None:
 
 
 def _check_gear(obj: Any) -> None:
+    """Refuse a gear proxy that is internal, high-precision or out of bounds."""
     if str(getattr(getattr(obj, "Proxy", None), "Type", "")) != "InvoluteGear":
         return
     if getattr(obj, "ExternalGear", None) is None:
@@ -512,6 +514,7 @@ def _check_gear(obj: Any) -> None:
 
 
 def _check_pattern(obj: Any) -> None:
+    """Bound a pattern feature's occurrences and referenced originals."""
     occurrences = getattr(obj, "Occurrences", None)
     if isinstance(occurrences, bool) or not isinstance(occurrences, int):
         return
@@ -537,6 +540,7 @@ def _check_pattern(obj: Any) -> None:
 
 
 def _check_originals(obj: Any, limit: int) -> None:
+    """Refuse a feature referencing more originals than the limit."""
     count = _original_count(obj)
     if count > limit:
         raise _fail(
@@ -546,6 +550,7 @@ def _check_originals(obj: Any, limit: int) -> None:
 
 
 def _original_count(obj: Any) -> int:
+    """Count a feature's Originals, refusing an unreadable list."""
     originals = getattr(obj, "Originals", None)
     if originals is None:
         return 0
@@ -559,6 +564,7 @@ def _original_count(obj: Any) -> int:
 
 
 def _check_sketch(obj: Any) -> None:
+    """Refuse a sketch holding more geometry or constraint rows than allowed."""
     for attribute, label in (("Geometry", "geometry"), ("Constraints", "constraint")):
         try:
             count = len(list(getattr(obj, attribute, ()) or ()))

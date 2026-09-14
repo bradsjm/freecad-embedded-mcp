@@ -247,6 +247,7 @@ def _require_recovery_directory(ctx: Any) -> str:
 
 
 def _checkpoint_failed(message: str, details: dict) -> ToolError:
+    """Build the shared ``checkpoint_failed`` refusal with recovery next-action details."""
     enriched = dict(details)
     enriched.update(
         {

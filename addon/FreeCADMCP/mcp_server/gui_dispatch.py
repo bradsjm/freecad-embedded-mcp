@@ -117,6 +117,7 @@ class Outcome:
 
     @property
     def ok(self) -> bool:
+        """True when the dispatch completed without an error."""
         return self.error is None
 
     @classmethod
@@ -161,6 +162,7 @@ class _Job:
         cancel_event: threading.Event | None,
         on_finished: Callable[[Outcome], Any] | None,
     ) -> None:
+        """Create a job with its Future, done event and exactly-once state."""
         self.task_id = task_id
         self.operation = operation
         self.fn = fn
@@ -201,13 +203,16 @@ class _WakeSignal(QtCore.QObject):
     _sig = QtCore.Signal()
 
     def __init__(self):
+        """Connect the wake signal for queued delivery on the GUI thread."""
         super().__init__()
         self._sig.connect(self._on_wake, QtCore.Qt.QueuedConnection)
 
     def wake(self) -> None:
+        """Emit the wake signal from any thread; Qt queues the slot call."""
         self._sig.emit()
 
     def _on_wake(self) -> None:
+        """Drain queued jobs without rescheduling the heartbeat chain."""
         process_gui_tasks(reschedule=False)
 
 
@@ -223,10 +228,12 @@ class _ShutdownSentinel:
     __slots__ = ("generation",)
 
     def __init__(self, generation: int) -> None:
+        """Tag the stop marker with the dispatcher generation that queued it."""
         self.generation = generation
 
 
 def _operation_label(fn: Callable[[], Any], operation_name: str | None) -> str:
+    """Return the operation name, falling back to the callable's name."""
     operation = operation_name or getattr(fn, "__name__", "GUI operation")
     if operation == "<lambda>":
         operation = "GUI operation"
@@ -234,6 +241,7 @@ def _operation_label(fn: Callable[[], Any], operation_name: str | None) -> str:
 
 
 def _safe_set_result(future: "concurrent.futures.Future[Outcome]", outcome: Outcome) -> None:
+    """Resolve the Future, ignoring a state already set by a waiter timeout."""
     try:
         future.set_result(outcome)
     except concurrent.futures.InvalidStateError:
@@ -301,6 +309,7 @@ def _create_job(
     cancel_event: threading.Event | None,
     on_finished: Callable[[Outcome], Any] | None,
 ) -> _Job:
+    """Build the job, refuse it under health/cancel/queue limits, else enqueue it."""
     job = _Job(
         next(_task_ids),
         _operation_label(fn, operation_name),
@@ -310,6 +319,7 @@ def _create_job(
     )
 
     def _reject(outcome: Outcome) -> None:
+        """Settle the job as refused without entering the FreeCAD dispatch."""
         job._future_done = True
         job._finished_fired = True
         _safe_set_result(job.future, outcome)
@@ -474,6 +484,7 @@ def _abandon(job: _Job, timeout: float) -> Outcome:
 
 
 def _flush_gui_events(delay_ms: int = 20) -> None:
+    """Pump pending GUI events, excluding user input and socket notifiers."""
     FreeCADGui.updateGui()
     app = QtWidgets.QApplication.instance()
     if app is None:
@@ -506,6 +517,7 @@ def _arm_heartbeat() -> None:
         generation = _generation
 
     def _tick() -> None:
+        """Heartbeat fallback: drain queued jobs for the arming generation."""
         process_gui_tasks(reschedule=True, generation=generation)
 
     QtCore.QTimer.singleShot(500, _tick)

@@ -10,6 +10,7 @@ class DispatchHealth:
     """Track the currently running GUI task and whether it timed out."""
 
     def __init__(self, clock: Callable[[], float] = time.monotonic):
+        """Start idle, with the elapsed-time clock injected for tests."""
         self._clock = clock
         self._lock = threading.Lock()
         self._active_task_id = 0
@@ -19,6 +20,7 @@ class DispatchHealth:
         self._timeout_seconds = 0.0
 
     def start(self, task_id: int, operation: str) -> None:
+        """Record a GUI task as active, clearing any prior timeout state."""
         with self._lock:
             self._active_task_id = task_id
             self._operation = operation
@@ -47,6 +49,7 @@ class DispatchHealth:
             return self._snapshot_locked()
 
     def snapshot(self) -> dict[str, Any]:
+        """Return the current health snapshot under the lock."""
         with self._lock:
             return self._snapshot_locked()
 
@@ -58,6 +61,7 @@ class DispatchHealth:
         return stuck_failure(snapshot, just_timed_out=False)
 
     def _snapshot_locked(self) -> dict[str, Any]:
+        """Build the idle or running/stuck snapshot without acquiring the lock."""
         if self._active_task_id == 0:
             return {
                 "state": "healthy",

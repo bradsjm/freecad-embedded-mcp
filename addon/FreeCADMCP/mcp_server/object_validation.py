@@ -107,6 +107,7 @@ def object_validity_error(obj: Any) -> str | None:
 
 
 def _finite(value: Any) -> float | None:
+    """Return ``value`` as a finite float, or ``None`` for anything else."""
     try:
         number = float(value)
     except Exception:
@@ -131,6 +132,7 @@ def shape_is_null(shape: Any) -> bool:
 
 
 def _shape_bounds(shape: Any) -> list[float] | None:
+    """Return the shape's bounds as six finite floats, or ``None`` when unreadable."""
     try:
         box = shape.BoundBox
         coordinates = [
@@ -150,6 +152,7 @@ def _shape_bounds(shape: Any) -> list[float] | None:
 
 
 def _shape_diagnostics(shape: Any) -> list[str]:
+    """Return bounded ``shape.check()`` diagnostics, tolerating a scalar result."""
     try:
         found = shape.check()
     except Exception:
@@ -162,6 +165,7 @@ def _shape_diagnostics(shape: Any) -> list[str]:
 
 
 def _solid_count(shape: Any) -> int | None:
+    """Return the solid count, or ``None`` when the Solids access fails."""
     try:
         solids = shape.Solids
     except Exception:
@@ -294,6 +298,7 @@ def geometry_report(obj: Any, expected_solids: int | None = None) -> dict:
 
 
 def _describe(exc: BaseException) -> str:
+    """Render an exception as ``TypeName: message`` for diagnostics."""
     return f"{type(exc).__name__}: {exc}"
 
 

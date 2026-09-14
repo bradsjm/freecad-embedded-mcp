@@ -122,6 +122,7 @@ class ProtocolError(Exception):
     """A JSON-RPC protocol-level failure carrying a wire error code."""
 
     def __init__(self, code: int, message: str, data: Any = None) -> None:
+        """Store the wire error code, message and optional ``data``."""
         super().__init__(message)
         self.code = code
         self.message = message
@@ -137,6 +138,7 @@ class ToolError(Exception):
     """
 
     def __init__(self, code: str, message: str, details: Any = None) -> None:
+        """Store the stable application code, message and optional details."""
         super().__init__(message)
         self.code = code
         self.message = message
@@ -166,6 +168,7 @@ class InputRequired(Exception):
         request_state: str,
         input_requests: Mapping[str, Any] | None = None,
     ) -> None:
+        """Carry the retry request state and any pending input requests."""
         super().__init__("additional input required before the request can complete")
         self.request_state = request_state
         self.input_requests = dict(input_requests) if input_requests else None
@@ -175,6 +178,7 @@ class TokenError(ValueError):
     """Internal: a signed token failed verification with a machine reason."""
 
     def __init__(self, reason: str, message: str) -> None:
+        """Carry the machine-readable verification reason and its message."""
         super().__init__(message)
         self.reason = reason
 
@@ -208,6 +212,7 @@ def fingerprint(value: Any) -> str:
 
 
 def _finish_result(result_type: str, payload: Mapping[str, Any]) -> dict:
+    """Stamp ``resultType`` and the default serverInfo ``_meta`` onto a payload."""
     result = {"resultType": result_type}
     result.update(payload)
     meta = dict(result.get("_meta") or {})
@@ -333,6 +338,7 @@ def input_required_result(
 
 
 def _error_object(error: Any) -> dict:
+    """Normalize a ProtocolError or mapping into a JSON-RPC error object."""
     if isinstance(error, ProtocolError):
         err: dict = {"code": error.code, "message": error.message}
         if error.data is not None:
@@ -432,6 +438,7 @@ def header_matches_body(raw: Any, body_value: Any) -> bool:
 
 
 def _envelope_error(code: int, message: str) -> ProtocolError:
+    """Build the envelope-stage ProtocolError for a malformed message."""
     return ProtocolError(code, message)
 
 
@@ -530,6 +537,7 @@ def validate_request(
             raw_headers[str(key).lower()] = value
 
     def raw_header(name: str) -> Any:
+        """Return the raw value of a header by case-insensitive name."""
         return raw_headers.get(name.lower())
 
     version_header = raw_header(PROTOCOL_VERSION_HEADER)
@@ -743,6 +751,7 @@ def require_client_capabilities(
     """
 
     def _walk(declared: Any, wanted: Mapping[str, Any], path: str) -> None:
+        """Recurse the required-capability shape against the declared mapping."""
         if not isinstance(declared, Mapping):
             raise missing_capability(required)
         for key, sub in wanted.items():
@@ -793,6 +802,7 @@ _URLSAFE_B64_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv
 
 
 def _finite_number(value: Any, what: str) -> float:
+    """Require a finite JSON number (booleans excluded) and return a float."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{what} must be a number")
     if not math.isfinite(value):
@@ -801,12 +811,14 @@ def _finite_number(value: Any, what: str) -> float:
 
 
 def _nonnegative_int(value: Any, what: str) -> int:
+    """Require a non-negative JSON integer (booleans excluded)."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{what} must be a non-negative integer")
     return value
 
 
 def _check_ref(schema: Mapping[str, Any], root: Mapping[str, Any], path: str) -> str:
+    """Validate a local ``#/$defs/`` reference and return the definition name."""
     ref = schema["$ref"]
     if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
         raise ValueError(f"{path}: only local $ref of the form #/$defs/<name> is supported")
@@ -935,6 +947,10 @@ def check_schema(
 
 
 def _same_json(value: Any, candidate: Any) -> bool:
+    """Compare two JSON values with type-strict equality.
+
+    Booleans never equal integers because type identity is checked first.
+    """
     if value is candidate:
         return True
     return type(value) is type(candidate) and value == candidate
@@ -1000,6 +1016,7 @@ def validate_schema(
         raise ProtocolError(INTERNAL_ERROR, "registered schema must be an object")
 
     def fail(message: str) -> None:
+        """Raise the path-prefixed -32602 refusal for this schema position."""
         raise ProtocolError(INVALID_PARAMS, f"invalid parameters: {path} {message}")
 
     if "const" in schema and not _same_json(value, schema["const"]):
@@ -1090,6 +1107,10 @@ def validate_schema(
 
 
 def _matches_type(value: Any, expected: str) -> bool:
+    """Test one JSON value against a single supported type name.
+
+    Integral finite floats count as integers; booleans match neither.
+    """
     if expected == "object":
         return isinstance(value, dict)
     if expected == "array":
@@ -1110,6 +1131,7 @@ def _matches_type(value: Any, expected: str) -> bool:
 
 
 def _validate_type(value: Any, expected: str, fail) -> None:
+    """Fail when the value does not match the single declared type."""
     if expected not in _SUPPORTED_TYPES:
         fail(f"has unsupported type {expected!r}")
     if not _matches_type(value, expected):
@@ -1163,6 +1185,7 @@ class ConsentSigner:
     """
 
     def __init__(self, *, ttl_s: float = DEFAULT_CONSENT_TTL_S) -> None:
+        """Generate a fresh random HMAC key and reset nonce bookkeeping."""
         self._key = secrets.token_bytes(32)
         self._ttl_s = float(ttl_s)
         self._lock = threading.Lock()
@@ -1171,6 +1194,11 @@ class ConsentSigner:
     # -- reusable domain-separated signing --------------------------------
 
     def sign(self, domain: str, payload: Mapping[str, Any]) -> str:
+        """Return a base64url token binding ``payload`` to the signing domain.
+
+        The domain is folded into the HMAC input, so a token never verifies
+        under a different domain.
+        """
         body = {
             "domain": domain,
             "payload": json.loads(canonical_json(payload)),
@@ -1196,6 +1224,10 @@ class ConsentSigner:
             ) from exc
 
     def _open(self, domain: str, token: str) -> dict:
+        """Verify a token's structure, MAC and domain; return its payload.
+
+        The MAC comparison runs in constant time via ``hmac.compare_digest``.
+        """
         if not isinstance(token, str) or token.count(".") != 1:
             raise TokenError("malformed", "token is not a signed blob")
         body_part, mac_part = token.split(".")
@@ -1334,6 +1366,7 @@ class ConsentSigner:
         response = input_responses.get(CONSENT_INPUT_KEY)
 
         def repeat_challenge() -> InputRequired:
+            """Build the InputRequired that repeats the same challenge token."""
             return InputRequired(token, payload.get("inputRequests"))
 
         if not isinstance(response, Mapping):
@@ -1366,6 +1399,7 @@ class ConsentSigner:
         return payload
 
     def _prune(self) -> None:
+        """Drop consumed nonces whose consent already expired."""
         now = time.time()
         for nonce in [n for n, exp in self._consumed_nonces.items() if exp <= now]:
             del self._consumed_nonces[nonce]

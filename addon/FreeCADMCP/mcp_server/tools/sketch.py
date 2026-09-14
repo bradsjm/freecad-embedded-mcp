@@ -762,6 +762,7 @@ check_schema(_EDIT_SKETCH_OUTPUT)
 
 
 def _fail(message: str) -> ToolError:
+    """Build a VALIDATION_FAILED tool error with the given message."""
     return ToolError(VALIDATION_FAILED, message)
 
 
@@ -808,6 +809,7 @@ def _reject_duplicate_indexes(indexes: list, operation: str) -> None:
 
 
 def _finite(value: Any) -> float | None:
+    """Return the value as a finite float, or None when it cannot be one."""
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -816,6 +818,7 @@ def _finite(value: Any) -> float | None:
 
 
 def _require_sketch(obj: Any) -> None:
+    """Refuse any object that is not a Sketcher sketch."""
     derived = getattr(obj, "isDerivedFrom", None)
     if callable(derived):
         try:
@@ -829,16 +832,19 @@ def _require_sketch(obj: Any) -> None:
 
 
 def _int_or_none(value: Any) -> int | None:
+    """Return the value as an int, or None for non-ints and bools."""
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
 
 
 def _bool_or_none(value: Any) -> bool | None:
+    """Return the value when it is a bool, else None."""
     return value if isinstance(value, bool) else None
 
 
 def _string_or_none(value: Any) -> str | None:
+    """Return the value when it is a non-empty string, else None."""
     if not isinstance(value, str) or not value:
         return None
     return value
@@ -862,6 +868,7 @@ def _construction_flag(sketch: Any, index: int, geo: Any) -> bool:
 
 
 def _geometry_row(index: int, geo: Any, sketch: Any) -> dict:
+    """Project one geometry element into its wire row by native kind."""
     construction = _construction_flag(sketch, index, geo)
     circle = getattr(geo, "Circle", None)
     first = getattr(geo, "FirstParameter", None)
@@ -915,6 +922,7 @@ def _geometry_row(index: int, geo: Any, sketch: Any) -> dict:
 
 
 def _datum_string(constraint: Any) -> str | None:
+    """Render a constraint datum as a unit string ('10 mm', '45 deg')."""
     value = _finite(getattr(constraint, "Value", None))
     if value is None:
         return None
@@ -923,6 +931,7 @@ def _datum_string(constraint: Any) -> str | None:
 
 
 def _constraint_row(index: int, constraint: Any) -> dict:
+    """Project one constraint into its wire row."""
     return {
         "index": index,
         "type": _string_or_none(getattr(constraint, "Type", None)),
@@ -940,6 +949,7 @@ def _constraint_row(index: int, constraint: Any) -> dict:
 
 
 def _expression_bindings_all(sketch: Any) -> list[dict]:
+    """List every constraint expression binding in native order."""
     bindings: list[dict] = []
     engine = getattr(sketch, "ExpressionEngine", None)
     if not isinstance(engine, (list, tuple)):
@@ -957,6 +967,7 @@ def _expression_bindings_all(sketch: Any) -> list[dict]:
 
 
 def _expression_bindings(sketch: Any) -> list[dict]:
+    """Return the constraint bindings capped at the wire row limit."""
     return _expression_bindings_all(sketch)[:_MAX_SKETCH_ROWS]
 
 
@@ -1102,6 +1113,7 @@ _OPERATION_METHODS = {
 
 
 def _check_datum(value: Any, what: str) -> str:
+    """Validate and return a normalized '<number>[ <unit>]' datum string."""
     if not isinstance(value, str) or not value.strip():
         raise _fail(f"{what} must be a non-empty datum string")
     if not _DATUM_PATTERN.match(value.strip()):
@@ -1110,6 +1122,7 @@ def _check_datum(value: Any, what: str) -> str:
 
 
 def _validate_geometry_add(entry: Any, what: str) -> dict:
+    """Validate one addGeometry entry into a checked plan entry."""
     if not isinstance(entry, dict):
         raise _fail(f"{what} must be an object")
     kind = entry.get("kind")
@@ -1310,6 +1323,7 @@ def _expand_geometry_entries(
     """
 
     def _segment(start: list[float], end: list[float], construction: bool) -> dict:
+        """Build one finite generated line-segment expansion entry."""
         if not all(math.isfinite(value) for point in (start, end) for value in point):
             raise _fail("generated profile coordinates are not finite")
         return {
@@ -1342,6 +1356,7 @@ def _expand_geometry_entries(
     constraints: list[dict] = []
 
     def coincident(first: int, second: int) -> dict:
+        """Build a Coincident constraint joining first's end to second's start."""
         return {"type": "Coincident", "arguments": [first, 2, second, 1]}
 
     def join(first: int, second: int) -> dict:
@@ -1513,6 +1528,7 @@ def _expand_geometry_entries(
 
 
 def _validate_constraint_add(entry: Any, what: str) -> dict:
+    """Validate one addConstraints entry against its recorded native forms."""
     if not isinstance(entry, dict):
         raise _fail(f"{what} must be an object")
     constraint_type = entry.get("type")
@@ -1931,6 +1947,7 @@ def _plan_sketch_edit(sketch: Any, arguments: dict) -> dict:
 
 
 def _native_geometry(entry: dict):
+    """Build the native Part geometry object for one validated entry."""
     import FreeCAD
     import Part
 
@@ -1973,6 +1990,7 @@ def _native_datum(datum: str, what: str):
 
 
 def _inspect_sketch(ctx: Any, arguments: dict) -> dict:
+    """Handle inspect_sketch: read-only geometry, constraint and solver rows."""
     doc = ctx.require_document(arguments["document"])
     sketch = ctx.require_object(doc, arguments["sketch"])
     _require_sketch(sketch)
@@ -2001,6 +2019,7 @@ def _inspect_sketch(ctx: Any, arguments: dict) -> dict:
 
 
 def _edit_sketch(ctx: Any, arguments: dict) -> dict:
+    """Handle edit_sketch: apply the planned batch inside one mutation."""
     doc = ctx.require_document(arguments["document"])
     sketch = ctx.require_object(doc, arguments["sketch"])
     _require_sketch(sketch)

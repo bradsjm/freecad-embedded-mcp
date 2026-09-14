@@ -1,3 +1,10 @@
+"""FreeCAD GUI entry point for the add-on.
+
+Puts the add-on directory on ``sys.path``, registers the MCP Addon
+workbench and schedules the deferred auto-start. Loaded only in GUI
+mode; ``Init.py`` deliberately stays empty so console mode gets nothing.
+"""
+
 import os
 import sys
 

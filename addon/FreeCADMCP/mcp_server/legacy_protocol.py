@@ -242,6 +242,7 @@ class LegacyProtocol:
         *,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """Adopt the modern dispatch callback and start with no sessions."""
         self._dispatch = dispatch
         self._clock = clock
         self._lock = threading.Lock()
@@ -335,6 +336,7 @@ class LegacyProtocol:
     # ------------------------------------------------------------------
 
     def _lookup_session(self, session_id: Any, principal: str) -> _LegacySession | None:
+        """Return the caller's live session, refreshing its idle clock."""
         with self._lock:
             self._prune_locked()
             session = self._sessions.get(session_id)
@@ -361,6 +363,7 @@ class LegacyProtocol:
     # ------------------------------------------------------------------
 
     def _handle_initialize(self, message: dict, lowered: dict, principal: str) -> LegacyReply:
+        """Create a session (32 max) and answer with the negotiated version."""
         envelope_error = self._envelope_error(message, require_request=True)
         if envelope_error is not None:
             return envelope_error
@@ -432,6 +435,7 @@ class LegacyProtocol:
     # ------------------------------------------------------------------
 
     def _route(self, session: _LegacySession, message: dict, lowered: dict) -> LegacyReply:
+        """Route one session-bound request, client response or notification."""
         header_error = self._header_error(session, message, lowered)
         if header_error is not None:
             return header_error
@@ -494,6 +498,7 @@ class LegacyProtocol:
         return LegacyReply(202, None)
 
     def _route_notification(self, session: _LegacySession, message: dict) -> LegacyReply:
+        """Apply initialized/cancelled notifications, ignoring others with 202."""
         method = message["method"]
         if method == "notifications/initialized":
             with self._lock:
@@ -524,6 +529,7 @@ class LegacyProtocol:
 
     @staticmethod
     def _envelope_error(message: dict, *, require_request: bool) -> LegacyReply | None:
+        """Validate one JSON-RPC envelope, returning the 400 reply or None."""
         if message.get("jsonrpc") != JSONRPC_VERSION:
             return _error_reply(400, INVALID_REQUEST, 'malformed envelope: jsonrpc must be "2.0"')
         if "method" in message:
@@ -616,6 +622,7 @@ class LegacyProtocol:
     # ------------------------------------------------------------------
 
     def _dispatch_inline(self, session: _LegacySession, message: dict) -> LegacyReply:
+        """Dispatch a non-tool method synchronously and translate the reply."""
         try:
             outcome = self._dispatch(
                 _normalize_request(session, message),
@@ -648,6 +655,7 @@ class LegacyProtocol:
     # ------------------------------------------------------------------
 
     def _start_tool_call(self, session: _LegacySession, message: dict) -> LegacyReply:
+        """Reserve an inflight slot for tools/call, then spawn its reply stream."""
         request_id = message["id"]
         with self._lock:
             if session.closed:
@@ -670,6 +678,7 @@ class LegacyProtocol:
         session: _LegacySession,
         members: list[tuple[dict, _ActiveRequest | None]],
     ) -> LegacyReply:
+        """Start the producer thread and answer with an SSE stream reply."""
         from mcp_server.http_server import StreamResponse  # local: import cycle
 
         outer: queue.SimpleQueue = queue.SimpleQueue()
@@ -687,6 +696,7 @@ class LegacyProtocol:
         members: list[tuple[dict, _ActiveRequest | None]],
         outer: queue.SimpleQueue,
     ) -> None:
+        """Run the member loop and end the stream with a terminal sentinel."""
         try:
             self._produce_member_loop(session, members, outer)
         finally:
@@ -698,6 +708,7 @@ class LegacyProtocol:
         members: list[tuple[dict, _ActiveRequest | None]],
         outer: queue.SimpleQueue,
     ) -> None:
+        """Produce each member in order, isolating one failure per member."""
         for message, active in members:
             try:
                 if active is None:
@@ -718,6 +729,7 @@ class LegacyProtocol:
     def _produce_inline_member(
         self, session: _LegacySession, message: dict, outer: queue.SimpleQueue
     ) -> None:
+        """Produce the reply for one non-tool batch member."""
         method = message["method"]
         request_id = message.get("id")
         if not session.initialized and method != "ping":
@@ -774,6 +786,7 @@ class LegacyProtocol:
         message: dict,
         outer: queue.SimpleQueue,
     ) -> None:
+        """Run one tool call, then release its reserved inflight slot."""
         try:
             self._run_tool_call(session, active, message, outer)
         finally:
@@ -790,6 +803,7 @@ class LegacyProtocol:
         message: dict,
         outer: queue.SimpleQueue,
     ) -> None:
+        """Dispatch tools/call, looping consent challenges until a final result."""
         request_id = message["id"]
         version = session.version
         # The consent TTL bounds the WHOLE consent phase across any
@@ -1009,6 +1023,7 @@ class LegacyProtocol:
         session_id: Any,
         principal: str,
     ) -> LegacyReply:
+        """Validate and execute one 2025-03-26 JSON-RPC batch."""
         if session_id is None:
             return _error_reply(400, INVALID_REQUEST, INITIALIZE_FIRST_MESSAGE)
         session = self._lookup_session(session_id, principal)
@@ -1103,11 +1118,13 @@ class LegacyProtocol:
         overflow: list[dict],
         reserved: list[tuple[dict, _ActiveRequest]],
     ) -> LegacyReply:
+        """Run the reservable members, rejecting overflow calls as busy results."""
         from mcp_server.http_server import StreamResponse  # local: import cycle
 
         outer: queue.SimpleQueue = queue.SimpleQueue()
 
         def produce() -> None:
+            """Produce member replies, then one busy payload per overflow call."""
             try:
                 self._produce_member_loop(session, [*inline, *reserved], outer)
                 for member in overflow:
@@ -1119,6 +1136,7 @@ class LegacyProtocol:
         return LegacyReply(200, None, stream=StreamResponse(outer))
 
     def _busy_tool_payload(self, session: _LegacySession, request_id: Any) -> dict:
+        """Build the SERVER_BUSY tool-error payload for a refused call."""
         return _tool_error_response(
             request_id,
             session.version,
@@ -1196,6 +1214,7 @@ def _reject_client_consent_fields(params: Mapping[str, Any]) -> LegacyReply | No
 
 
 def _is_stream(outcome: Any) -> bool:
+    """True when a dispatch outcome is a modern stream response."""
     from mcp_server.http_server import StreamResponse  # local: import cycle
 
     return isinstance(outcome, StreamResponse)
@@ -1216,6 +1235,7 @@ def _tool_error_response(request_id: Any, version: str, error: ToolError) -> dic
 
 
 def _cancelled_result(request_id: Any, version: str) -> dict:
+    """Build the cancelled-before-execution CONSENT_DENIED tool result."""
     return _tool_error_response(
         request_id,
         version,
@@ -1228,6 +1248,7 @@ def _cancelled_result(request_id: Any, version: str) -> dict:
 
 
 def _consent_denied_result(request_id: Any, version: str, reason: str) -> dict:
+    """Build a CONSENT_DENIED tool result carrying the truthful deny reason."""
     message = _CONSENT_DENY_MESSAGES.get(reason, f"consent refused: {reason}")
     return _tool_error_response(
         request_id,
@@ -1276,4 +1297,5 @@ def _classify_elicitation(response: Any) -> str:
 
 
 def _error_reply(status: int, code: int, message: str, data: Any = None) -> LegacyReply:
+    """Build one JSON-RPC error reply at the given HTTP status."""
     return LegacyReply(status, error_response(ProtocolError(code, message, data)))

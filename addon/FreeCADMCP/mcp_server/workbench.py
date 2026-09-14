@@ -19,30 +19,38 @@ _MENU_COMMANDS = ["Toggle_MCP_Server", "Separator", "Connection_Details", "MCP_S
 
 
 class FreeCADMCPAddonWorkbench(Workbench):
+    """Register the MCP Addon workbench toolbar, menu and UI commands."""
+
     MenuText = "MCP Addon"
     ToolTip = "Addon for MCP Communication"
     Icon = _ICON
 
     def Initialize(self):
+        """Register commands, build the toolbar and menu, initialize the UI."""
         commands.register_commands()
         self.appendToolbar("FreeCAD MCP", _TOOLBAR_COMMANDS)
         self.appendMenu("FreeCAD MCP", _MENU_COMMANDS)
         commands.initialize_ui()
 
     def Activated(self):
+        """Empty hook: nothing to do when the workbench is activated."""
         pass
 
     def Deactivated(self):
+        """Empty hook: nothing to do when the workbench is deactivated."""
         pass
 
     def ContextMenu(self, recipient):
+        """Empty hook: no context-menu entries are contributed."""
         pass
 
     def GetClassName(self):
+        """Return the native workbench class name for FreeCAD's framework."""
         return "Gui::PythonWorkbench"
 
 
 def _auto_start_mcp():
+    """Start the server when auto_start is enabled; warn on failure, never raise."""
     try:
         commands.initialize_ui()
         from . import server as mcp_server_module

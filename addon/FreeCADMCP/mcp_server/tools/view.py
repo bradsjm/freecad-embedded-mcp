@@ -142,32 +142,38 @@ def _finite_vec(values: Any) -> bool:
 
 
 def _vec_negate(values: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Return the negation of a three-float vector."""
     return (-values[0], -values[1], -values[2])
 
 
 def _vec_dot(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    """Return the dot product of two three-float vectors."""
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 
 def _vec_add(
     a: tuple[float, float, float], b: tuple[float, float, float]
 ) -> tuple[float, float, float]:
+    """Return the componentwise sum of two three-float vectors."""
     return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 
 
 def _vec_sub(
     a: tuple[float, float, float], b: tuple[float, float, float]
 ) -> tuple[float, float, float]:
+    """Return the componentwise difference ``a - b``."""
     return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
 
 
 def _vec_scale(values: tuple[float, float, float], factor: float) -> tuple[float, float, float]:
+    """Return the vector scaled componentwise by ``factor``."""
     return (values[0] * factor, values[1] * factor, values[2] * factor)
 
 
 def _vec_cross(
     a: tuple[float, float, float], b: tuple[float, float, float]
 ) -> tuple[float, float, float]:
+    """Return the cross product of two three-float vectors."""
     return (
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -176,10 +182,12 @@ def _vec_cross(
 
 
 def _vec_norm(values: tuple[float, float, float]) -> float:
+    """Return the Euclidean length of a three-float vector."""
     return math.sqrt(_vec_dot(values, values))
 
 
 def _vec_normalize(values: tuple[float, float, float]) -> tuple[float, float, float] | None:
+    """Return the unit vector, or None when zero-length or non-finite."""
     norm = _vec_norm(values)
     if not math.isfinite(norm) or norm <= 0.0:
         return None
@@ -187,6 +195,7 @@ def _vec_normalize(values: tuple[float, float, float]) -> tuple[float, float, fl
 
 
 def _unit_axis(index: int) -> tuple[float, float, float]:
+    """Return the unit basis vector along the axis at ``index``."""
     return tuple(1.0 if position == index else 0.0 for position in range(3))  # type: ignore[return-value]
 
 
@@ -225,6 +234,10 @@ def _active_view_size(ctx: Any) -> tuple[int, int] | None:
 
 
 def _scale_to_max_edge(width: int, height: int, max_edge: int) -> tuple[int, int]:
+    """Scale a width/height pair proportionally under a longest-edge ceiling.
+
+    Sizes already within the ceiling are returned unchanged, never upscaled.
+    """
     longest = max(width, height)
     if longest <= max_edge:
         return width, height
@@ -332,6 +345,7 @@ _DEFAULT_ANIMATION_DURATION = 500
 
 
 def _disable_navigation_animations() -> dict[str, Any]:
+    """Disable navigation animations and return the prior preference state."""
     params = FreeCAD.ParamGet(_VIEW_PARAM_PATH)
     state = {
         "params": params,
@@ -344,6 +358,7 @@ def _disable_navigation_animations() -> dict[str, Any]:
 
 
 def _restore_navigation_animations(state: dict[str, Any]) -> None:
+    """Restore navigation-animation preferences from a captured state."""
     params = state["params"]
     params.SetBool("UseNavigationAnimations", state["use_animations"])
     params.SetInt("AnimationDuration", state["duration"])
@@ -710,15 +725,18 @@ class _RestoreGuard:
     """
 
     def __init__(self) -> None:
+        """Start with no collected restore failures."""
         self.failures: list[dict[str, str]] = []
 
     def protect(self, item: str, restore: Any) -> None:
+        """Run one restore step, recording a failure instead of raising."""
         try:
             restore()
         except Exception as exc:
             self.failures.append({"item": item, "error": f"{type(exc).__name__}: {exc}"})
 
     def raise_if_any(self) -> None:
+        """Raise one restoration_failed error when failures were collected."""
         if not self.failures:
             return
         raise ToolError(
@@ -1056,6 +1074,7 @@ def _new_capture_temp() -> str:
 
 
 def _unlink_quiet(path: str) -> None:
+    """Delete a temp capture file, ignoring absence and OS errors."""
     if os.path.exists(path):
         try:
             os.unlink(path)
@@ -1307,6 +1326,7 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         direction, up, target_center, fallback_distance = derivation
 
         def apply_camera() -> None:
+            """Rewrite the live camera to the derived detail orientation."""
             try:
                 current = str(view.getCamera())
             except Exception:
@@ -1412,6 +1432,7 @@ def capture_view(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         if previous_active is not None:
 
             def restore_active_documents() -> None:
+                """Re-activate the captured App and GUI active document."""
                 ctx.App.setActiveDocument(previous_active)
                 ctx.Gui.setActiveDocument(previous_active)
 
@@ -1810,6 +1831,7 @@ def _capture_interior(
         previous_transparency = view_object.Transparency
 
         def restore_transparency() -> None:
+            """Restore the focus object's pre-x-ray transparency."""
             view_object.Transparency = previous_transparency
 
         session["transparency_restore"] = restore_transparency

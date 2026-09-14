@@ -363,6 +363,7 @@ def _find_modern_solver(analysis: Any) -> Any | None:
             legacy.append(member)
 
     def _names(objects: list[Any]) -> list[str]:
+        """Map solver objects to their names for structured error details."""
         return [getattr(obj, "Name", "?") for obj in objects]
 
     if modern and legacy:
@@ -469,6 +470,7 @@ def _create_modern_solver(ctx: Any, doc: Any, analysis: Any, *, with_checks: boo
     created: list[Any] = []
 
     def _affected() -> list[Any]:
+        """Report the solver this call created to the mutation gate."""
         return list(created)
 
     try:
@@ -591,6 +593,7 @@ class _FemSolve:
         working_dir: str,
         created_solver: bool = False,
     ) -> None:
+        """Bind the solve inputs and an unresolved Future; nothing is started."""
         self.ctx = ctx
         self.doc = doc
         self.analysis = analysis
@@ -743,6 +746,7 @@ class _FemSolve:
             )
 
     def _finalize_success(self) -> None:
+        """Build the result payload and settle the Future with it or an error."""
         try:
             payload = self._result_payload()
         except ToolError as exc:
@@ -859,6 +863,7 @@ class _FemSolve:
         exit_status: str | None = None,
         reason: str | None = None,
     ) -> dict[str, Any]:
+        """Assemble bounded process-exit evidence for a SOLVER_FAILED error."""
         details: dict[str, Any] = {
             "working_dir": self.working_dir,
             "stdout": _process_text(self.tool.process, "readAllStandardOutput"),
@@ -877,6 +882,7 @@ class _FemSolve:
     # -- cancellation watch --------------------------------------------------
 
     def _start_cancel_watch(self) -> None:
+        """Poll the shared cancel event on the GUI thread via a QTimer."""
         try:
             from PySide.QtCore import QTimer
         except Exception:  # pragma: no cover - GUI runtime always has PySide
@@ -888,6 +894,7 @@ class _FemSolve:
         self._cancel_timer = timer
 
     def _poll_cancel_event(self) -> None:
+        """Record a requested cancellation and stop the watch timer."""
         if self.finished:
             self._stop_cancel_watch()
             return
@@ -896,6 +903,7 @@ class _FemSolve:
             self._stop_cancel_watch()
 
     def _stop_cancel_watch(self) -> None:
+        """Stop and release the cancel-poll timer, tolerating repeat calls."""
         timer = self._cancel_timer
         self._cancel_timer = None
         if timer is not None:
@@ -907,6 +915,7 @@ class _FemSolve:
     # -- result extraction ----------------------------------------------------
 
     def _result_payload(self) -> dict[str, Any]:
+        """Assemble the bounded solve result from pipeline and result files."""
         pipeline = self._pipeline()
         blocks, totals = _summarize_pipeline(pipeline)
         vtk_path, vtu_files, vtu_count, vtu_truncated = _result_files(self.working_dir)
@@ -933,6 +942,7 @@ class _FemSolve:
         }
 
     def _pipeline(self) -> Any:
+        """Return the last FemPostPipeline in solver.Results, refusing absence."""
         results = list(getattr(self.solver, "Results", None) or [])
         pipeline = None
         # Native loader semantics: with KeepResultsOnReRun the pipeline
@@ -971,10 +981,12 @@ def _tool_class() -> type:
         """Intercepts native result loading behind the staleness guard."""
 
         def __init__(self, obj: Any, solve: _FemSolve) -> None:
+            """Attach the owning solve operation to the native tool."""
             super().__init__(obj)
             self._solve = solve
 
         def update_properties(self) -> None:
+            """Run the staleness guard before native loading, then finalize once."""
             # Called by the native _process_finished slot after exit 0.
             try:
                 self._solve._guard_before_load()
@@ -1005,6 +1017,7 @@ def _tool_class() -> type:
 
 
 def _summarize_pipeline(pipeline: Any) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Summarize a pipeline's blocks into capped rows plus full traversal totals."""
     data = getattr(pipeline, "Data", None)
     blocks: list[dict[str, Any]] = []
     totals = {"block_count": 0, "point_count_sum": 0, "cell_count_sum": 0}
@@ -1015,6 +1028,7 @@ def _summarize_pipeline(pipeline: Any) -> tuple[list[dict[str, Any]], dict[str, 
 
 
 def _collect_blocks(node: Any, blocks: list[dict[str, Any]], totals: dict[str, int]) -> None:
+    """Walk a VTK multiblock tree, capping evidence but never the totals."""
     if hasattr(node, "GetNumberOfBlocks") and hasattr(node, "GetBlock"):
         for index in range(node.GetNumberOfBlocks()):
             child = node.GetBlock(index)
@@ -1134,6 +1148,7 @@ def _result_files(working_dir: str) -> tuple[str, list[str], int, bool]:
 
 
 def _process_text(process: Any, method_name: str) -> str:
+    """Read a QProcess output channel as lossily decoded UTF-8 text."""
     reader = getattr(process, method_name, None)
     if not callable(reader):
         return ""

@@ -352,6 +352,7 @@ def _target_identity(target: Mapping[str, Any] | None) -> dict | None:
 
 
 def _clamp_async_timeout(raw: Any, default: float) -> float:
+    """Coerce a timeout argument to float and clamp it into the 1..3600 s window."""
     value = default if raw is None else raw
     try:
         value = float(value)
@@ -399,12 +400,15 @@ class _DocumentObserver:
     """
 
     def __init__(self, server: Server) -> None:
+        """Bind the owning Server that receives the observer callbacks."""
         self._server = server
 
     def slotCreatedDocument(self, doc) -> None:
+        """Bump the new document's generation and publish a resource update."""
         self._server._on_document_event(doc, bump=True, publish=True)
 
     def slotDeletedDocument(self, doc) -> None:
+        """Bump and publish the deletion, then retire cached supported-types provenance."""
         # Deletion bumps the monotonic generation and publishes like any
         # other change; the entry is retained so stale instances of the
         # deleted document can never adopt or report a live identity.
@@ -412,42 +416,55 @@ class _DocumentObserver:
         self._server._invalidate_capabilities_for_document(doc)
 
     def slotRelabelDocument(self, doc) -> None:
+        """Bump the relabeled document's generation and publish a resource update."""
         self._server._on_document_event(doc, bump=True, publish=True)
 
     def slotActivateDocument(self, doc) -> None:
+        """Publish a resource update on activation without bumping the generation."""
         self._server._on_document_event(doc, bump=False, publish=True)
 
     def slotBeforeRecomputeDocument(self, doc) -> None:
+        """Bump the generation before a document recompute without publishing."""
         self._server._on_document_event(doc, bump=True, publish=False)
 
     def slotRecomputedDocument(self, doc) -> None:
+        """Bump the generation after a document recompute without publishing."""
         self._server._on_document_event(doc, bump=True, publish=False)
 
     def slotCreatedObject(self, doc, obj) -> None:
+        """Bump the document's generation and publish a resource update."""
         self._server._on_document_event(doc, bump=True, publish=True)
 
     def slotDeletedObject(self, doc, obj) -> None:
+        """Bump the document's generation and publish a resource update."""
         self._server._on_document_event(doc, bump=True, publish=True)
 
     def slotBeforeChangeObject(self, doc, obj) -> None:
+        """Bump the generation before an object change without publishing."""
         self._server._on_document_event(doc, bump=True, publish=False)
 
     def slotChangedObject(self, doc, obj) -> None:
+        """Bump the document's generation and publish a resource update."""
         self._server._on_document_event(doc, bump=True, publish=True)
 
     def slotRecomputedObject(self, doc, obj) -> None:
+        """Bump the generation after an object recompute without publishing."""
         self._server._on_document_event(doc, bump=True, publish=False)
 
     def slotStartSaveDocument(self, doc) -> None:
+        """Bump the generation when a document save starts without publishing."""
         self._server._on_document_event(doc, bump=True, publish=False)
 
     def slotFinishSaveDocument(self, doc) -> None:
+        """Bump the generation and publish a resource update after a save."""
         self._server._on_document_event(doc, bump=True, publish=True)
 
     def slotUndoDocument(self, doc) -> None:
+        """Bump the generation and publish a resource update after an undo."""
         self._server._on_document_event(doc, bump=True, publish=True)
 
     def slotRedoDocument(self, doc) -> None:
+        """Bump the generation and publish a resource update after a redo."""
         self._server._on_document_event(doc, bump=True, publish=True)
 
 
@@ -497,6 +514,7 @@ class _OpContext:
         operation: _Operation,
         approved_target: dict | None,
     ) -> None:
+        """Bind the operation record, its cancel event, deadline and approved target."""
         self._server = server
         self.operation = operation
         self.cancel_event = operation.cancel_event
@@ -504,6 +522,7 @@ class _OpContext:
         self.deadline_mono = operation.deadline_mono
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate every other attribute to the owning Server (the shared ctx)."""
         return getattr(self._server, name)
 
     def operation_finished(self, *_args: Any) -> None:
@@ -680,6 +699,7 @@ class Server:
         registry: SubscriptionRegistry | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """Adopt settings and collaborators, bind FreeCAD modules, register the tools."""
         self.settings = dict(settings) if settings is not None else load_settings(settings_path)
         self.signer = signer or ConsentSigner()
         self._task_store = task_store or TaskStore()
@@ -727,6 +747,7 @@ class Server:
     # ------------------------------------------------------------------
 
     def _register_tools(self) -> None:
+        """Consume every tool module and enforce the exact 26-tool PLAN_TOOL_ORDER."""
         modules = (
             (_DOCUMENT_DEFS, _DOCUMENT_HANDLERS, _documents_preflight),
             (_OBJECTS_DEFS, _OBJECTS_HANDLERS, None),
@@ -830,6 +851,11 @@ class Server:
         return tool_error_result(error)
 
     def _add_definition(self, definition: Any, handlers: Any, preflight: Any) -> None:
+        """Register one checked tool definition, its handler and optional preflight.
+
+        The public ``capture_view`` schema is rewritten to metadata only while
+        the raw schema is kept to validate payloads before image conversion.
+        """
         name, description, input_schema, output_schema = _unpack_definition(definition)
         if name in self._definitions:
             raise RuntimeError(f"duplicate tool definition: {name}")
@@ -857,6 +883,7 @@ class Server:
 
     @staticmethod
     def _resolve_handler(name: str, handlers: Any) -> Callable[..., Any]:
+        """Return the registered handler for one tool name, refusing a missing entry."""
         if handlers is None or name not in handlers:
             raise RuntimeError(f"tool {name} has no handler")
         return handlers[name]
@@ -905,6 +932,7 @@ class Server:
         return self._live_doc_entry(doc).generation
 
     def require_document(self, name: str) -> Any:
+        """Return the named open document, raising DOCUMENT_NOT_FOUND otherwise."""
         if not isinstance(name, str) or not name:
             raise ToolError(DOCUMENT_NOT_FOUND, "document name must be a non-empty string")
         doc = FreeCAD.listDocuments().get(name)
@@ -913,6 +941,7 @@ class Server:
         return doc
 
     def require_object(self, doc: Any, name: str) -> Any:
+        """Return the named object or OBJECT_NOT_FOUND with suggestions and a nextTool hint."""
         obj = doc.getObject(name)
         if obj is None:
             try:
@@ -1079,11 +1108,13 @@ class Server:
             self._static_capabilities = tombstone
 
     def _register_observer(self) -> None:
+        """Install the document observer with FreeCAD and record it registered."""
         self._observer = _DocumentObserver(self)
         FreeCAD.addDocumentObserver(self._observer)
         self._observer_registered = True
 
     def _remove_observer(self) -> None:
+        """Remove the observer from FreeCAD and clear its registered state."""
         if self._observer_registered:
             try:
                 FreeCAD.removeDocumentObserver(self._observer)
@@ -1124,6 +1155,7 @@ class Server:
     # -- discovery / tools list (GUI independent, cached responses) ------
 
     def _dispatch_discover(self, validated: dict) -> dict:
+        """Answer ``server/discover`` from the cache or a GUI refresh when requested."""
         params = validated.get("params") or {}
         unknown = set(params) - {"refresh", "document", "_meta"}
         if unknown:
@@ -1171,6 +1203,7 @@ class Server:
         return _rpc_result(validated["id"], complete_result(payload))
 
     def _discover_payload(self, snapshot: dict, refresh_error: dict | None) -> dict:
+        """Build the discover payload from a snapshot plus live settings flags."""
         capabilities = {
             key: value for key, value in snapshot.items() if key != "supportedTypesDocument"
         }
@@ -1194,6 +1227,7 @@ class Server:
         """
 
         def _candidate() -> dict:
+            """Capture the snapshot for the chosen document or a structured refresh error."""
             try:
                 if document is not None:
                     doc = FreeCAD.listDocuments().get(document)
@@ -1261,6 +1295,7 @@ class Server:
         return copy.deepcopy(snapshot) if snapshot else {}
 
     def _dispatch_tools_list(self, validated: dict) -> dict:
+        """Return the enabled tool definitions, privately cached (ttl 0)."""
         payload = {"tools": [dict(d) for d in self._tool_defs if self._tool_enabled(d["name"])]}
         # The exposed surface depends on the active settings, so the list is
         # never publicly cacheable: a cached full list would outlive a
@@ -1347,6 +1382,7 @@ class Server:
     def _dispatch_tools_call(
         self, validated: dict, principal: str, connection_id: Any
     ) -> dict | StreamResponse:
+        """Validate one tools/call, run consent, then route to the task or blocking path."""
         params = validated["params"]
         name = params.get("name")
         if not isinstance(name, str) or not name:
@@ -1432,6 +1468,7 @@ class Server:
         return self._start_blocking_call(validated, principal, name, arguments, target, deadline_s)
 
     def _client_declares_tasks(self, validated: dict) -> bool:
+        """Return whether the calling client declared the Tasks extension capability."""
         return declares_tasks_capability(validated["client_capabilities"])
 
     # -- consent choreography ---------------------------------------------
@@ -1530,9 +1567,11 @@ class Server:
         return target
 
     def _run_preflight(self, name: str, arguments: dict) -> dict | None:
+        """Run the tool's consent preflight on the GUI thread and return its target."""
         preflight = self._preflights[name]
 
         def guarded() -> Any:
+            """Run the preflight callable, carrying a ToolError through as the outcome value."""
             try:
                 return preflight(self, name, arguments)
             except ToolError as exc:
@@ -1581,6 +1620,7 @@ class Server:
         deadline_s: float,
         cancel_event: threading.Event | None = None,
     ) -> _Operation:
+        """Reserve one shared operation slot (32 cap) with its monotonic deadline."""
         with self._state_lock:
             if self._bound and self._state != "running":
                 raise ToolError(
@@ -1609,6 +1649,7 @@ class Server:
             return op
 
     def _remove_op(self, op: _Operation) -> None:
+        """Drop one operation and finish draining once the registry is empty."""
         with self._ops_lock:
             self._ops.pop(op.op_id, None)
             empty = not self._ops
@@ -1616,6 +1657,7 @@ class Server:
             self._maybe_finish_draining()
 
     def _remove_op_by_id(self, op_id: str) -> None:
+        """Drop an operation by id and finish draining once the registry is empty."""
         with self._ops_lock:
             self._ops.pop(op_id, None)
             empty = not self._ops
@@ -1662,6 +1704,7 @@ class Server:
         if outcome.error is None and isinstance(value, concurrent.futures.Future):
 
             def on_resolved(_resolved: concurrent.futures.Future) -> None:
+                """Release the operation slot once the retained Future truly resolves."""
                 self._remove_op(op)
 
             try:
@@ -1712,6 +1755,7 @@ class Server:
                 pass
 
     def _overdue_operations(self) -> list[_Operation]:
+        """Return operations past their deadline once each, marking them noted."""
         now = self._clock()
         with self._ops_lock:
             overdue = []
@@ -1776,6 +1820,7 @@ class Server:
         handler = self._handlers[name]
 
         def runner() -> Any:
+            """Run the handler, merging the recovery receipt and carrying ToolErrors as values."""
             try:
                 result = handler(op_ctx, arguments)
                 if isinstance(result, dict) and op_ctx.checkpoint:
@@ -1791,9 +1836,11 @@ class Server:
         events: queue.SimpleQueue = queue.SimpleQueue()
 
         def on_disconnect() -> None:
+            """Request cooperative cancellation of this operation on client disconnect."""
             op.cancel_event.set()  # cancellation of that operation only
 
         def produce() -> None:
+            """Dispatch the call and stream one final response plus the terminal sentinel."""
             try:
                 outcome = gui_dispatch.dispatch_to_gui(
                     runner,
@@ -1930,6 +1977,7 @@ class Server:
         target: dict | None,
         deadline_s: float,
     ) -> dict:
+        """Run a task-eligible call detached, answering immediately with the task record."""
         # The shared operation slot is reserved first so a full operation
         # cap never leaves an orphan task record behind; the record is then
         # created (queryable) before the flat resultType:"task" response is
@@ -1959,6 +2007,7 @@ class Server:
         handler = self._handlers[name]
 
         def runner() -> Any:
+            """Run the handler, merging the recovery receipt and carrying ToolErrors as values."""
             try:
                 result = handler(op_ctx, arguments)
                 if isinstance(result, dict) and op_ctx.checkpoint:
@@ -1975,6 +2024,7 @@ class Server:
         op_id = op.op_id
 
         def on_finished(outcome: Any) -> None:
+            """Finalize the task record from the dispatch outcome."""
             self._finalize_task(task_id, op_id, principal, name, outcome)
 
         submitted = gui_dispatch.submit_to_gui(
@@ -2049,6 +2099,7 @@ class Server:
     def _complete_task_from_value(
         self, task_id: str, op_id: str, principal: str, name: str, value: Any
     ) -> None:
+        """Store the terminal task result for a handler value, validating its output schema."""
         if isinstance(value, ToolError):
             self._validate_error_next_tool(value)
             receipt = self._operation_checkpoint(op_id)
@@ -2096,6 +2147,7 @@ class Server:
         """
 
         def on_done(resolved: concurrent.futures.Future) -> None:
+            """Complete the task from the resolved Future, failing it truthfully on errors."""
             try:
                 value = resolved.result()
                 self._complete_task_from_value(task_id, op_id, principal, name, value)
@@ -2139,6 +2191,7 @@ class Server:
         future.add_done_callback(on_done)
 
     def _publish_task_update(self, task_id: str, principal: str | None) -> None:
+        """Publish one task status notification, never breaking finalization."""
         try:
             snapshot = self._task_store.snapshot(task_id, principal=principal)
             self._registry.publish_task_status(snapshot)
@@ -2240,6 +2293,7 @@ class Server:
         return cls._require_task_id_value(params.get("taskId"))
 
     def _dispatch_tasks_get(self, validated: dict, principal: str) -> dict:
+        """Return one task snapshot for the validated id (Tasks capability required)."""
         require_tasks_capability(validated["client_capabilities"])
         snapshot = self._task_store.snapshot(
             self._require_task_id(validated["params"]), principal=principal
@@ -2247,6 +2301,7 @@ class Server:
         return _rpc_result(validated["id"], complete_result(snapshot))
 
     def _dispatch_tasks_update(self, validated: dict, principal: str) -> dict:
+        """Validate the task exists and acknowledge the update with an empty result."""
         require_tasks_capability(validated["client_capabilities"])
         task_id = self._require_task_id(validated["params"])
         self._task_store.get(task_id, principal=principal)
@@ -2256,6 +2311,7 @@ class Server:
         return _rpc_result(validated["id"], complete_result({}))
 
     def _dispatch_tasks_cancel(self, validated: dict, principal: str) -> dict:
+        """Request cooperative cancellation of one task and acknowledge benignly."""
         require_tasks_capability(validated["client_capabilities"])
         self._task_store.request_cancel(
             self._require_task_id(validated["params"]), principal=principal
@@ -2269,6 +2325,7 @@ class Server:
     def _dispatch_listen(
         self, validated: dict, principal: str, connection_id: Any
     ) -> StreamResponse:
+        """Open one bounded subscription stream for the requested notifications."""
         params = validated["params"]
         notifications = params.get("notifications")
         if notifications is None:
@@ -2325,6 +2382,7 @@ class Server:
     # -- document resources -------------------------------------------------------
 
     def _dispatch_resources_list(self, validated: dict) -> dict:
+        """Describe the single ``freecad://documents`` resource with private caching."""
         payload = {
             "resources": [
                 {
@@ -2339,6 +2397,7 @@ class Server:
         return _with_caching(_rpc_result(validated["id"], complete_result(payload)), CACHE_PRIVATE)
 
     def _dispatch_resources_read(self, validated: dict) -> dict:
+        """Read the live document inventory as JSON through one GUI dispatch."""
         uri = validated["params"].get("uri")
         if uri != DOCUMENTS_RESOURCE_URI:
             raise ProtocolError(
@@ -2382,6 +2441,7 @@ class Server:
 
     @staticmethod
     def _read_documents() -> dict:
+        """Collect name, label, file name and object count for every open document."""
         documents = []
         for doc in FreeCAD.listDocuments().values():
             try:
@@ -2441,6 +2501,7 @@ class Server:
     # ------------------------------------------------------------------
 
     def _capture_static_capabilities(self, document: Any = None) -> None:
+        """Capture and store the static capability snapshot on the GUI thread."""
         self._static_capabilities = _capture_static_capabilities(document)
 
     # ------------------------------------------------------------------
@@ -2547,6 +2608,7 @@ class Server:
         return result
 
     def status(self) -> dict:
+        """Report run state, endpoint, pending operations, GUI health and connection settings."""
         with self._state_lock:
             state = self._state
         port = self._http.port if self._http is not None else None
@@ -2626,9 +2688,11 @@ class _SubscriptionStream:
     __slots__ = ("_subscription",)
 
     def __init__(self, subscription: Any) -> None:
+        """Hold one subscription as this stream's message source."""
         self._subscription = subscription
 
     def get(self, timeout: float | None = None) -> Any:
+        """Map closure to end-of-stream and poll timeouts to ``queue.Empty`` keepalives."""
         try:
             message = self._subscription.receive(timeout=timeout)
         except SubscriptionClosed:
@@ -2659,6 +2723,7 @@ def _bounded_unavailable(source: BaseException | str) -> dict:
 
 
 def _probe(fn: Callable[[], Any]) -> Any:
+    """Run one capability probe, converting any failure to a bounded unavailable shape."""
     try:
         return fn()
     except Exception as exc:
@@ -2666,6 +2731,7 @@ def _probe(fn: Callable[[], Any]) -> Any:
 
 
 def _module_available(name: str) -> bool:
+    """Return whether an importable module spec exists, or False on probe failure."""
     import importlib.util
 
     try:
@@ -2820,6 +2886,7 @@ def _active_edit_object(gui_document: Any) -> str | None:
 
 
 def _unpack_definition(definition: Any) -> tuple[str, str, Any, Any]:
+    """Split a definition mapping or tuple into name, description and the schemas."""
     if isinstance(definition, Mapping):
         return (
             definition["name"],
@@ -3138,6 +3205,7 @@ def _compact_capabilities(snapshot: Mapping[str, Any]) -> dict:
 
 
 def _discover_definition() -> dict:
+    """Build the ``discover_capabilities`` tool definition with its wire schemas."""
     return {
         "name": "discover_capabilities",
         "description": (
@@ -3191,6 +3259,7 @@ def _discover_definition() -> dict:
 
 
 def _inspect_documents_definition() -> dict:
+    """Build the ``inspect_documents`` tool definition with its wire schemas."""
     return {
         "name": "inspect_documents",
         "description": (
@@ -3311,6 +3380,7 @@ def stop_server() -> dict:
 
 
 def server_status() -> dict:
+    """Report the module-level server's status or the stopped default when absent."""
     with _server_lock:
         server = _server
     if server is None:

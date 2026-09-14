@@ -260,6 +260,7 @@ class _BoundedStream(io.StringIO):
     """
 
     def __init__(self, limit: int) -> None:
+        """Initialize the bounded capture with its retention limit."""
         super().__init__()
         self._limit = limit
         self._truncated = False
@@ -267,6 +268,7 @@ class _BoundedStream(io.StringIO):
         self._lock = threading.Lock()
 
     def write(self, text: str) -> int:
+        """Retain only the head up to ``limit``, always report the offered length."""
         with self._lock:
             if self._closed:
                 raise ValueError("I/O operation on closed file")
@@ -338,6 +340,7 @@ def _format_traceback_tail(exc_info: tuple[Any, Any, Any]) -> tuple[str, bool]:
 
 
 def _script_error_message(traceback_text: str) -> str:
+    """Extract the final line of a traceback as the user-facing error."""
     lines = traceback_text.strip().splitlines()
     return lines[-1] if lines else "the script raised an exception"
 

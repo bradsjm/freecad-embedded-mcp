@@ -849,10 +849,12 @@ check_schema(_EDIT_FEATURE_OUTPUT)
 
 
 def _fail(message: str, details: dict | None = None) -> ToolError:
+    """Build a VALIDATION_FAILED tool error with the given message."""
     return ToolError(VALIDATION_FAILED, message, details)
 
 
 def _require_body(body: Any) -> None:
+    """Refuse any object that is not a PartDesign Body."""
     derived = getattr(body, "isDerivedFrom", None)
     if callable(derived):
         try:
@@ -866,6 +868,7 @@ def _require_body(body: Any) -> None:
 
 
 def _body_members(body: Any) -> list[Any] | None:
+    """Return the Body's member list, or None when neither Group nor Model exists."""
     for attribute in ("Group", "Model"):
         members = getattr(body, attribute, None)
         if members is not None:
@@ -906,6 +909,7 @@ def _datum_type_id(doc: Any) -> str | None:
 
 
 def _profile_object(ctx: Any, doc: Any, body: Any, profile: Any) -> Any:
+    """Resolve the profile reference to a Body member, refusing subshapes."""
     if isinstance(profile, str):
         profile_obj = ctx.require_object(doc, profile)
     else:
@@ -1619,6 +1623,7 @@ def _apply_datum_line_axis(feature: Any, body: Any, value: Any) -> list[str]:
 
 
 def _apply_profile(feature: Any, profile_obj: Any, kind: str) -> None:
+    """Assign the profile object to the feature's native Profile property."""
     if not _objects._property_exists(feature, "Profile"):
         raise _fail(
             f"feature '{feature.Name}' exposes no Profile property"
@@ -1632,6 +1637,7 @@ def _apply_profile(feature: Any, profile_obj: Any, kind: str) -> None:
 
 
 def _apply_attachment(feature: Any, support_obj: Any, native: str, map_mode: str) -> None:
+    """Attach the support reference and map mode to the feature."""
     for prop in ("Support", "AttachmentSupport"):
         if _objects._property_exists(feature, prop):
             setattr(feature, prop, [(support_obj, native)])
@@ -2401,6 +2407,7 @@ def _create_gear_profile(ctx: Any, doc: Any, body: Any, requested_name: str) -> 
 
 
 def _expected_body_expectation(arguments: Mapping[str, Any], tolerance: float) -> dict[str, Any]:
+    """Collect the caller's expected_solids/expected_bounds into a gate expectation."""
     expectation: dict[str, Any] = {}
     if arguments.get("expected_solids") is not None:
         expectation["expected_solids"] = arguments["expected_solids"]
@@ -2411,6 +2418,7 @@ def _expected_body_expectation(arguments: Mapping[str, Any], tolerance: float) -
 
 
 def _mutation_label(action: str, body: Any, feature: Any = None) -> str:
+    """Build the '<action>:<body>[:<feature>]' mutation label."""
     suffix = f":{getattr(feature, 'Name', '')}" if feature is not None else ""
     return f"{action}:{getattr(body, 'Name', '')}{suffix}"
 
@@ -2495,6 +2503,7 @@ def _create_multi_transform(
 
 
 def _create_feature(ctx: Any, arguments: dict) -> dict:
+    """Handle create_feature: validated PartDesign feature creation in one mutation."""
     doc = ctx.require_document(arguments["document"])
     body = ctx.require_object(doc, str(arguments["body"]))
     _require_body(body)
@@ -2589,6 +2598,7 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
     applied_semantic: list[str] = []
 
     def _validate_tip() -> None:
+        """Assert the Body's post-recompute Tip names the created feature."""
         if not created:
             return
         tip = getattr(body, "Tip", None)
@@ -2748,6 +2758,7 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
 
 
 def _editable_kind(feature: Any) -> str:
+    """Map a feature's TypeId to its editable kind, refusing unsupported types."""
     type_id = str(getattr(feature, "TypeId", ""))
     if (
         type_id == "Part::Part2DObjectPython"
@@ -2976,6 +2987,7 @@ def _angle_degrees(feature: Any, prop: str) -> float | None:
 
 
 def _edit_feature(ctx: Any, arguments: dict) -> dict:
+    """Handle edit_feature: validated semantic parameter edits in one mutation."""
     doc = ctx.require_document(arguments["document"])
     body = ctx.require_object(doc, str(arguments["body"]))
     _require_body(body)

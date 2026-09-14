@@ -82,6 +82,7 @@ _UNKNOWN_TASK_MESSAGE = "Unknown or expired task"
 
 
 def _utc_now_iso() -> str:
+    """Return the current UTC instant as a millisecond ISO-8601 Z timestamp."""
     now = datetime.now(UTC)
     return now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -172,6 +173,7 @@ class Task:
 
     @property
     def terminal(self) -> bool:
+        """True once the task reaches completed, failed or cancelled."""
         return self.status in TERMINAL_STATUSES
 
 
@@ -210,6 +212,7 @@ def create_task_wire(task: Task) -> dict[str, Any]:
 
 
 def _error_payload(error: Any) -> dict[str, Any]:
+    """Normalize a ProtocolError or code/message dict into a JSON-RPC error object."""
     if isinstance(error, ProtocolError):
         payload: dict[str, Any] = {"code": error.code, "message": error.message}
         if error.data is not None:
@@ -267,6 +270,7 @@ class TaskStore:
         max_retained_bytes: int = MAX_RETAINED_TASK_BYTES,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """Validate the retention budget and create an empty locked store."""
         if not _MIN_RETAINED_TASK_BYTES <= max_retained_bytes <= _MAX_RETAINED_TASK_BYTES:
             raise ValueError(
                 "max_retained_bytes must hold one bounded terminal record "
@@ -391,6 +395,7 @@ class TaskStore:
             return copy.deepcopy(detailed_task_wire(task))
 
     def __len__(self) -> int:
+        """Return the number of task records currently retained."""
         with self._lock:
             return len(self._tasks)
 
@@ -627,6 +632,7 @@ class TaskStore:
         return substitute, substitute_size, status_message, status_size, True
 
     def _get_checked_locked(self, task_id: str, principal: str | None) -> Task:
+        """Return the caller's task, refusing unknown, expired or foreign ids."""
         task = self._tasks.get(task_id)
         # A principal mismatch is indistinguishable from an unknown id so a
         # foreign principal cannot probe another principal's task ids.
@@ -640,9 +646,11 @@ class TaskStore:
         return task
 
     def _active_count_locked(self) -> int:
+        """Count records still holding active (nonterminal) capacity."""
         return sum(1 for task in self._tasks.values() if not task.terminal)
 
     def _mark_terminal_locked(self, task: Task, now: float) -> None:
+        """Drop args, settle the byte budget and start the terminal TTL clock."""
         # Arguments are no longer needed once the outcome is fixed: drop
         # them and hand their budget to the terminal payload.
         task.args = {}
@@ -660,6 +668,7 @@ class TaskStore:
         task.last_updated_at = _utc_now_iso()
 
     def _sweep_locked(self, now: float) -> None:
+        """Expire records past their TTL, releasing budget and keeping tombstones."""
         expired = [
             task_id
             for task_id, task in self._tasks.items()

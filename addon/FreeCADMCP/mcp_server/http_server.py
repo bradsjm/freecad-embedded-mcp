@@ -138,6 +138,7 @@ def _check_header_value_legality(value):
 
 
 def _reject_json_constant(name):
+    """Reject NaN/Infinity JSON constants with a parse error."""
     raise ValueError(f"invalid JSON constant: {name}")
 
 
@@ -191,6 +192,7 @@ class StreamResponse:
     """
 
     def __init__(self, events, *, on_disconnect=None, keepalive_interval=None):
+        """Store the event source, disconnect callback and keepalive interval."""
         self.events = events
         self.on_disconnect = on_disconnect
         self.keepalive_interval = keepalive_interval
@@ -297,6 +299,7 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
         max_stream_event_bytes=MAX_STREAM_EVENT_BYTES,
         service_hook=None,
     ):
+        """Validate mode configuration, bind the socket and build the legacy adapter."""
         if token is not None and (not isinstance(token, str) or not token.strip()):
             raise ValueError("token must be None or a non-empty string")
         if remote_enabled and not (isinstance(token, str) and token.strip()):
@@ -372,6 +375,7 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
             raise
 
     def _process_request_with_slot(self, request, client_address):
+        """Serve one request in its thread, then release its connection slot."""
         try:
             self.process_request_thread(request, client_address)
         finally:
@@ -470,17 +474,20 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
     sys_version = ""
 
     def setup(self):
+        """Initialize the connection: read timeout, id and response flag."""
         self.timeout = self.server.read_timeout
         super().setup()
         self.connection_id = uuid.uuid4().hex
         self._response_started = False
 
     def log_message(self, format, *args):
+        """Suppress per-request logging to keep the FreeCAD console quiet."""
         pass  # keep the FreeCAD console free of per-request noise
 
     # ----------------------------------------------------------- dispatching
 
     def __getattr__(self, name):
+        """Resolve every HTTP verb handler to the authenticated pipeline."""
         # Every verb — known or custom — resolves to the authenticated
         # pipeline, so the stdlib fallback never answers with an
         # unauthenticated 501.
@@ -489,6 +496,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         raise AttributeError(name)
 
     def _handle(self):
+        """Process one request, closing the connection on transport errors."""
         try:
             self.connection.settimeout(self.server.read_timeout)
             self._response_started = False
@@ -505,13 +513,16 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
                     pass
 
     def _set_write_timeout(self):
+        """Apply the write timeout before any response bytes are sent."""
         self.connection.settimeout(self.server.write_timeout)
 
     def _restore_read_timeout(self):
+        """Restore the read timeout for the next request unless closing."""
         if not self.close_connection:
             self.connection.settimeout(self.server.read_timeout)
 
     def _send_json(self, status, payload, *, close=False, extra_headers=()):
+        """Send a size-bounded JSON response with exact framing."""
         if status in (204, 304):
             # RFC 9110: these statuses carry neither body nor framing.
             body = b""
@@ -542,10 +553,12 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             self._restore_read_timeout()
 
     def _send_rpc_error(self, status, code, message, *, request_id=None, close=False):
+        """Send a JSON-RPC error object with the given HTTP status."""
         error = {"code": code, "message": message}
         self._send_json(status, error_response(error, request_id), close=close)
 
     def _send_protocol_error(self, exc, request_id):
+        """Map a ProtocolError to its HTTP status and send the JSON-RPC error."""
         status = _HTTP_STATUS_BY_CODE.get(exc.code, 400)
         error = {"code": exc.code, "message": exc.message}
         if exc.data is not None:
@@ -553,6 +566,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         self._send_json(status, error_response(error, request_id))
 
     def _reject_unauthorized(self, *, close=False):
+        """Answer 401 with a Bearer WWW-Authenticate challenge."""
         self._send_json(
             401,
             {"error": "unauthorized"},
@@ -561,14 +575,17 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _reject_forbidden(self, detail, *, close=False):
+        """Answer 403 with a rejection detail string."""
         self._send_json(403, {"error": "forbidden", "detail": detail}, close=close)
 
     def _lowered_headers(self):
+        """Return the request headers keyed by lowercase name."""
         return {name.lower(): value for name, value in self.headers.items()}
 
     # -------------------------------------------------------------- pipeline
 
     def _process(self):
+        """Run the authenticated request pipeline from framing checks to era routing."""
         structural_error = self._header_structure_error()
         if structural_error is not None:
             # Framing cannot be trusted; reject without draining the body.
@@ -685,6 +702,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _run_modern(self, message, lowered):
+        """Validate and dispatch a modern-era message; notifications answer 202."""
         request_id = self._extract_request_id(message) if isinstance(message, dict) else None
         is_notification = isinstance(message, dict) and "id" not in message
         try:
@@ -721,6 +739,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         return self._send_rpc_error(404, -32600, "unknown or expired MCP session")
 
     def _emit_legacy_reply(self, reply):
+        """Send a legacy reply as an SSE stream or a plain JSON response."""
         if reply.stream is not None:
             return self._send_stream(reply.stream)
         return self._send_json(reply.status, reply.payload, extra_headers=reply.headers)
@@ -771,6 +790,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         return int(significant)
 
     def _host_allowed(self):
+        """Require the Host header to name the loopback endpoint (local mode)."""
         host = self.headers.get("Host")
         if not host:
             return False
@@ -779,6 +799,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         return host.strip().lower() in allowed
 
     def _origin_allowed(self):
+        """Allow a missing Origin and require a loopback origin otherwise."""
         origin = self.headers.get("Origin")
         if origin is None:
             return True  # absence is allowed; non-browser clients send none
@@ -787,6 +808,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         return origin.strip().lower() in allowed
 
     def _authorized(self):
+        """Compare bearer credentials against the token in constant time."""
         token = self.server.token
         if not token:
             return True  # tokenless local mode; loopback gates apply instead
@@ -802,6 +824,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _content_type_is_json(self):
+        """Return True when the Content-Type media type is application/json."""
         content_type = self.headers.get("Content-Type", "")
         mediatype = content_type.split(";", 1)[0].strip().lower()
         return mediatype == "application/json"
@@ -836,6 +859,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
 
     @staticmethod
     def _extract_request_id(message):
+        """Return the request id when it is a string or integer, else None."""
         request_id = message.get("id")
         if isinstance(request_id, bool) or not isinstance(request_id, (str, int)):
             return None
@@ -844,6 +868,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ SSE
 
     def _send_stream(self, stream):
+        """Stream a StreamResponse as chunked SSE with keepalives and size limits."""
         server = self.server
         rejected = False
         with server._streams_lock:
@@ -915,6 +940,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
             stream._finalize(disconnected=not completed)
 
     def _write_chunk(self, payload):
+        """Write one chunked-transfer body chunk and flush."""
         self._set_write_timeout()
         self.wfile.write(f"{len(payload):X}\r\n".encode("ascii") + payload + b"\r\n")
         self.wfile.flush()

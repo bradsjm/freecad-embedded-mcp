@@ -35,6 +35,7 @@ _ICONS_DIR = os.path.normpath(
 
 
 def _icon_path(name: str) -> str:
+    """Return the path of a bundled icon file by name."""
     return os.path.join(_ICONS_DIR, name)
 
 
@@ -44,6 +45,7 @@ def _tr(text: str) -> str:
 
 
 def _main_window():
+    """Return the main window, or ``None`` when it is unavailable."""
     try:
         return FreeCADGui.getMainWindow()
     except Exception:
@@ -64,14 +66,17 @@ def _show_status_bar(message: str) -> None:
 
 
 def _report_message(message: str) -> None:
+    """Print an informational message to FreeCAD's Report view."""
     FreeCAD.Console.PrintMessage(f"{message}\n")
 
 
 def _report_error(message: str) -> None:
+    """Print an error message to FreeCAD's Report view."""
     FreeCAD.Console.PrintError(f"{message}\n")
 
 
 def _warn(message: str) -> None:
+    """Show a modal native warning dialog owned by the main window."""
     window = _main_window()
     QtWidgets.QMessageBox.warning(window, "FreeCAD MCP", message)
 
@@ -176,6 +181,7 @@ class McpUiController(QtCore.QObject):
     """
 
     def __init__(self, parent=None):
+        """Load settings, build the indicator and start the poll timer."""
         super().__init__(parent)
         self._settings = self._load_settings()
         self._toggle_action = None
@@ -192,6 +198,7 @@ class McpUiController(QtCore.QObject):
 
     @staticmethod
     def _load_settings():
+        """Return the saved settings, or ``None`` when they fail to load."""
         try:
             return load_settings()
         except SettingsError:
@@ -206,6 +213,7 @@ class McpUiController(QtCore.QObject):
     # -- indicator ---------------------------------------------------------
 
     def _build_indicator(self):
+        """Build the permanent indicator button; ``None`` without a window."""
         window = _main_window()
         if window is None:
             return None
@@ -220,6 +228,7 @@ class McpUiController(QtCore.QObject):
         return button
 
     def _open_connection_details(self):
+        """Open Connection Details through the registered command."""
         # Invoke the existing command so the dialog works even before the
         # workbench has registered anything special for the button.
         try:
@@ -228,6 +237,7 @@ class McpUiController(QtCore.QObject):
             ConnectionDetailsCommand().Activated()
 
     def _tooltip(self, status: dict) -> str:
+        """Build the indicator tooltip from one server status snapshot."""
         connection = status.get("connection") or {}
         gui = status.get("gui") or {}
         remote = bool(connection.get("remote_enabled"))
@@ -313,12 +323,14 @@ def initialize_ui():
 
 
 def _controller_refresh():
+    """Refresh the controller if present; no-op without a main window."""
     controller = initialize_ui()
     if controller is not None:
         controller.refresh()
 
 
 def _controller_settings_changed():
+    """Reload controller settings if present; no-op without a main window."""
     controller = initialize_ui()
     if controller is not None:
         controller.settings_changed()
@@ -333,6 +345,7 @@ class ToggleMCPServerCommand:
     """One command for both directions: stop while running, start while fully stopped."""
 
     def GetResources(self):
+        """Return the initial resources describing the stopped server state."""
         # Initial resources describe the stopped state; the controller
         # refresh rewrites text, icon, tooltip and availability from the
         # confirmed server state.
@@ -343,6 +356,7 @@ class ToggleMCPServerCommand:
         }
 
     def Activated(self):
+        """Start or stop the server as the confirmed state allows."""
         state_map = _indicator_state(mcp_server_module.server_status())
         if state_map["stop_enabled"]:
             self._stop()
@@ -356,6 +370,7 @@ class ToggleMCPServerCommand:
             _report_message(f"[MCP] No action taken: {message}")
 
     def _start(self):
+        """Start the server and report the outcome natively."""
         try:
             status = mcp_server_module.start_server()
         except (SettingsError, RuntimeError, OSError) as exc:
@@ -374,6 +389,7 @@ class ToggleMCPServerCommand:
         _controller_refresh()
 
     def _stop(self):
+        """Request a server stop and report the draining or final state."""
         try:
             result = mcp_server_module.stop_server()
         except (SettingsError, RuntimeError, OSError) as exc:
@@ -396,6 +412,7 @@ class ToggleMCPServerCommand:
         _controller_refresh()
 
     def IsActive(self):
+        """Enable the command only while a start or stop transition is valid."""
         return _indicator_state(mcp_server_module.server_status())["action_enabled"]
 
 
@@ -443,7 +460,10 @@ def _connection_details(status: dict, saved: dict | None) -> dict:
 
 
 class ConnectionDetailsCommand:
+    """Dialog reporting connection state, endpoint and the bearer token."""
+
     def GetResources(self):
+        """Return the menu text, tooltip and icon for this command."""
         return {
             "MenuText": "Connection Details…",
             "ToolTip": (
@@ -453,6 +473,11 @@ class ConnectionDetailsCommand:
         }
 
     def Activated(self):
+        """Show the details dialog with freshly loaded saved settings.
+
+        A running network server's live token takes precedence over the
+        saved file's value.
+        """
         # Saved settings are re-loaded every time the dialog opens, so
         # external file changes are reflected without a watcher.
         try:
@@ -507,6 +532,7 @@ class ConnectionDetailsCommand:
         reveal.setChecked(False)
 
         def _set_reveal(checked: bool) -> None:
+            """Show the token in plain text only while Reveal is checked."""
             token_field.setEchoMode(
                 QtWidgets.QLineEdit.Normal if checked else QtWidgets.QLineEdit.Password
             )
@@ -517,6 +543,7 @@ class ConnectionDetailsCommand:
         copy_endpoint.setEnabled(bool(model["endpoint_copyable"] and model["endpoint"]))
 
         def _copy_endpoint():
+            """Copy the endpoint field to the clipboard and confirm."""
             QtWidgets.QApplication.clipboard().setText(endpoint_field.text())
             copy_endpoint.setText(_tr("Copied"))
 
@@ -526,6 +553,7 @@ class ConnectionDetailsCommand:
         copy_token.setEnabled(bool(token) and not local_only)
 
         def _copy_token():
+            """Copy the token field to the clipboard and confirm."""
             QtWidgets.QApplication.clipboard().setText(token_field.text())
             copy_token.setText(_tr("Copied"))
 
@@ -585,7 +613,10 @@ class ConnectionDetailsCommand:
 
 
 class MCPSettingsCommand:
+    """Dialog for editing and persisting the embedded MCP server settings."""
+
     def GetResources(self):
+        """Return the menu text, tooltip and icon for this command."""
         return {
             "MenuText": "MCP Settings…",
             "ToolTip": "Configure the MCP server port, auto-start, network "
@@ -595,6 +626,7 @@ class MCPSettingsCommand:
         }
 
     def Activated(self):
+        """Show the settings dialog, save valid edits and apply them."""
         try:
             settings = load_settings()
         except SettingsError as exc:
@@ -660,10 +692,12 @@ class MCPSettingsCommand:
         outcome = {}
 
         def _set_error(label, message: str) -> None:
+            """Show a validation error on a label, hiding it when empty."""
             label.setText(message)
             label.setVisible(bool(message))
 
         def _save() -> None:
+            """Validate the form, persist the settings and close on success."""
             _set_error(ips_error, "")
             _set_error(roots_error, "")
             _set_error(recovery_error, "")
@@ -765,6 +799,7 @@ class MCPSettingsCommand:
             _report_message("[MCP] Restart the MCP server to apply: " + ", ".join(pending) + ".")
 
     def IsActive(self):
+        """Keep the settings command always available."""
         return True
 
 
@@ -776,6 +811,7 @@ _REGISTERED = False
 
 
 def register_commands() -> None:
+    """Register the three workbench commands with FreeCADGui exactly once."""
     global _REGISTERED
     if _REGISTERED:
         return

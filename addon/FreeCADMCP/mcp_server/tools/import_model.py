@@ -168,12 +168,14 @@ def preflight(ctx: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any] 
 
 
 def _import_step(doc: Any, path: str) -> None:
+    """Import a STEP file into the document via the native Import module."""
     import Import
 
     Import.insert(path, doc.Name)
 
 
 def _import_stl(doc: Any, path: str, requested_name: str) -> Any:
+    """Import an STL file as a new Mesh::Feature in the document."""
     import Mesh
 
     mesh_feature = doc.addObject("Mesh::Feature", requested_name or "ImportedMesh")
@@ -182,6 +184,7 @@ def _import_stl(doc: Any, path: str, requested_name: str) -> Any:
 
 
 def _mesh_valid(mesh: Any) -> bool | None:
+    """Report the mesh's native validity, or None when it cannot be read."""
     checker = getattr(mesh, "isValid", None)
     if not callable(checker):
         return None
@@ -192,6 +195,7 @@ def _mesh_valid(mesh: Any) -> bool | None:
 
 
 def _mesh_bounds(mesh: Any) -> list[float] | None:
+    """Return the mesh's six-element bounds, or None when unavailable."""
     try:
         box = mesh.BoundBox
         values = [box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax]
@@ -204,6 +208,7 @@ def _mesh_bounds(mesh: Any) -> list[float] | None:
 
 
 def _facet_count(mesh: Any) -> int | None:
+    """Count the mesh's facets, or None when they cannot be read."""
     try:
         return len(list(mesh.Facets))
     except Exception:
@@ -211,6 +216,7 @@ def _facet_count(mesh: Any) -> int | None:
 
 
 def _object_row(obj: Any) -> dict:
+    """Project one imported object into its wire row with shape/mesh evidence."""
     shape = None
     try:
         shape = getattr(obj, "Shape", None)
@@ -305,6 +311,7 @@ def _native_object_ids(objects: list[Any]) -> dict[str, int] | None:
 
 
 def _import_model(ctx: Any, arguments: dict) -> dict:
+    """Handle import_model: consent-gated STEP/STL import inside one mutation."""
     doc = ctx.require_document(arguments["document"])
     fmt = str(arguments["format"])
     path = ctx.canonical_path(arguments["path"])

@@ -253,6 +253,7 @@ def merge_query_defs(schema: dict) -> dict:
 
 
 def _syntax_error(position: int, expected: list[str], message: str) -> ToolError:
+    """Build a VALIDATION_FAILED ToolError for a selector syntax problem."""
     return ToolError(
         VALIDATION_FAILED,
         f"selector syntax error at position {position}: {message}",
@@ -266,6 +267,7 @@ def _syntax_error(position: int, expected: list[str], message: str) -> ToolError
 
 
 def _limit_error(detail: str) -> ToolError:
+    """Build a ToolError for exceeding a parser or evaluation budget."""
     return ToolError(
         VALIDATION_FAILED,
         f"selector exceeds the grammar budget: {detail}",
@@ -274,6 +276,7 @@ def _limit_error(detail: str) -> ToolError:
 
 
 def _index_error(index: int, group_count: int) -> ToolError:
+    """Build a ToolError for an ``[n]`` index outside the matched clusters."""
     return ToolError(
         VALIDATION_FAILED,
         f"selector index [{index}] is outside the {group_count} matched "
@@ -288,6 +291,7 @@ def _index_error(index: int, group_count: int) -> ToolError:
 
 
 def _geometry_unavailable_error(detail: str) -> ToolError:
+    """Build a ToolError for geometry evidence that cannot be read."""
     return ToolError(
         VALIDATION_FAILED,
         f"selector evidence unavailable: {detail}",
@@ -322,6 +326,7 @@ def _parse_number(text: str, position: int) -> tuple[float, int]:
 
 
 def _skip_ws(text: str, position: int) -> int:
+    """Return the position advanced past any whitespace."""
     while position < len(text) and text[position].isspace():
         position += 1
     return position
@@ -407,6 +412,7 @@ def _tokenize(text: str) -> list[tuple[str, Any, int]]:
     length = len(text)
 
     def _atom_keyword_boundary(next_offset: int) -> bool:
+        """Return True when a keyword or direction word ends at a word boundary."""
         following = text[next_offset] if next_offset < length else ""
         return not (following.isalnum() or following == "_")
 
@@ -499,26 +505,31 @@ class _Parser:
     """
 
     def __init__(self, tokens: list[tuple[str, Any, int]]) -> None:
+        """Start a parser over the token stream."""
         self.tokens = tokens
         self.offset = 0
         self.nodes = 0
 
     def _peek(self) -> tuple[str, Any, int] | None:
+        """Return the current token without consuming it, or None at the end."""
         return self.tokens[self.offset] if self.offset < len(self.tokens) else None
 
     def _next(self) -> tuple[str, Any, int] | None:
+        """Consume and return the current token, or None at the end."""
         token = self._peek()
         if token is not None:
             self.offset += 1
         return token
 
     def _node(self, ast: tuple) -> tuple:
+        """Count and return one AST node, refusing beyond the node budget."""
         self.nodes += 1
         if self.nodes > MAX_AST_NODES:
             raise _limit_error(f"more than {MAX_AST_NODES} expression nodes")
         return ast
 
     def parse(self) -> tuple:
+        """Parse the full token stream, refusing leftover input."""
         ast = self._expression(0)
         leftover = self._peek()
         if leftover is not None:
@@ -573,6 +584,7 @@ class _Parser:
             left = self._node(("and", left, right))
 
     def _unary(self, depth: int) -> tuple:
+        """Parse one atom, a ``not`` prefix, or a parenthesized expression."""
         if depth > MAX_SELECTOR_NESTING:
             raise _limit_error(f"nesting deeper than {MAX_SELECTOR_NESTING}")
         token = self._next()
@@ -620,6 +632,7 @@ def parse_selector(text: str) -> tuple:
 
 
 def _record_direction(record: Mapping) -> tuple[float, float, float] | None:
+    """Return the record's direction vector, or None when absent."""
     direction = record.get("direction")
     if direction is None:
         return None
@@ -627,6 +640,7 @@ def _record_direction(record: Mapping) -> tuple[float, float, float] | None:
 
 
 def _require_center(record: Mapping) -> tuple[float, float, float]:
+    """Return the record's center of mass, refusing when it is unreadable."""
     center = record.get("center")
     if center is not None:
         return (float(center[0]), float(center[1]), float(center[2]))
@@ -636,6 +650,7 @@ def _require_center(record: Mapping) -> tuple[float, float, float]:
 
 
 def _type_matches(record: Mapping, name: str) -> bool:
+    """Match a record's analytic type, refusing unreadable classifications."""
     status = record.get("typeStatus", "ok")
     if status != "ok":
         if status == "unreadable":
@@ -693,6 +708,7 @@ def _directional_matches(
 def _cluster_keys(
     records: list[Mapping], vector: tuple[float, float, float]
 ) -> list[tuple[float, Mapping]]:
+    """Return (projection, record) pairs sorted by projected center value."""
     keys = []
     for record in records:
         center = _require_center(record)
@@ -719,6 +735,7 @@ def _cluster(
 
 
 def _nth(clustered: list[list[Mapping]], index: int | None, direction_max: bool) -> list[Mapping]:
+    """Pick the requested extremum cluster, reversed for min operators."""
     ordered = clustered if direction_max else list(reversed(clustered))
     if not ordered:
         return []
@@ -731,6 +748,7 @@ def _nth(clustered: list[list[Mapping]], index: int | None, direction_max: bool)
 
 
 def _evaluate(ast: tuple, universe: list[Mapping]) -> list[Mapping]:
+    """Evaluate one AST node against the candidate universe."""
     tag = ast[0]
     if tag == "type":
         return [record for record in universe if _type_matches(record, ast[1])]
@@ -882,6 +900,7 @@ def normalize_query(query: Any, what: str) -> list[dict]:
 
 
 def radius_predicate_matches(step: Mapping, record: Mapping) -> bool:
+    """Return True when the record's radius lies inside the step bounds."""
     bounds = step.get("radius")
     if bounds is None:
         # No radius predicate: every candidate passes, including records
@@ -899,6 +918,7 @@ def radius_predicate_matches(step: Mapping, record: Mapping) -> bool:
 
 
 def axis_predicate_matches(step: Mapping, record: Mapping) -> bool:
+    """Match a record's analytic axis sign-insensitively within tolerance."""
     bounds = step.get("axis")
     axis = record.get("axis")
     if bounds is None:

@@ -57,6 +57,7 @@ def default_settings_path():
 
 
 def _default_allowed_roots():
+    """Return the default allowed_roots list: the user's home directory."""
     return [os.path.abspath(os.path.expanduser("~"))]
 
 

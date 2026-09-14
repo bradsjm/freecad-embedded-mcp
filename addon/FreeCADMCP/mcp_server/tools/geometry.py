@@ -93,6 +93,7 @@ _EDGE_TYPE_NAMES = {
 
 
 def _finite(value: Any) -> float | None:
+    """Return ``value`` as a finite float, or ``None`` for anything else."""
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -128,6 +129,7 @@ def _shape_of(obj: Any) -> Any:
 
 
 def _unresolvable_geometry(obj: Any) -> ToolError:
+    """Build the shared refusal for geometry that cannot be placed in document space."""
     return ToolError(
         VALIDATION_FAILED,
         "Cannot resolve document-space geometry",
@@ -218,6 +220,7 @@ def _inverted_bounds(bounds: list[float] | None) -> bool:
 
 
 def _subelement_label(role: str, index: int) -> str:
+    """Return the native ``FaceN``/``EdgeN`` label for a role and index."""
     return ("Face" if role == "face" else "Edge") + str(index)
 
 
@@ -302,6 +305,7 @@ def _root_subshapes(shape: Any, role: str) -> list[Any]:
 
 
 def _normalize_unit(vector: Any) -> tuple[float, float, float] | None:
+    """Return ``vector`` normalized to unit length, or ``None`` when degenerate."""
     point = _point(vector)
     if point is None:
         return None
@@ -773,6 +777,11 @@ def _geometry_entry(
     expected_bounds: Mapping[str, Any],
     tolerance: float,
 ) -> dict:
+    """Build one per-object report entry with solids/volume/bounds verdicts.
+
+    ``valid`` aggregates object and shape soundness with every specified
+    verdict, so a single field answers "did this object pass".
+    """
     name = report["name"]
     solid_count = report["solid_count"]
     volume = report["volume"]
@@ -989,6 +998,7 @@ def _prepare_geometry_checks(
     owners: list[str] = []
 
     def _resolve_object(check: dict, key: str) -> dict:
+        """Resolve one check target to its object, name and cached placed shape."""
         target = check[key]
         obj = ctx.require_object(doc, str(target.get("object")))
         name = str(getattr(obj, "Name", ""))
@@ -1185,6 +1195,11 @@ def _evaluate_geometry_checks(ctx: Any, doc: Any, checks: list[dict]) -> list[di
 
 
 def _handle_validate_geometry(ctx: Any, arguments: Mapping[str, Any]) -> dict:
+    """Run validate_geometry: per-object reports plus optional closed checks.
+
+    Stages run in order — check normalization, target resolution, then
+    measurement — so every refusal lands before any expensive native work.
+    """
     doc = ctx.require_document(arguments["document"])
     expected_solids = arguments.get("expected_solids")
     expected_bounds = arguments.get("expected_bounds") or {}
@@ -1260,6 +1275,7 @@ def _handle_validate_geometry(ctx: Any, arguments: Mapping[str, Any]) -> dict:
 
 
 def _measure_distance(a_shape: Any, b_shape: Any, payload: dict) -> dict:
+    """Measure shape-to-shape distance into ``payload`` with endpoint points."""
     try:
         distance, points, _info = a_shape.distToShape(b_shape)
     except Exception as exc:
@@ -1275,6 +1291,7 @@ def _measure_distance(a_shape: Any, b_shape: Any, payload: dict) -> dict:
 
 
 def _measure_interference(a_shape: Any, b_shape: Any, payload: dict) -> dict:
+    """Measure the boolean-common volume into ``payload`` and flag overlap."""
     try:
         common = a_shape.common(b_shape)
     except Exception as exc:
@@ -1441,6 +1458,7 @@ def _section_face(
 
 
 def _measure_section(a_shape: Any, plane: Mapping[str, Any], payload: dict) -> dict:
+    """Section ``shape`` with the plane and summarize the resulting curves."""
     normal, point = _plane_vectors(plane)
     payload["plane"] = {"normal": list(normal), "point": list(point)}
     face = _section_face(normal, point, a_shape)
@@ -1468,6 +1486,7 @@ def _measure_section(a_shape: Any, plane: Mapping[str, Any], payload: dict) -> d
 
 
 def _summarize_edge(edge: Any) -> dict:
+    """Summarize one section edge as a circle, line or other curve kind."""
     import Part
 
     length = _finite(getattr(edge, "Length", None))
@@ -1501,6 +1520,7 @@ def _summarize_edge(edge: Any) -> dict:
 
 
 def _face_summary(face: Any) -> dict:
+    """Return a face's area, center and normal, omitting unreadable fields."""
     try:
         area = _finite(getattr(face, "Area", None))
     except Exception:
@@ -1522,6 +1542,7 @@ def _face_summary(face: Any) -> dict:
 
 
 def _measure_faces(ctx: Any, doc: Any, obj: Any, selection: Mapping | None, payload: dict) -> dict:
+    """Summarize the selected face or all faces (capped) with signed references."""
     shape = _target_shape(obj, selection)
     if shape is None:
         raise ToolError(VALIDATION_FAILED, f"object {obj.Name} has no shape")
@@ -1558,6 +1579,11 @@ def _measure_faces(ctx: Any, doc: Any, obj: Any, selection: Mapping | None, payl
 
 
 def _handle_measure(ctx: Any, arguments: Mapping[str, Any]) -> dict:
+    """Handle ``measure`` over the distance/interference/difference/section/faces modes.
+
+    Mode applicability is decided before target resolution, so a field
+    another mode would silently ignore is a named refusal.
+    """
     doc = ctx.require_document(arguments["document"])
     mode = arguments["mode"]
     # Mode applicability is decided before any target resolution: a field
@@ -1630,6 +1656,7 @@ def _type_name(value: Any) -> str | None:
 
 
 def _first_vertex_point(edge: Any, last: bool) -> list[float] | None:
+    """Return the edge's first or last vertex point as ``[x, y, z]``, or ``None``."""
     try:
         vertexes = list(getattr(edge, "Vertexes", ()) or ())
     except Exception:
@@ -1643,6 +1670,7 @@ def _first_vertex_point(edge: Any, last: bool) -> list[float] | None:
 def _topology_face_item(
     ctx: Any, doc: Any, obj: Any, index: int, face: Any, detail: str = "full"
 ) -> dict:
+    """Build one inspect_topology face item, compact or with the full summary."""
     surface = getattr(face, "Surface", None)
     item = {
         "index": index,
@@ -1668,6 +1696,7 @@ def _topology_face_item(
 def _topology_edge_item(
     ctx: Any, doc: Any, obj: Any, index: int, edge: Any, detail: str = "full"
 ) -> dict:
+    """Build one inspect_topology edge item, compact or with the full summary."""
     curve = getattr(edge, "Curve", None)
     item = {
         "index": index,
@@ -1704,6 +1733,7 @@ def _topology_cursor_payload(
     last: int,
     query_hash: str,
 ) -> dict:
+    """Build the signed pagination-cursor payload for one topology page."""
     return {
         "kind": "topology-page",
         "identity": str(ctx.document_identity(doc)),
@@ -1752,6 +1782,7 @@ def _open_topology_cursor(
 
 
 def _stale_topology_cursor() -> ToolError:
+    """Build the shared stale-cursor refusal naming ``inspect_topology``."""
     return ToolError(
         VALIDATION_FAILED,
         "topology cursor is stale or was built for a different request; "
@@ -1761,6 +1792,7 @@ def _stale_topology_cursor() -> ToolError:
 
 
 def _handle_inspect_topology(ctx: Any, arguments: Mapping[str, Any]) -> dict:
+    """Handle ``inspect_topology``: page a role's subshapes under signed cursors."""
     doc = ctx.require_document(arguments["document"])
     detail = str(arguments.get("detail") or "compact")
     limit = arguments.get("limit")

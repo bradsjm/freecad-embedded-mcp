@@ -64,9 +64,11 @@ class _SubscriptionQueueView:
     """Small queue-compatible view over a subscription's atomic consumer."""
 
     def __init__(self, subscription: Subscription) -> None:
+        """Bind the view to one subscription's atomic consumer."""
         self._subscription = subscription
 
     def get(self, timeout: float | None = None) -> dict[str, Any] | None:
+        """Return the next message; ``None`` once closed and drained, ``queue.Empty`` on timeout."""
         try:
             message = self._subscription.receive(timeout=timeout)
         except SubscriptionClosed:
@@ -76,9 +78,11 @@ class _SubscriptionQueueView:
         return message
 
     def get_nowait(self) -> dict[str, Any] | None:
+        """Poll once without waiting (``queue.Empty`` when nothing is queued)."""
         return self.get(timeout=0)
 
     def empty(self) -> bool:
+        """Report whether no message is currently queued."""
         with self._subscription._lock:
             return not self._subscription._queue
 
@@ -101,6 +105,7 @@ def _serialized_size_bounded(message: dict[str, Any], limit: int) -> int | None:
 
 
 def _dedupe(values: list[str]) -> list[str]:
+    """Return the values in first-occurrence order without duplicates."""
     seen: set[str] = set()
     ordered: list[str] = []
     for value in values:
@@ -180,6 +185,12 @@ class Subscription:
         queue_limit: int,
         queue_bytes: int,
     ) -> None:
+        """Store identity and honored filter; reserve terminal-result queue headroom.
+
+        The data byte budget is the queue budget minus the terminal reserve,
+        so the promised final result can still be enqueued after
+        notifications have filled the queue.
+        """
         self.connection_id = connection_id
         self.subscription_id = subscription_id
         self.principal = principal
@@ -199,6 +210,7 @@ class Subscription:
 
     @property
     def closed(self) -> bool:
+        """True once the stream is closed; queued messages may still drain."""
         return self._closed
 
     @property
@@ -275,6 +287,7 @@ class Subscription:
             return True
 
     def _offer_locked(self, message: dict[str, Any], *, terminal: bool = False) -> bool:
+        """Enqueue under the held lock, giving terminal results relaxed budgets."""
         byte_limit = self._queue_bytes_limit if terminal else self._data_bytes_limit
         size = _serialized_size_bounded(message, byte_limit)
         if size is None or self._queued_bytes + size > byte_limit:
@@ -291,6 +304,7 @@ class Subscription:
         return True
 
     def _close_locked(self) -> None:
+        """Mark closed, append the end marker when room allows and wake consumers."""
         self._closed = True
         if len(self._queue) < self._queue_limit:
             self._queue.append(None)
@@ -310,6 +324,7 @@ class SubscriptionRegistry:
         support_prompts_list_changed: bool = False,
         support_resources_list_changed: bool = False,
     ) -> None:
+        """Configure queue budgets, supported notification kinds and the subscription map."""
         self._supported_resource_uris = frozenset(supported_resource_uris)
         self._queue_limit = queue_limit
         self._queue_bytes = queue_bytes
@@ -420,11 +435,13 @@ class SubscriptionRegistry:
     # -- lookups ----------------------------------------------------------
 
     def subscription(self, connection_id: Any, subscription_id: Any) -> Subscription | None:
+        """Return the subscription for ``(connection_id, subscription_id)``, or ``None``."""
         with self._lock:
             self._prune_locked()
             return self._subscriptions.get((connection_id, subscription_id))
 
     def __len__(self) -> int:
+        """Count registered subscriptions after pruning closed ones."""
         with self._lock:
             self._prune_locked()
             return len(self._subscriptions)
@@ -472,6 +489,7 @@ class SubscriptionRegistry:
     # -- internals ---------------------------------------------------------
 
     def _targets_locked(self, predicate: Callable[[Subscription], bool]) -> list[Subscription]:
+        """Collect open subscriptions matching ``predicate`` under the held lock."""
         self._prune_locked()
         return [sub for sub in self._subscriptions.values() if predicate(sub)]
 
@@ -481,6 +499,7 @@ class SubscriptionRegistry:
         method: str,
         params_for: Callable[[Subscription], dict[str, Any]],
     ) -> int:
+        """Offer one meta-stamped notification to each target; return the delivered count."""
         delivered = 0
         for subscription in targets:
             if subscription.offer(
@@ -497,6 +516,7 @@ class SubscriptionRegistry:
         return delivered
 
     def _prune_locked(self) -> None:
+        """Drop closed subscriptions from the registry under the held lock."""
         closed = [key for key, sub in self._subscriptions.items() if sub.closed]
         for key in closed:
             del self._subscriptions[key]

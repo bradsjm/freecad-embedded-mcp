@@ -81,6 +81,7 @@ _MAX_NAME_LENGTH = 100
 
 
 def _describe(exc: BaseException) -> str:
+    """Format an exception as ``Type: message`` for error details."""
     return f"{type(exc).__name__}: {exc}"
 
 
@@ -177,6 +178,7 @@ def _is_dirty(ctx: Any, doc: Any) -> bool:
 
 
 def _target_identity(target: dict[str, Any]) -> dict[str, Any]:
+    """Strip presentation keys so only identity fields remain comparable."""
     return {key: value for key, value in target.items() if key not in _IDENTITY_EXCLUDED_KEYS}
 
 
@@ -204,6 +206,7 @@ def _require_approved(ctx: Any, target: dict[str, Any] | None) -> None:
 
 
 def _file_consent_target(ctx: Any, path: str, *, purpose: str, message: str) -> dict[str, Any]:
+    """Build a file consent target with its preflight content fingerprint."""
     return {
         "kind": "file",
         "path": path,
@@ -215,6 +218,7 @@ def _file_consent_target(ctx: Any, path: str, *, purpose: str, message: str) -> 
 
 
 def _document_consent_target(ctx: Any, doc: Any, *, purpose: str, message: str) -> dict[str, Any]:
+    """Build a document consent target with identity and generation."""
     return {
         "kind": "document",
         "identity": ctx.document_identity(doc),
@@ -264,6 +268,7 @@ def preflight(ctx: Any, name: str, args: dict[str, Any]) -> dict[str, Any] | Non
 
 
 def _open_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the untrusted-open consent target, or None for a trusted open."""
     path = _canonical_document_path(ctx, args.get("path"), what="open path")
     _validate_fcstd_path(path, what="open path")
     if not os.path.isfile(path):
@@ -282,6 +287,7 @@ def _open_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _save_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the overwrite consent target, or None when consent is not needed."""
     doc = ctx.require_document(args["document"])
     path = args.get("path")
     if path is None:
@@ -310,6 +316,7 @@ def _save_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _close_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the dirty-close consent target, or None for a clean document."""
     doc = ctx.require_document(args["document"])
     if not _is_dirty(ctx, doc):
         return None
@@ -321,6 +328,7 @@ def _close_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _reload_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the dirty-reload consent target, or None for a clean document."""
     doc = ctx.require_document(args["document"])
     path = _reload_path(ctx, doc)
     if not _is_dirty(ctx, doc):
@@ -356,6 +364,7 @@ def _definition(
     output_properties: dict[str, Any],
     output_required: list[str],
 ) -> dict[str, Any]:
+    """Assemble one tool definition with closed-world input/output schemas."""
     return {
         "name": name,
         "description": description,
@@ -487,6 +496,7 @@ TOOL_DEFINITIONS = [
 
 
 def _new_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Create a new empty document and report its identity and generation."""
     name = arguments["name"]
     try:
         doc = ctx.App.newDocument(name)
@@ -499,6 +509,7 @@ def _new_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _open_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Open an approved .FCStd file, cleaning up a partially loaded failure."""
     canonical = _canonical_document_path(ctx, arguments.get("path"), what="open path")
     _validate_fcstd_path(canonical, what="open path")
     if not os.path.isfile(canonical):
@@ -546,6 +557,7 @@ def _open_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _save_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Save implicitly or save-as with consent, reporting the generation."""
     doc = ctx.require_document(arguments["document"])
     ctx.check_document_idle(doc)
     path = arguments.get("path")
@@ -594,6 +606,7 @@ def _save_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _close_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Close one document with consent before discarding unsaved changes."""
     doc = ctx.require_document(arguments["document"])
     ctx.check_document_idle(doc)
     discarded_changes = _is_dirty(ctx, doc)
@@ -620,6 +633,7 @@ def _close_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _reload_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Close and reopen the saved file; a failed reopen is reported truthfully."""
     doc = ctx.require_document(arguments["document"])
     ctx.check_document_idle(doc)
     path = _reload_path(ctx, doc)

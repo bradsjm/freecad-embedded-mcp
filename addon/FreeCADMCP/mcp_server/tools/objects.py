@@ -193,6 +193,7 @@ _STRING_TYPES = {
 
 
 def _json_scalars() -> list[dict]:
+    """Return the scalar JSON-schema alternatives shared by value definitions."""
     return [
         {"type": "string"},
         {"type": "number"},
@@ -1112,14 +1113,17 @@ TOOL_DEFINITIONS = [
 
 
 def _describe(exc: BaseException) -> str:
+    """Format an exception as ``Type: message`` for bounded error details."""
     return f"{type(exc).__name__}: {exc}"
 
 
 def _label(obj: Any) -> str:
+    """Return an object's Label, falling back to its Name."""
     return str(getattr(obj, "Label", getattr(obj, "Name", "")))
 
 
 def _states(obj: Any) -> list[str]:
+    """Return an object's state flags as a list of strings, or [] when unreadable."""
     try:
         raw = obj.State
     except Exception:
@@ -1133,6 +1137,7 @@ def _states(obj: Any) -> list[str]:
 
 
 def _shape(obj: Any) -> Any:
+    """Return an object's shape, or None when unavailable or null."""
     try:
         shape = obj.Shape
     except Exception:
@@ -1143,6 +1148,7 @@ def _shape(obj: Any) -> Any:
 
 
 def _bounds(shape: Any) -> list[float] | None:
+    """Return a shape's six bound coordinates, or None when unreadable."""
     if shape is None:
         return None
     try:
@@ -1160,6 +1166,7 @@ def _bounds(shape: Any) -> list[float] | None:
 
 
 def _number_or_none(value: Any) -> float | None:
+    """Return a finite float, or None when the value is not numeric or not finite."""
     try:
         number = float(value)
     except Exception:
@@ -1199,6 +1206,7 @@ def _global_geometry(obj: Any) -> tuple[list[float] | None, dict | None, str | N
 
 
 def _number(value: Any, what: str) -> float:
+    """Require a finite JSON number (booleans excluded) and return it as a float."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ToolError(VALIDATION_FAILED, f"{what} must be a number")
     number = float(value)
@@ -1208,10 +1216,12 @@ def _number(value: Any, what: str) -> float:
 
 
 def _is_spreadsheet(obj: Any) -> bool:
+    """Return True when the object is a Spreadsheet::Sheet."""
     return str(getattr(obj, "TypeId", "")) == _SPREADSHEET_TYPE
 
 
 def _spreadsheet_cell_address(sheet: Any, requested: Any) -> str:
+    """Resolve a cell name or alias to a validated uppercase cell address."""
     if not isinstance(requested, str) or not requested.strip():
         raise ToolError(VALIDATION_FAILED, "spreadsheet cell names must be non-empty strings")
     key = requested.strip()
@@ -1242,6 +1252,7 @@ def _spreadsheet_cell_address(sheet: Any, requested: Any) -> str:
 
 
 def _spreadsheet_alias(sheet: Any, address: str) -> str | None:
+    """Return a cell's alias, or None when absent or unreadable."""
     getter = getattr(sheet, "getAlias", None)
     if not callable(getter):
         return None
@@ -1253,18 +1264,25 @@ def _spreadsheet_alias(sheet: Any, address: str) -> str | None:
 
 
 def _truncate_text(value: str, limit: int) -> tuple[str, bool]:
+    """Clip text to the limit and report whether clipping occurred."""
     return value[:limit], len(value) > limit
 
 
 def _spreadsheet_error(value: Any) -> str:
+    """Bound an error string to the spreadsheet error limit."""
     return _truncate_text(str(value), _MAX_SPREADSHEET_ERROR)[0]
 
 
 def _spreadsheet_content_equivalent(left: str, right: str) -> bool:
+    """Compare cell contents semantically rather than byte-for-byte.
+
+    Numeric contents with a recognized simple unit compare by parsed value.
+    """
     if left == right:
         return True
 
     def normalized(value: str) -> tuple[str, Any, str]:
+        """Normalize content into a (kind, canonical text, unit) comparison triple."""
         text = value.strip()
         if text.startswith("'"):
             return "text", text[1:].strip(), ""
@@ -1287,6 +1305,10 @@ def _spreadsheet_content_equivalent(left: str, right: str) -> bool:
 
 
 def _spreadsheet_contents(sheet: Any, address: str) -> str:
+    """Read a cell's raw contents through the native getContents API.
+
+    A sheet lacking the API is a domain error, never a silent empty read.
+    """
     getter = getattr(sheet, "getContents", None)
     if not callable(getter):
         raise ToolError(
@@ -1312,6 +1334,11 @@ def _spreadsheet_contents(sheet: Any, address: str) -> str:
 
 
 def _spreadsheet_cell_snapshot(sheet: Any, requested: Any) -> dict[str, Any]:
+    """Snapshot a cell's address, alias, contents, formula and evaluated value.
+
+    A failed value read degrades to an unavailable marker instead of failing
+    the whole inspection.
+    """
     address = _spreadsheet_cell_address(sheet, requested)
     alias = _spreadsheet_alias(sheet, address)
     try:
@@ -1365,6 +1392,11 @@ def _spreadsheet_cell_snapshot(sheet: Any, requested: Any) -> dict[str, Any]:
 
 
 def _spreadsheet_info(sheet: Any) -> dict[str, Any]:
+    """Build a sheet's bounded used-range cell inventory.
+
+    Missing native inventory APIs report ``available: false`` instead of
+    raising.
+    """
     used_getter = getattr(sheet, "getUsedCells", None)
     range_getter = getattr(sheet, "getUsedRange", None)
     if not callable(used_getter) or not callable(range_getter):
@@ -1438,6 +1470,7 @@ def _spreadsheet_info(sheet: Any) -> dict[str, Any]:
 
 
 def _spreadsheet_write_plan(sheet: Any, cells: Any) -> list[tuple[str, str]]:
+    """Validate a cells map into unique, size-bounded (address, content) pairs."""
     if not isinstance(cells, dict):
         raise ToolError(VALIDATION_FAILED, "spreadsheet properties.cells must be an object")
     if len(cells) > _MAX_SPREADSHEET_CELLS:
@@ -1471,6 +1504,7 @@ def _spreadsheet_write_plan(sheet: Any, cells: Any) -> list[tuple[str, str]]:
 
 
 def _spreadsheet_write_receipt(sheet: Any, cells: Any) -> list[tuple[Any, str, str, str]]:
+    """Capture each planned cell's pre-write contents for post-commit verification."""
     receipt: list[tuple[Any, str, str, str]] = []
     for address, content in _spreadsheet_write_plan(sheet, cells):
         try:
@@ -1487,6 +1521,10 @@ def _spreadsheet_write_receipt(sheet: Any, cells: Any) -> list[tuple[Any, str, s
 
 
 def _set_spreadsheet_cell(sheet: Any, address: str, content: str) -> None:
+    """Write one cell's contents through the native set API.
+
+    A sheet lacking the API is a domain error, never a silent no-op.
+    """
     setter = getattr(sheet, "set", None)
     if not callable(setter):
         raise ToolError(
@@ -1505,6 +1543,11 @@ def _set_spreadsheet_cell(sheet: Any, address: str, content: str) -> None:
 
 
 def _validate_spreadsheet_writes(writes: list[tuple[Any, str, str, str]]) -> None:
+    """Verify every planned write persisted after recompute, refusing reversion.
+
+    Contents that normalize to the same number and simple unit count as
+    retained.
+    """
     for sheet, address, expected, before in writes:
         actual = _spreadsheet_contents(sheet, address)
         if not actual and expected:
@@ -1533,6 +1576,7 @@ def _validate_spreadsheet_writes(writes: list[tuple[Any, str, str, str]]) -> Non
 
 
 def _vector_value(value: Any, what: str) -> Any:
+    """Convert a JSON mapping or three-number array into a FreeCAD.Vector."""
     if isinstance(value, dict):
         coordinates = [value.get(axis, 0) for axis in ("x", "y", "z")]
     elif isinstance(value, (list, tuple)) and len(value) == 3:
@@ -1550,6 +1594,7 @@ def _vector_value(value: Any, what: str) -> Any:
 
 
 def _color_value(value: Any, what: str) -> tuple[float, float, float, float]:
+    """Convert an RGB or RGBA number array into an (r, g, b, a) tuple."""
     if not isinstance(value, (list, tuple)) or len(value) not in (3, 4):
         raise ToolError(VALIDATION_FAILED, f"{what} must be an RGB or RGBA number array")
     parts = [_number(component, f"{what}[{index}]") for index, component in enumerate(value)]
@@ -1559,6 +1604,10 @@ def _color_value(value: Any, what: str) -> tuple[float, float, float, float]:
 
 
 def _rotation_value(value: Any, what: str) -> Any:
+    """Convert an Axis/Angle JSON mapping into a FreeCAD.Rotation.
+
+    A missing axis defaults to +Z and a missing angle to zero degrees.
+    """
     if value is None:
         value = {}
     if not isinstance(value, dict):
@@ -1579,6 +1628,11 @@ def _rotation_value(value: Any, what: str) -> Any:
 
 
 def _placement_value(value: Any, what: str) -> Any:
+    """Convert a JSON mapping into a FreeCAD.Placement.
+
+    Accepts the protocol position/axis/angle_deg form or native Base and
+    Rotation parts.
+    """
     if not isinstance(value, dict):
         raise ToolError(
             VALIDATION_FAILED,
@@ -1601,6 +1655,7 @@ def _placement_value(value: Any, what: str) -> Any:
 
 
 def _resolve_reference(ctx: Any, doc: Any, reference: dict, parameter: str = "reference"):
+    """Resolve one signed subelement reference through the geometry tool module."""
     # geometry.py is a sibling tool module; import lazily so this module
     # loads (and its tests run) regardless of registration order.
     from .geometry import resolve_reference
@@ -1647,6 +1702,7 @@ class _PreparedQueries:
     """
 
     def __init__(self, ctx: Any, doc: Any) -> None:
+        """Bind the operation context and document, snapshotting the start generation."""
         self.ctx = ctx
         self.doc = doc
         self.generation = int(ctx.document_generation(doc))
@@ -2016,24 +2072,28 @@ def _convert_value(
 
 
 def _as_array(value: Any, what: str) -> list:
+    """Require a JSON array and return it unchanged."""
     if not isinstance(value, list):
         raise ToolError(VALIDATION_FAILED, f"{what} must be an array")
     return value
 
 
 def _string(value: Any, what: str) -> str:
+    """Require a JSON string and return it unchanged."""
     if not isinstance(value, str):
         raise ToolError(VALIDATION_FAILED, f"{what} must be a string")
     return value
 
 
 def _integer(value: Any, what: str) -> int:
+    """Require a JSON integer (booleans excluded) and return it unchanged."""
     if isinstance(value, bool) or not isinstance(value, int):
         raise ToolError(VALIDATION_FAILED, f"{what} must be an integer")
     return value
 
 
 def _enumerations(obj: Any, prop: str) -> list[str] | None:
+    """Return a property's enumeration choices, or None when unavailable."""
     getter = getattr(obj, "getEnumerationsOfProperty", None)
     if not callable(getter):
         return None
@@ -2112,6 +2172,7 @@ def _plan_create(ctx: Any, doc: Any, obj_type: str, properties: dict) -> tuple[A
 
 
 def _call_factory(factory: Any, doc: Any, requested_name: str, kwargs: dict[str, Any]) -> Any:
+    """Invoke an FEM factory, wrapping any native failure as a domain error."""
     try:
         return factory(doc, name=requested_name, **kwargs)
     except Exception as exc:
@@ -2122,10 +2183,15 @@ def _call_factory(factory: Any, doc: Any, requested_name: str, kwargs: dict[str,
 
 
 def _property_exists(obj: Any, prop: str) -> bool:
+    """Return True when the holder lists the property in PropertiesList."""
     return prop in list(getattr(obj, "PropertiesList", ()) or ())
 
 
 def _is_read_only(holder: Any, prop: str) -> bool:
+    """Return True when the property status carries the native ReadOnly mark.
+
+    Holders without status introspection are treated as writable.
+    """
     getter = getattr(holder, "getPropertyStatus", None)
     if not callable(getter):
         return False
@@ -2137,6 +2203,7 @@ def _is_read_only(holder: Any, prop: str) -> bool:
 
 
 def _viewobject(obj: Any) -> Any:
+    """Return an object's ViewObject, refusing objects without one."""
     view = getattr(obj, "ViewObject", None)
     if view is None:
         raise ToolError(
@@ -2147,6 +2214,7 @@ def _viewobject(obj: Any) -> Any:
 
 
 def _view_value(prop: str, value: Any) -> Any:
+    """Convert a ViewObject property value, admitting only scalars and colors."""
     if prop.endswith("Color"):
         return _color_value(value, prop)
     if isinstance(value, bool):
@@ -2164,6 +2232,7 @@ def _view_value(prop: str, value: Any) -> Any:
 
 
 def _check_view_property(obj: Any, view: Any, prop: str) -> None:
+    """Refuse unknown or read-only ViewObject properties before assignment."""
     if not _property_exists(view, prop):
         raise ToolError(
             VALIDATION_FAILED,
@@ -2177,6 +2246,7 @@ def _check_view_property(obj: Any, view: Any, prop: str) -> None:
 
 
 def _check_document_property(obj: Any, prop: str) -> None:
+    """Refuse read-only, unknown, or cell-addressed document property writes."""
     name = str(getattr(obj, "Name", "<unknown>"))
     if _is_spreadsheet(obj):
         try:
@@ -2298,6 +2368,7 @@ def _prepare_properties(
 
 
 def _apply_prepared(obj: Any, prepared: list[tuple[str, str, Any]]) -> None:
+    """Assign prevalidated rows; spreadsheet cells natively, all else via setattr."""
     for target, prop, value in prepared:
         if target == "spreadsheet":
             _set_spreadsheet_cell(obj, prop, value)
@@ -2312,6 +2383,7 @@ def _apply_prepared(obj: Any, prepared: list[tuple[str, str, Any]]) -> None:
 
 
 def _placement_row_value(placement: Any) -> dict | None:
+    """Serialize a placement to the position/axis/angle_deg row, or None on failure."""
     try:
         base = placement.Base
         rotation = placement.Rotation
@@ -2335,6 +2407,7 @@ def _placement_row_value(placement: Any) -> dict | None:
 
 
 def _placement_row(obj: Any) -> dict | None:
+    """Return an object's local placement row, or None when unavailable."""
     try:
         placement = obj.Placement
     except Exception:
@@ -2343,6 +2416,7 @@ def _placement_row(obj: Any) -> dict | None:
 
 
 def _solid_count(shape: Any) -> int | None:
+    """Return a shape's solid count, or None when the shape is unavailable."""
     if shape is None:
         return None
     try:
@@ -2352,6 +2426,7 @@ def _solid_count(shape: Any) -> int | None:
 
 
 def _shape_valid(shape: Any) -> bool | None:
+    """Return a shape's native validity, or None when the shape is unavailable."""
     if shape is None:
         return None
     try:
@@ -2361,6 +2436,7 @@ def _shape_valid(shape: Any) -> bool | None:
 
 
 def _tip_name(obj: Any) -> str | None:
+    """Return a PartDesign Body's tip name, or None for other objects."""
     derived = getattr(obj, "isDerivedFrom", None)
     if not callable(derived) or not derived("PartDesign::Body"):
         return None
@@ -2461,6 +2537,7 @@ def _body_history(obj: Any) -> tuple[list[dict], bool, list[dict], int]:
 
 
 def _link_names(obj: Any) -> tuple[list[str], int]:
+    """Return sorted outbound link names plus the full count before truncation."""
     try:
         out_list = list(obj.OutList)
     except Exception:
@@ -2474,6 +2551,7 @@ def _link_names(obj: Any) -> tuple[list[str], int]:
 
 
 def _unavailable(kind: str) -> dict:
+    """Build the ``{"unavailable": kind}`` marker used for property values."""
     return {"unavailable": kind}
 
 
@@ -2663,6 +2741,7 @@ def _jsonify(value: Any, budget: list[int] | None = None) -> Any:
 
 
 def _read_value(obj: Any, prop: str) -> Any:
+    """Read one property with document-first lookup and ViewObject fallback."""
     if _property_exists(obj, prop):
         return _jsonify(getattr(obj, prop, None))
     view = getattr(obj, "ViewObject", None)
@@ -2831,6 +2910,7 @@ def _row(
     property_offset: int = 0,
     property_limit: int = _MAX_PROPERTY_PAGE,
 ) -> dict:
+    """Build one inspect_objects row with identity, geometry, links and detail pages."""
     shape = _shape(obj)
     properties: dict[str, Any] = {}
     property_metadata: dict[str, Any] = {}
@@ -2906,6 +2986,7 @@ def _cursor_payload(
     property_limit: int = _MAX_PROPERTY_PAGE,
     selection: list[str] | None = None,
 ) -> dict:
+    """Build the signed page-state payload bound to document identity and generation."""
     return {
         "kind": "objects-page",
         "identity": str(ctx.document_identity(doc)),
@@ -2921,6 +3002,7 @@ def _cursor_payload(
 
 
 def _stale_cursor() -> ToolError:
+    """Build the documented restart-pagination refusal."""
     return ToolError(
         VALIDATION_FAILED,
         "pagination cursor is stale; restart pagination from the beginning",
@@ -2940,6 +3022,7 @@ def _make_cursor(
     property_limit: int = _MAX_PROPERTY_PAGE,
     selection: list[str] | None = None,
 ) -> str:
+    """Sign the page-state payload and return the opaque cursor string."""
     return ctx.signer.sign(
         DOMAIN_CURSOR,
         _cursor_payload(
@@ -2968,6 +3051,10 @@ def _open_cursor(
     property_limit: int = _MAX_PROPERTY_PAGE,
     selection: list[str] | None = None,
 ) -> dict:
+    """Verify a cursor against the request and return its continuation key.
+
+    A bad signature is malformed; any mismatch with the request is stale.
+    """
     try:
         payload = ctx.signer.verify(DOMAIN_CURSOR, cursor)
     except ProtocolError as exc:
@@ -3018,6 +3105,7 @@ def _open_cursor(
 
 
 def inspect_objects(ctx: Any, args: dict) -> dict:
+    """List a document's objects, paging rows behind signed continuation cursors."""
     doc = ctx.require_document(args["document"])
     detail = str(args.get("detail") or "compact")
     if detail not in ("compact", "full"):
@@ -3215,6 +3303,7 @@ def _check_workload(ctx: Any, targets: list[Any]) -> None:
 
 
 def create_object(ctx: Any, args: dict) -> dict:
+    """Create one object through the mutation gate with prevalidated properties."""
     doc = ctx.require_document(args["document"])
     obj_type = str(args["type"])
     requested_name = str(args["name"])
@@ -3241,6 +3330,7 @@ def create_object(ctx: Any, args: dict) -> dict:
     outcome: dict = {}
 
     def validate_spreadsheet_writes() -> None:
+        """Gate hook verifying the planned cell writes survived the recompute."""
         _validate_spreadsheet_writes(spreadsheet_writes)
 
     with mutation(
@@ -3302,6 +3392,7 @@ def create_object(ctx: Any, args: dict) -> dict:
 
 
 def edit_object(ctx: Any, args: dict) -> dict:
+    """Edit one object's properties inside the shared mutation transaction gate."""
     doc = ctx.require_document(args["document"])
     obj = ctx.require_object(doc, str(args["object"]))
     require_expected_generation(
@@ -3433,6 +3524,7 @@ def _reroutes_via_base_feature(dependent: Any, target: Any) -> bool:
 
 
 def delete_object(ctx: Any, args: dict) -> dict:
+    """Delete one object, refusing blocking dependents and reporting BaseFeature reroutes."""
     doc = ctx.require_document(args["document"])
     obj = ctx.require_object(doc, str(args["object"]))
     require_expected_generation(
@@ -3496,6 +3588,7 @@ def delete_object(ctx: Any, args: dict) -> dict:
 
 
 def edit_objects(ctx: Any, args: dict) -> dict:
+    """Edit 1-32 objects atomically in one transaction and a single recompute."""
     doc = ctx.require_document(args["document"])
     require_expected_generation(
         ctx,
@@ -3622,6 +3715,7 @@ def edit_objects(ctx: Any, args: dict) -> dict:
 
 
 def create_objects(ctx: Any, args: dict) -> dict:
+    """Create 1-32 objects atomically, reporting requested-to-actual name mappings."""
     doc = ctx.require_document(args["document"])
     detail = str(args.get("response_detail") or "compact")
     queries = _PreparedQueries(ctx, doc)
@@ -3676,6 +3770,7 @@ def create_objects(ctx: Any, args: dict) -> dict:
     outcome: dict = {}
 
     def validate_spreadsheet_writes() -> None:
+        """Gate hook verifying the batch's planned cell writes survived the recompute."""
         _validate_spreadsheet_writes(spreadsheet_writes)
 
     with mutation(

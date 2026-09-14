@@ -118,6 +118,7 @@ def _staged_path(destination: str, extension: str) -> str:
 
 
 def _remove_own_temp(path: str) -> None:
+    """Remove a staged temporary file, tolerating an already-gone path."""
     try:
         os.unlink(path)
     except FileNotFoundError:
@@ -178,6 +179,7 @@ def _target_fingerprint(ctx: Any, destination: str) -> dict[str, Any] | None:
 
 
 def _fingerprint_of(value: Any) -> str:
+    """Return the canonical fingerprint of a value for stable consent rechecks."""
     return protocol.fingerprint(value)
 
 
@@ -373,6 +375,7 @@ def _collective_bed_alignment(copies: list[tuple[str, Any]]) -> None:
 
 
 def _bounds(box: Any) -> list[float]:
+    """Return a bounding box as six finite floats, refusing non-finite values."""
     values = [
         box.XMin,
         box.YMin,
@@ -392,6 +395,7 @@ def _bounds(box: Any) -> list[float]:
 
 
 def _mesh_readback(path: str, fmt: str) -> dict[str, Any]:
+    """Re-read a written mesh file and report solidity, facet count and bounds."""
     try:
         mesh = Mesh.Mesh(path)
         is_solid = bool(mesh.isSolid())
@@ -422,6 +426,7 @@ def _export_mesh(
     angular_deflection: float,
     bed_align: bool,
 ) -> dict[str, Any]:
+    """Export placed shape copies as one combined mesh, verified by readback."""
     copies = _placed_shape_copies(ctx, doc, object_names)
     if bed_align:
         _collective_bed_alignment(copies)
@@ -473,6 +478,7 @@ def _export_mesh(
 
 
 def _step_readback(path: str) -> dict[str, Any]:
+    """Re-read a written STEP file and report validity, solids, volume and bounds."""
     try:
         shape = Part.read(path)
         if shape_is_null(shape):
@@ -513,6 +519,7 @@ def _export_step(
     object_names: list[str],
     destination: str,
 ) -> dict[str, Any]:
+    """Export placed shape copies as one STEP compound, verified by readback."""
     copies = _placed_shape_copies(ctx, doc, object_names)
 
     compound = Part.Compound([shape for _, shape in copies])
@@ -605,6 +612,7 @@ def _verify_reopened_copy(doc: Any, reopened: Any) -> None:
 
 
 def _export_fcstd(ctx: Any, doc: Any, destination: str) -> dict[str, Any]:
+    """Export the whole document via ``saveCopy``, verified by reopening the copy."""
     original_file_name = str(doc.FileName)
     original_modified = _modified_flag(doc)
     active_document_name: str | None = None
@@ -731,12 +739,14 @@ def _restore_presentation(
     failures: list[dict[str, str]] = []
 
     def _protect(item: str, restore: Any) -> None:
+        """Run one restore step, recording its failure instead of raising."""
         try:
             restore()
         except Exception as exc:
             failures.append({"item": item, "error": f"{type(exc).__name__}: {exc}"[:256]})
 
     def _restore_active_document() -> None:
+        """Reactivate the caller's active document when the export changed it."""
         if (
             active_document_name is not None
             and getattr(FreeCAD.ActiveDocument, "Name", None) != active_document_name

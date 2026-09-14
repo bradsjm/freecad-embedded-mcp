@@ -128,6 +128,7 @@ _PROPERTY_ADD_SCHEMA: dict[str, Any] = {
 
 
 def _definition() -> dict[str, Any]:
+    """Build the edit_parameters tool definition with its wire schemas."""
     return {
         "name": "edit_parameters",
         "description": (
@@ -249,10 +250,12 @@ TOOL_DEFINITIONS = [_definition()]
 
 
 def _fail(message: str) -> ToolError:
+    """Build the VALIDATION_FAILED ToolError used by every refusal here."""
     return ToolError(VALIDATION_FAILED, message)
 
 
 def _check_name(name: Any, *, what: str) -> str:
+    """Require a bounded identifier-shaped property name."""
     if not isinstance(name, str) or not _NAME_PATTERN.match(name):
         raise _fail(
             f"{what} must be an identifier (letters, digits, underscores; not "
@@ -264,12 +267,14 @@ def _check_name(name: Any, *, what: str) -> str:
 
 
 def _expression_root(path: str) -> str | None:
+    """Return the leading property name of an expression path, or None."""
     normalized = path[1:] if path.startswith(".") else path
     root = re.split(r"[.[]", normalized, maxsplit=1)[0]
     return root or None
 
 
 def _check_type(prop_type: Any, obj: Any) -> str:
+    """Validate a property type against the table and the object itself."""
     if not isinstance(prop_type, str) or prop_type not in _PROPERTY_TYPES:
         raise _fail(
             f"unsupported property type {prop_type!r}; supported types are "
@@ -287,6 +292,7 @@ def _check_type(prop_type: Any, obj: Any) -> str:
 
 
 def _finite_number(value: Any) -> float | None:
+    """Return a finite float, or None for non-numeric or non-finite values."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     number = float(value)
@@ -297,6 +303,7 @@ def _check_value_shape(prop_type: str, value: Any, name: str) -> None:
     """Reject value shapes that cannot be assigned to ``prop_type``."""
 
     def numbers(item: Any, count: int) -> None:
+        """Require an exact-length list of finite numbers for vector shapes."""
         if not isinstance(value, list) or len(value) != count:
             raise _fail(
                 f"property '{name}' of type {prop_type} needs a list of "
@@ -359,6 +366,7 @@ def _check_value_shape(prop_type: str, value: Any, name: str) -> None:
 
 
 def _editor_modes(obj: Any, name: str) -> list[str]:
+    """Return a property's editor modes, tolerating missing or failing getters."""
     editor_mode = getattr(obj, "getEditorMode", None)
     if not callable(editor_mode):
         return []
@@ -375,6 +383,7 @@ def _editor_modes(obj: Any, name: str) -> list[str]:
 
 
 def _reject_read_only(obj: Any, name: str, *, what: str) -> None:
+    """Refuse targets whose editor modes make the property read-only."""
     modes = _editor_modes(obj, name)
     blocked = sorted(_READ_ONLY_MODES.intersection(modes))
     if blocked:
@@ -384,6 +393,11 @@ def _reject_read_only(obj: Any, name: str, *, what: str) -> None:
 
 
 def _reject_expression_read_only(obj: Any, path: str, root: str | None, *, what: str) -> None:
+    """Refuse expression targets whose root or path property is read-only.
+
+    Container roots such as Placement and AttachmentOffset are exempt
+    from the root check.
+    """
     normalized_path = path[1:] if path.startswith(".") else path
     if root == normalized_path:
         _reject_read_only(obj, root, what=what)
@@ -513,6 +527,7 @@ def _validate_all(obj: Any, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Handle edit_parameters: validate up front, apply inside the mutation gate."""
     doc = ctx.require_document(arguments["document"])
     obj = ctx.require_object(doc, arguments["object"])
     require_expected_generation(
