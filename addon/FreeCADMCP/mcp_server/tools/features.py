@@ -21,6 +21,7 @@ import copy
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from .. import input_aliases as _aliases
 from .. import topology_query as tq
 from ..object_validation import document_bounds, geometry_report, mutation
 from ..protocol import (
@@ -77,6 +78,69 @@ _EDITABLE_KIND_NAMES = tuple(_EDITABLE_FEATURE_KINDS.values())
 _SUPPORT_KINDS = ("sketch", "datum_plane", "datum_point", "primitive")
 _ORIGIN_PLANE_ROLES = {"xy": "XY_Plane", "xz": "XZ_Plane", "yz": "YZ_Plane"}
 
+#: Closed wire vocabularies for the liberal-input tables below. The request
+#: schemas and the alias tables both build from these tuples, so a synonym
+#: can never name a value the schema would refuse.
+_CREATE_KINDS = (
+    "datum_plane",
+    "datum_line",
+    "sketch",
+    "pad",
+    "pocket",
+    "hole",
+    "revolve",
+    "groove",
+    "fillet",
+    "chamfer",
+    "thickness",
+    "draft",
+    "linear_pattern",
+    "polar_pattern",
+    "mirrored",
+    "loft",
+    "pipe",
+    "gear_profile",
+    "helix",
+    "primitive",
+    "subshape_binder",
+    "multi_transform",
+    "scaled",
+    "datum_point",
+)
+_PAD_EXTENTS = ("distance", "up_to_face")
+_POCKET_EXTENTS = ("distance", "through_all", "up_to_face")
+_HOLE_DEPTH_TYPES = ("dimension", "through_all")
+_HOLE_CUTS = ("none", "counterbore", "countersink", "counterdrill")
+_HOLE_THREADS = (
+    "none",
+    "iso_metric",
+    "iso_metric_fine",
+    "unc",
+    "unf",
+    "unef",
+    "npt",
+    "bsp",
+    "bsw",
+    "bsf",
+)
+_PRIMITIVE_SHAPES = (
+    "box",
+    "cylinder",
+    "cone",
+    "sphere",
+    "prism",
+    "torus",
+    "ellipsoid",
+    "wedge",
+)
+_HELIX_MODES = ("pitch_height", "pitch_turns", "height_turns", "height_growth")
+_FEATURE_MODES = ("additive", "subtractive")
+_TRANSFORMATION_KINDS = ("mirrored", "linear", "polar")
+_DATUM_PLANES = ("xy", "xz", "yz")
+_DATUM_AXES = ("x", "y", "z")
+_SKETCH_AXES = ("H_Axis", "V_Axis", "N_Axis")
+_MIRROR_SKETCH_AXES = ("H_Axis", "V_Axis")
+
 #: Kinds that produce a solid Body result and must therefore become the Body
 #: Tip. Datums, sketches and the gear wire profile are deliberately excluded:
 #: a profile must never replace the solid Tip.
@@ -121,7 +185,7 @@ _AXIS_REF = {
             "required": ["object", "sketchAxis"],
             "properties": {
                 "object": _objects._NAME_FIELD,
-                "sketchAxis": {"type": "string", "enum": ["H_Axis", "V_Axis", "N_Axis"]},
+                "sketchAxis": {"type": "string", "enum": list(_SKETCH_AXES)},
             },
         },
     ]
@@ -141,7 +205,7 @@ _MIRROR_PLANE_REF = {
             "required": ["object", "sketchAxis"],
             "properties": {
                 "object": _objects._NAME_FIELD,
-                "sketchAxis": {"type": "string", "enum": ["H_Axis", "V_Axis"]},
+                "sketchAxis": {"type": "string", "enum": list(_MIRROR_SKETCH_AXES)},
             },
         },
     ]
@@ -189,7 +253,7 @@ _SEMANTIC_PARAM_SCHEMAS = {
         "additionalProperties": False,
         "required": ["plane"],
         "properties": {
-            "plane": {"type": "string", "enum": ["xy", "xz", "yz"]},
+            "plane": {"type": "string", "enum": list(_DATUM_PLANES)},
             "offset": _SCALAR_PARAM,
         },
     },
@@ -198,7 +262,7 @@ _SEMANTIC_PARAM_SCHEMAS = {
         "additionalProperties": False,
         "required": ["plane"],
         "properties": {
-            "plane": {"type": "string", "enum": ["xy", "xz", "yz"]},
+            "plane": {"type": "string", "enum": list(_DATUM_PLANES)},
             "offset": _SCALAR_PARAM,
         },
     },
@@ -207,7 +271,7 @@ _SEMANTIC_PARAM_SCHEMAS = {
         "additionalProperties": False,
         "required": ["extent"],
         "properties": {
-            "extent": {"type": "string", "enum": ["distance", "up_to_face"]},
+            "extent": {"type": "string", "enum": list(_PAD_EXTENTS)},
             "length": _SCALAR_PARAM,
             "face": _objects._CANONICAL_REF,
             "symmetric": {"type": "boolean"},
@@ -219,7 +283,7 @@ _SEMANTIC_PARAM_SCHEMAS = {
         "additionalProperties": False,
         "required": ["extent"],
         "properties": {
-            "extent": {"type": "string", "enum": ["distance", "through_all", "up_to_face"]},
+            "extent": {"type": "string", "enum": list(_POCKET_EXTENTS)},
             "length": _SCALAR_PARAM,
             "face": _objects._CANONICAL_REF,
             "symmetric": {"type": "boolean"},
@@ -233,10 +297,10 @@ _SEMANTIC_PARAM_SCHEMAS = {
         "properties": {
             "diameter": _SCALAR_PARAM,
             "depth": _SCALAR_PARAM,
-            "depth_type": {"type": "string", "enum": ["dimension", "through_all"]},
+            "depth_type": {"type": "string", "enum": list(_HOLE_DEPTH_TYPES)},
             "cut": {
                 "type": "string",
-                "enum": ["none", "counterbore", "countersink", "counterdrill"],
+                "enum": list(_HOLE_CUTS),
             },
             "counterbore_diameter": _SCALAR_PARAM,
             "counterbore_depth": _SCALAR_PARAM,
@@ -244,18 +308,7 @@ _SEMANTIC_PARAM_SCHEMAS = {
             "countersink_angle": _SCALAR_PARAM,
             "thread": {
                 "type": "string",
-                "enum": [
-                    "none",
-                    "iso_metric",
-                    "iso_metric_fine",
-                    "unc",
-                    "unf",
-                    "unef",
-                    "npt",
-                    "bsp",
-                    "bsw",
-                    "bsf",
-                ],
+                "enum": list(_HOLE_THREADS),
             },
             "thread_size": {"type": "string", "minLength": 1, "maxLength": 16},
         },
@@ -282,7 +335,7 @@ _SEMANTIC_PARAM_SCHEMAS = {
         "type": "object",
         "additionalProperties": False,
         "required": ["axis"],
-        "properties": {"axis": {"type": "string", "enum": ["x", "y", "z"]}},
+        "properties": {"axis": {"type": "string", "enum": list(_DATUM_AXES)}},
     },
     "revolve": {
         "type": "object",
@@ -385,7 +438,7 @@ _SEMANTIC_PARAM_SCHEMAS = {
         "required": ["sections", "mode"],
         "properties": {
             "sections": _SECTION_LIST,
-            "mode": {"type": "string", "enum": ["additive", "subtractive"]},
+            "mode": {"type": "string", "enum": list(_FEATURE_MODES)},
             "ruled": {"type": "boolean"},
         },
     },
@@ -395,7 +448,7 @@ _SEMANTIC_PARAM_SCHEMAS = {
         "required": ["spine", "mode"],
         "properties": {
             "spine": _objects._NAME_FIELD,
-            "mode": {"type": "string", "enum": ["additive", "subtractive"]},
+            "mode": {"type": "string", "enum": list(_FEATURE_MODES)},
         },
     },
     "helix": {
@@ -406,9 +459,9 @@ _SEMANTIC_PARAM_SCHEMAS = {
             "axis": _AXIS_REF,
             "helix_mode": {
                 "type": "string",
-                "enum": ["pitch_height", "pitch_turns", "height_turns", "height_growth"],
+                "enum": list(_HELIX_MODES),
             },
-            "mode": {"type": "string", "enum": ["additive", "subtractive"]},
+            "mode": {"type": "string", "enum": list(_FEATURE_MODES)},
             "pitch": _SCALAR_PARAM,
             "height": _SCALAR_PARAM,
             "turns": _SCALAR_PARAM,
@@ -425,18 +478,9 @@ _SEMANTIC_PARAM_SCHEMAS = {
         "properties": {
             "shape": {
                 "type": "string",
-                "enum": [
-                    "box",
-                    "cylinder",
-                    "cone",
-                    "sphere",
-                    "prism",
-                    "torus",
-                    "ellipsoid",
-                    "wedge",
-                ],
+                "enum": list(_PRIMITIVE_SHAPES),
             },
-            "mode": {"type": "string", "enum": ["additive", "subtractive"]},
+            "mode": {"type": "string", "enum": list(_FEATURE_MODES)},
             "length": _SCALAR_PARAM,
             "width": _SCALAR_PARAM,
             "height": _SCALAR_PARAM,
@@ -493,7 +537,7 @@ _SEMANTIC_PARAM_SCHEMAS = {
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "enum": ["mirrored", "linear", "polar"],
+                            "enum": list(_TRANSFORMATION_KINDS),
                         },
                         "plane": _MIRROR_PLANE_REF,
                         "axis": _AXIS_REF,
@@ -520,7 +564,7 @@ _SEMANTIC_PARAM_SCHEMAS = {
         "additionalProperties": False,
         "required": ["plane"],
         "properties": {
-            "plane": {"type": "string", "enum": ["xy", "xz", "yz"]},
+            "plane": {"type": "string", "enum": list(_DATUM_PLANES)},
             "offset": _SCALAR_PARAM,
         },
     },
@@ -548,32 +592,7 @@ _CREATE_FEATURE_INPUT = {
         "body": _objects._NAME_FIELD,
         "kind": {
             "type": "string",
-            "enum": [
-                "datum_plane",
-                "datum_line",
-                "sketch",
-                "pad",
-                "pocket",
-                "hole",
-                "revolve",
-                "groove",
-                "fillet",
-                "chamfer",
-                "thickness",
-                "draft",
-                "linear_pattern",
-                "polar_pattern",
-                "mirrored",
-                "loft",
-                "pipe",
-                "gear_profile",
-                "helix",
-                "primitive",
-                "subshape_binder",
-                "multi_transform",
-                "scaled",
-                "datum_point",
-            ],
+            "enum": list(_CREATE_KINDS),
         },
         "name": _objects._NAME_FIELD,
         "properties": _objects._PROPERTIES_MAP,
@@ -650,15 +669,15 @@ _EDIT_FEATURE_INPUT = tq.merge_query_defs(
                     "size": _SCALAR_PARAM,
                     "angle": _SCALAR_PARAM,
                     "count": {"type": "integer", "minimum": 2, "maximum": 32},
-                    "extent": {"type": "string", "enum": ["distance", "through_all", "up_to_face"]},
+                    "extent": {"type": "string", "enum": list(_POCKET_EXTENTS)},
                     "length": _SCALAR_PARAM,
                     "face": _objects._CANONICAL_REF,
                     "diameter": _SCALAR_PARAM,
                     "depth": _SCALAR_PARAM,
-                    "depth_type": {"type": "string", "enum": ["dimension", "through_all"]},
+                    "depth_type": {"type": "string", "enum": list(_HOLE_DEPTH_TYPES)},
                     "cut": {
                         "type": "string",
-                        "enum": ["none", "counterbore", "countersink", "counterdrill"],
+                        "enum": list(_HOLE_CUTS),
                     },
                     "counterbore_diameter": _SCALAR_PARAM,
                     "counterbore_depth": _SCALAR_PARAM,
@@ -666,18 +685,7 @@ _EDIT_FEATURE_INPUT = tq.merge_query_defs(
                     "countersink_angle": _SCALAR_PARAM,
                     "thread": {
                         "type": "string",
-                        "enum": [
-                            "none",
-                            "iso_metric",
-                            "iso_metric_fine",
-                            "unc",
-                            "unf",
-                            "unef",
-                            "npt",
-                            "bsp",
-                            "bsw",
-                            "bsf",
-                        ],
+                        "enum": list(_HOLE_THREADS),
                     },
                     "thread_size": {"type": "string", "minLength": 1, "maxLength": 16},
                     "symmetric": {"type": "boolean"},
@@ -771,9 +779,167 @@ _EDIT_FEATURE_OUTPUT = tq.merge_query_defs(
     }
 )
 
+# ---------------------------------------------------------------------------
+# Liberal input (Postel): accept the synonym, emit the canonical kind.
+# ---------------------------------------------------------------------------
+
+#: What other modelers call the operation, mapped to the PartDesign kind
+#: that performs it. Each entry is unambiguous inside the closed kind set:
+#: no alias folds onto two members, and every target is a schema member by
+#: construction, because the tables build from the same tuples as the
+#: schemas. Unknown values pass through untouched and are refused by the
+#: input schema under the caller's own spelling.
+_KIND_ALIASES = {
+    "extrude": "pad",
+    "extrusion": "pad",
+    "extruded boss": "pad",
+    "cut": "pocket",
+    "extruded cut": "pocket",
+    "cut extrude": "pocket",
+    "sweep": "pipe",
+    "mirror": "mirrored",
+    "circular pattern": "polar_pattern",
+    "rectangular pattern": "linear_pattern",
+    "gear": "gear_profile",
+    "involute gear": "gear_profile",
+    "shell": "thickness",
+    "scale": "scaled",
+    "plane": "datum_plane",
+    "line": "datum_line",
+    "point": "datum_point",
+    "revolved cut": "groove",
+    "revolve cut": "groove",
+}
+_EXTENT_ALIASES = {
+    "length": "distance",
+    "blind": "distance",
+    "through": "through_all",
+    "thru": "through_all",
+    "through all": "through_all",
+    "thru all": "through_all",
+    "all": "through_all",
+    "to face": "up_to_face",
+    "to object": "up_to_face",
+}
+_DEPTH_TYPE_ALIASES = {
+    "distance": "dimension",
+    "blind": "dimension",
+    "length": "dimension",
+    "through": "through_all",
+    "thru": "through_all",
+    "through all": "through_all",
+    "thru all": "through_all",
+    "all": "through_all",
+}
+_HOLE_CUT_ALIASES = {
+    "plain": "none",
+    "simple": "none",
+    "drill": "none",
+    "c'bore": "counterbore",
+    "csk": "countersink",
+    "c'sink": "countersink",
+}
+_THREAD_ALIASES = {
+    "metric": "iso_metric",
+    "metric fine": "iso_metric_fine",
+}
+_PRIMITIVE_SHAPE_ALIASES = {
+    "cuboid": "box",
+    "cube": "box",
+    "block": "box",
+}
+_FEATURE_MODE_ALIASES = {
+    "add": "additive",
+    "subtract": "subtractive",
+    "remove": "subtractive",
+}
+_TRANSFORMATION_KIND_ALIASES = {
+    "mirror": "mirrored",
+    "circular": "polar",
+    "rectangular": "linear",
+}
+_SKETCH_AXIS_ALIASES = {
+    "horizontal": "H_Axis",
+    "vertical": "V_Axis",
+    "normal": "N_Axis",
+    "h": "H_Axis",
+    "v": "V_Axis",
+    "n": "N_Axis",
+}
+_MIRROR_SKETCH_AXIS_ALIASES = {
+    "horizontal": "H_Axis",
+    "vertical": "V_Axis",
+    "h": "H_Axis",
+    "v": "V_Axis",
+}
+
+#: Extents and modes fold against the widest schema that carries the field;
+#: a kind whose own enum is narrower (a pad has no through_all) refuses the
+#: canonical value itself, which keeps the refusal anchored to the caller's
+#: unambiguous intent.
+_KIND_TABLE = _aliases.build_table(_CREATE_KINDS, _KIND_ALIASES)
+_EXTENT_TABLE = _aliases.build_table(_POCKET_EXTENTS, _EXTENT_ALIASES)
+_DEPTH_TYPE_TABLE = _aliases.build_table(_HOLE_DEPTH_TYPES, _DEPTH_TYPE_ALIASES)
+_HOLE_CUT_TABLE = _aliases.build_table(_HOLE_CUTS, _HOLE_CUT_ALIASES)
+_THREAD_TABLE = _aliases.build_table(_HOLE_THREADS, _THREAD_ALIASES)
+_PRIMITIVE_SHAPE_TABLE = _aliases.build_table(_PRIMITIVE_SHAPES, _PRIMITIVE_SHAPE_ALIASES)
+_HELIX_MODE_TABLE = _aliases.build_table(_HELIX_MODES)
+_FEATURE_MODE_TABLE = _aliases.build_table(_FEATURE_MODES, _FEATURE_MODE_ALIASES)
+_TRANSFORMATION_KIND_TABLE = _aliases.build_table(
+    _TRANSFORMATION_KINDS, _TRANSFORMATION_KIND_ALIASES
+)
+_DATUM_PLANE_TABLE = _aliases.build_table(_DATUM_PLANES)
+_DATUM_AXIS_TABLE = _aliases.build_table(_DATUM_AXES)
+_SKETCH_AXIS_TABLE = _aliases.build_table(_SKETCH_AXES, _SKETCH_AXIS_ALIASES)
+_MIRROR_SKETCH_AXIS_TABLE = _aliases.build_table(_MIRROR_SKETCH_AXES, _MIRROR_SKETCH_AXIS_ALIASES)
+
+#: Request paths each table governs. ``parameters`` values normalize inside
+#: the semantic parameter map; ``parameters.transformations[].kind``
+#: descends into every multi_transform step. The mirror-plane sketch axis
+#: lives at ``parameters.transformations[].plane.sketchAxis`` and the
+#: profile's at ``profile.sketchAxis``; non-string leaves and absent paths
+#: pass through.
+_CREATE_NORMALIZER_SPEC = {
+    "kind": _KIND_TABLE,
+    "parameters.extent": _EXTENT_TABLE,
+    "parameters.depth_type": _DEPTH_TYPE_TABLE,
+    "parameters.cut": _HOLE_CUT_TABLE,
+    "parameters.thread": _THREAD_TABLE,
+    "parameters.shape": _PRIMITIVE_SHAPE_TABLE,
+    "parameters.helix_mode": _HELIX_MODE_TABLE,
+    "parameters.mode": _FEATURE_MODE_TABLE,
+    "parameters.plane": _DATUM_PLANE_TABLE,
+    "parameters.axis": _DATUM_AXIS_TABLE,
+    "parameters.axis.sketchAxis": _SKETCH_AXIS_TABLE,
+    "parameters.transformations[].kind": _TRANSFORMATION_KIND_TABLE,
+    "parameters.transformations[].plane.sketchAxis": _MIRROR_SKETCH_AXIS_TABLE,
+    "parameters.transformations[].axis.sketchAxis": _SKETCH_AXIS_TABLE,
+    "profile.sketchAxis": _SKETCH_AXIS_TABLE,
+}
+_EDIT_FEATURE_NORMALIZER_SPEC = {
+    "parameters.extent": _EXTENT_TABLE,
+    "parameters.depth_type": _DEPTH_TYPE_TABLE,
+    "parameters.cut": _HOLE_CUT_TABLE,
+    "parameters.thread": _THREAD_TABLE,
+}
+
+
+def _normalize_create_arguments(arguments: dict) -> dict:
+    """Fold create_feature synonyms and case/separator variants to canonical values."""
+
+    return _aliases.normalize_arguments(arguments, _CREATE_NORMALIZER_SPEC)
+
+
+def _normalize_edit_feature_arguments(arguments: dict) -> dict:
+    """Fold edit_feature parameter synonyms and spelling variants to canonical values."""
+
+    return _aliases.normalize_arguments(arguments, _EDIT_FEATURE_NORMALIZER_SPEC)
+
+
 TOOL_DEFINITIONS = [
     {
         "name": "create_feature",
+        "normalize": _normalize_create_arguments,
         "description": (
             "Create one PartDesign feature inside an existing Body: "
             "datum_plane (PartDesign::Plane), datum_line (PartDesign::Line), "
@@ -801,13 +967,17 @@ TOOL_DEFINITIONS = [
             'aborts and removes the feature. response_detail: "compact" '
             "omits before-state geometry deltas, property before-values, "
             "and dependent counts from change; bodyReport always carries "
-            "the post-state verdict."
+            "the post-state verdict. Common synonyms from other modelers "
+            "(extrude, cut, sweep, circular pattern, shell) and case or "
+            "spacing variants are accepted and normalized; results always "
+            "report the canonical kind."
         ),
         "inputSchema": _CREATE_FEATURE_INPUT,
         "outputSchema": _CREATE_FEATURE_OUTPUT,
     },
     {
         "name": "edit_feature",
+        "normalize": _normalize_edit_feature_arguments,
         "description": (
             "Edit one existing PartDesign feature that belongs to the named "
             "Body: pad/pocket extent and length, hole diameter/depth and "
@@ -827,6 +997,10 @@ TOOL_DEFINITIONS = [
             "mutation, and parameterValues reports every requested "
             "parameter's persisted expression and actual native value; "
             "bodyReport always carries the post-state verdict. "
+            "Extent, depth-type, cut, and thread values accept common "
+            "synonyms and case or spacing variants (thru, blind, c'bore, "
+            "metric) and normalize to the canonical enum; results always "
+            "report the canonical value. "
             'response_detail "full" adds each row before-state and the '
             "geometryChange deltas; the default compact omits them."
         ),

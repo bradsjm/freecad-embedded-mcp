@@ -34,6 +34,7 @@ from collections.abc import Callable
 from itertools import pairwise
 from typing import Any
 
+from .. import input_aliases as _aliases
 from ..object_validation import mutation
 from ..protocol import VALIDATION_FAILED, ToolError, check_schema
 from ..tool_contracts import require_expected_generation
@@ -43,6 +44,21 @@ _MAX_STATE_NAMES = 32
 _MAX_OPERATIONS = 64
 _MAX_CONSTRAINT_ARGUMENTS = 6
 _SOLVER_MESSAGE_LIMIT = 16
+
+#: Closed geometry-kind vocabulary for addGeometry entries and for the
+#: liberal-input table below; both read this one tuple so a synonym can
+#: never normalize to a kind the schema would refuse.
+_GEOMETRY_KINDS = (
+    "point",
+    "lineSegment",
+    "circle",
+    "arcOfCircle",
+    "rectangle",
+    "polyline",
+    "regularPolygon",
+    "slot",
+    "rounded_rectangle",
+)
 
 _SKETCH_TYPE_ID = "Sketcher::SketchObject"
 
@@ -699,6 +715,28 @@ _EDIT_SKETCH_OUTPUT = {
     },
 }
 
+#: Liberal input (Postel): accept the synonym, emit the canonical kind.
+#: ``arc``, ``rect``, and ``polygon`` name the native kinds unambiguously
+#: inside this closed set; case and separator variants fold for free.
+_GEOMETRY_KIND_ALIASES = {
+    "arc": "arcOfCircle",
+    "rect": "rectangle",
+    "polygon": "regularPolygon",
+}
+_GEOMETRY_KIND_TABLE = _aliases.build_table(_GEOMETRY_KINDS, _GEOMETRY_KIND_ALIASES)
+_CONSTRAINT_TYPE_TABLE = _aliases.build_table(_CONSTRAINT_FORM_ARITIES)
+_EDIT_SKETCH_NORMALIZER_SPEC = {
+    "addGeometry[].kind": _GEOMETRY_KIND_TABLE,
+    "addConstraints[].type": _CONSTRAINT_TYPE_TABLE,
+}
+
+
+def _normalize_edit_sketch_arguments(arguments: dict) -> dict:
+    """Fold sketch geometry and constraint spellings to canonical native names."""
+
+    return _aliases.normalize_arguments(arguments, _EDIT_SKETCH_NORMALIZER_SPEC)
+
+
 TOOL_DEFINITIONS = [
     {
         "name": "inspect_sketch",
@@ -725,6 +763,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "edit_sketch",
+        "normalize": _normalize_edit_sketch_arguments,
         "description": (
             "Apply one atomic batch of Sketcher operations: addGeometry, "
             "addConstraints, setDatums, deleteGeometry and "
@@ -1126,17 +1165,7 @@ def _validate_geometry_add(entry: Any, what: str) -> dict:
     if not isinstance(entry, dict):
         raise _fail(f"{what} must be an object")
     kind = entry.get("kind")
-    if kind not in (
-        "point",
-        "lineSegment",
-        "circle",
-        "arcOfCircle",
-        "rectangle",
-        "polyline",
-        "regularPolygon",
-        "slot",
-        "rounded_rectangle",
-    ):
+    if kind not in _GEOMETRY_KINDS:
         raise _fail(f"{what} has unsupported kind {kind!r}")
     checked: dict = {"kind": kind, "construction": bool(entry.get("construction"))}
     entry_id = entry.get("id")

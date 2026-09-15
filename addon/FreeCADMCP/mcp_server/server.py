@@ -731,6 +731,7 @@ class Server:
         )
         self._handlers: dict[str, Callable[[_OpContext, dict], Any]] = {}
         self._preflights: dict[str, Callable[..., Any]] = {}
+        self._normalizers: dict[str, Callable[[dict], dict]] = {}
         self._definitions: dict[str, dict] = {}
         for defs, handlers, preflight in modules:
             for definition in defs:
@@ -819,6 +820,13 @@ class Server:
         the raw schema is kept to validate payloads before image conversion.
         """
         name, description, input_schema, output_schema = _unpack_definition(definition)
+        # A liberal-input normalizer rewrites unambiguous synonyms, case,
+        # and separator variants to canonical values before schema
+        # validation runs. It stays outside the served definition so
+        # tools/list never carries a callable.
+        normalizer = definition.get("normalize") if isinstance(definition, Mapping) else None
+        if normalizer is not None and not callable(normalizer):
+            raise RuntimeError(f"tool {name} normalize must be callable")
         if name in self._definitions:
             raise RuntimeError(f"duplicate tool definition: {name}")
         if not isinstance(input_schema, Mapping) or not isinstance(output_schema, Mapping):
@@ -842,6 +850,8 @@ class Server:
         self._handlers[name] = self._resolve_handler(name, handlers)
         if preflight is not None:
             self._preflights[name] = preflight
+        if normalizer is not None:
+            self._normalizers[name] = normalizer
 
     @staticmethod
     def _resolve_handler(name: str, handlers: Any) -> Callable[..., Any]:
@@ -1371,6 +1381,12 @@ class Server:
         definition = self._definitions.get(name)
         if definition is None or name not in self._handlers:
             raise ProtocolError(METHOD_NOT_FOUND, f"unknown tool: {name}")
+        # Liberal input, precise storage: fold synonyms and case/separator
+        # variants to canonical values first, so schema validation, consent
+        # fingerprints, tasks, and handlers all bind one canonical request.
+        normalizer = self._normalizers.get(name)
+        if normalizer is not None:
+            arguments = normalizer(arguments)
         validate_schema(arguments, definition["inputSchema"])
 
         request_id = validated["id"]

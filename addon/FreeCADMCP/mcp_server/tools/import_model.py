@@ -23,11 +23,27 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from .. import input_aliases as _aliases
 from ..object_validation import document_bounds, mutation
 from ..protocol import VALIDATION_FAILED, ToolError, check_schema
 from .documents import _require_approved
 
 _IMPORT_PREVIEW_LIMIT = 64
+
+#: Liberal input (Postel): ``stp`` names the STEP format unambiguously and
+#: case folds for free. The table builds from the same values the schema
+#: enum serves.
+_IMPORT_FORMATS = ("step", "stl")
+_IMPORT_FORMAT_ALIASES = {"stp": "step"}
+_IMPORT_FORMAT_TABLE = _aliases.build_table(_IMPORT_FORMATS, _IMPORT_FORMAT_ALIASES)
+_IMPORT_NORMALIZER_SPEC = {"format": _IMPORT_FORMAT_TABLE}
+
+
+def _normalize_import_arguments(arguments: dict) -> dict:
+    """Fold import format synonyms and case variants to the canonical format."""
+
+    return _aliases.normalize_arguments(arguments, _IMPORT_NORMALIZER_SPEC)
+
 
 _IMPORT_INPUT = {
     "type": "object",
@@ -36,7 +52,7 @@ _IMPORT_INPUT = {
     "properties": {
         "document": {"type": "string", "minLength": 1},
         "path": {"type": "string", "minLength": 1},
-        "format": {"type": "string", "enum": ["step", "stl"]},
+        "format": {"type": "string", "enum": list(_IMPORT_FORMATS)},
         "name": {
             "type": "string",
             "minLength": 1,
@@ -110,6 +126,7 @@ _IMPORT_OUTPUT = {
 TOOL_DEFINITIONS = [
     {
         "name": "import_model",
+        "normalize": _normalize_import_arguments,
         "description": (
             "Import a STEP or STL file into an existing document. Imported "
             "files are untrusted input, so the call requires file consent "

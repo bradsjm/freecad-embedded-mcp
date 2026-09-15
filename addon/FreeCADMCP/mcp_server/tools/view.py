@@ -54,6 +54,7 @@ from typing import Any
 
 import FreeCAD
 
+from .. import input_aliases as _aliases
 from .. import topology_query as tq
 from ..gui_dispatch import _flush_gui_events
 from ..gui_state import capture_selection_snapshot, restore_selection_snapshot
@@ -72,6 +73,27 @@ _VIEW_METHODS = {
     "Dimetric": "viewDimetric",
     "Trimetric": "viewTrimetric",
 }
+
+#: Capture modes, the closed set both capture schemas serve.
+_CAPTURE_MODES = ("overview", "detail", "interior", "fit")
+
+#: Liberal input (Postel): a model reaches for the FreeCAD camera name
+#: (``rear``), the standard abbreviation (``iso``), or SolidWorks' fit
+#: spelling (``zoom``); all fold onto the canonical vocabulary. The tables
+#: build from the same sources as the schema enums, so an alias can never
+#: normalize to a refused value. The selector grammar keeps CadQuery's own
+#: case rules; liberal folding applies to parameter values only.
+_MODE_ALIASES = {"zoom": "fit"}
+_VIEW_NAME_ALIASES = {"iso": "Isometric", "rear": "Back"}
+_MODE_TABLE = _aliases.build_table(_CAPTURE_MODES, _MODE_ALIASES)
+_VIEW_NAME_TABLE = _aliases.build_table(_VIEW_METHODS, _VIEW_NAME_ALIASES)
+_CAPTURE_NORMALIZER_SPEC = {"mode": _MODE_TABLE, "view_name": _VIEW_NAME_TABLE}
+
+
+def _normalize_capture_arguments(arguments: dict) -> dict:
+    """Fold capture mode and orientation spellings to canonical values."""
+
+    return _aliases.normalize_arguments(arguments, _CAPTURE_NORMALIZER_SPEC)
 
 
 # Screenshot cost scales with pixel count. An omitted size resolves from the
@@ -2105,7 +2127,7 @@ _TOOL_INPUT_SCHEMA = tq.merge_query_defs(
             "document": {"type": "string", "minLength": 1, "maxLength": 256},
             "mode": {
                 "type": "string",
-                "enum": ["overview", "detail", "interior", "fit"],
+                "enum": list(_CAPTURE_MODES),
                 "default": "overview",
             },
             "focus": {"$ref": "#/$defs/topologyTarget"},
@@ -2146,7 +2168,7 @@ _TOOL_OUTPUT_SCHEMA = tq.merge_query_defs(
             "generation": {"type": "integer", "minimum": 0},
             "mode": {
                 "type": "string",
-                "enum": ["overview", "detail", "interior", "fit"],
+                "enum": list(_CAPTURE_MODES),
             },
             "focus": _TARGET_OUT,
             "a": _TARGET_OUT,
@@ -2186,6 +2208,7 @@ _TOOL_OUTPUT_SCHEMA = tq.merge_query_defs(
 TOOL_DEFINITIONS = [
     {
         "name": "capture_view",
+        "normalize": _normalize_capture_arguments,
         "description": (
             "Capture exactly one labeled PNG per call for qualitative "
             "visual inspection, chosen by inspection intent instead of "

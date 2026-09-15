@@ -27,6 +27,7 @@ import Mesh
 import MeshPart
 import Part
 
+from .. import input_aliases as _aliases
 from .. import protocol
 from ..gui_state import capture_selection_snapshot, restore_selection_snapshot
 from ..object_validation import geometry_report, shape_is_null
@@ -34,6 +35,21 @@ from ..protocol import ToolError
 
 FORMATS = ("stl", "step", "3mf", "fcstd")
 _EXTENSIONS = {"stl": ".stl", "step": ".step", "3mf": ".3mf", "fcstd": ".FCStd"}
+
+#: Liberal input (Postel): ``stp`` is the standard STEP extension and the
+#: spelling a cross-ecosystem model reaches for; case folds for free. The
+#: table builds from ``FORMATS``, the same tuple the schema enum serves, so
+#: an alias can never normalize to a refused format.
+_FORMAT_ALIASES = {"stp": "step"}
+_FORMAT_TABLE = _aliases.build_table(FORMATS, _FORMAT_ALIASES)
+_EXPORT_NORMALIZER_SPEC = {"format": _FORMAT_TABLE}
+
+
+def _normalize_export_arguments(arguments: dict) -> dict:
+    """Fold export format synonyms and case variants to the canonical format."""
+
+    return _aliases.normalize_arguments(arguments, _EXPORT_NORMALIZER_SPEC)
+
 
 DEFAULT_LINEAR_DEFLECTION = 0.03
 DEFAULT_ANGULAR_DEFLECTION = 0.12
@@ -934,6 +950,7 @@ _TOOL_OUTPUT_SCHEMA = {
 TOOL_DEFINITIONS = [
     {
         "name": "export",
+        "normalize": _normalize_export_arguments,
         "description": (
             "Export objects to STL, STEP or 3MF, or the entire document to a "
             "native FCStd copy. Writes to a temporary sibling file, verifies "
