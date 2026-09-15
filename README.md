@@ -266,8 +266,8 @@ For Network access, add the bearer header to the arguments. Keep the token out o
 
 ## Tools
 
-The server registers 26 tools. `run_script` is hidden unless the
-`allow_scripts` setting is enabled, so a default server exposes 25.
+The `tools/list` response is the source of truth for the enabled tool
+surface. `run_script` is hidden unless the `allow_scripts` setting is enabled.
 
 | Tool | Purpose |
 | --- | --- |
@@ -352,7 +352,7 @@ At most 32 sessions are kept. New sessions are refused rather than evicting live
 
 ## Agent skill
 
-The repository ships an [agent skill](skills/freecad-mcp/SKILL.md). It teaches coding agents how to drive this server: the 26-tool contract, FreeCAD modeling patterns, geometry validation, FEM, and export. It complements the MCP connection: the agent still talks to `http://127.0.0.1:9876/mcp`, while the skill explains how to use the tools effectively.
+The repository ships an [agent skill](skills/freecad-mcp/SKILL.md). It teaches coding agents how to drive this server: the tool contract, FreeCAD modeling patterns, geometry validation, FEM, and export. It complements the MCP connection: the agent still talks to `http://127.0.0.1:9876/mcp`, while the skill explains how to use the tools effectively.
 
 [`npx skills`](https://github.com/vercel-labs/skills) is the official installer for the open agent skills ecosystem. It requires Node.js and supports Claude Code, Codex, Cursor, and more than 75 other agents.
 
@@ -403,7 +403,7 @@ The project targets Python 3.11 and newer and has no runtime dependencies. The a
 
 The CI workflow runs the lock check, Ruff lint, Ruff format check, add-on compile check, and the full headless pytest suite on Python 3.11. The tests use FreeCAD-shaped stubs and do not require a FreeCAD installation.
 
-[`examples/cantilever_fem.py`](examples/cantilever_fem.py) is a dependency-free client example for this handshake and a full FEM run. Its checked-in `EXPECTED_TOOLS = 23` guard is stale against the current 25-tool default surface, so update that guard before running it against this revision.
+[`examples/cantilever_fem.py`](examples/cantilever_fem.py) is a dependency-free client example for this handshake and a full FEM run.
 
 [`examples/native_contract_probe.py`](examples/native_contract_probe.py) requires a live FreeCAD server and rewrites `tests/native_contract.json`. Run it without flags for the default verification, with `--dev` to resume after recorded crashes, or with `--sweep` to merge the full constraint-form sweep.
 
@@ -425,7 +425,7 @@ The CI workflow runs the lock check, Ruff lint, Ruff format check, add-on compil
 | --- | --- |
 | **Architecture** | The PyPI proxy package (`src/freecad_mcp`, FastMCP over stdio) and the in-FreeCAD XML-RPC server are gone. One embedded server speaks MCP over Streamable HTTP (JSON-RPC + SSE) at `http://127.0.0.1:9876/mcp`. No pip or uvx install and no client config file are needed. |
 | **Protocol** | XML-RPC with ad-hoc dictionaries became the MCP JSON-RPC wire protocol, version `2026-07-28`, with request-metadata headers, capability negotiation, and session-based support for the 2025 Streamable HTTP revisions. |
-| **Tools** | Fifteen loosely typed tools became a 26-tool registered surface validated against JSON input and output schemas, with structured error codes and paginated results. `run_script` is opt-in through the `allow_scripts` setting. `execute_code` became `run_script`; `get_view` became `capture_view`; `get_rpc_status` became `discover_capabilities`; `inspect_documents` was added for live document inventory; `create_objects` adds atomic 1–32 object creation. |
+| **Tools** | Fifteen loosely typed tools became a structured surface validated against JSON input and output schemas, with structured error codes and paginated results. `run_script` is opt-in through the `allow_scripts` setting. `execute_code` became `run_script`; `get_view` became `capture_view`; `get_rpc_status` became `discover_capabilities`; `inspect_documents` was added for live document inventory; `create_objects` adds atomic 1–32 object creation. |
 | **Security** | The IP allow-list alone became two explicit modes: local (loopback bind, Host/Origin checks, no token) and remote (bind to all interfaces, mandatory bearer token, optional CIDR allow-list), plus `allowed_roots` path containment for file-touching tools and a dedicated absolute `recovery_directory` for recovery copies. |
 | **Document safety** | Unvalidated success/error dictionaries became MCP-owned transactions with prevalidation, rollback, dependent-object checks, and solid-count baselines. |
 | **Long-running work** | Blocking calls with client-side timeouts became detached tasks under the `io.modelcontextprotocol/tasks` extension, with polling and cooperative cancellation. |

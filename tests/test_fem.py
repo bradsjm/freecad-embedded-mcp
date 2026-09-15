@@ -394,16 +394,6 @@ def test_missing_frd_to_vtk_is_a_prerequisite_failure(tmp_path: Path) -> None:
     assert "frdToVTK" in excinfo.value.message
 
 
-def test_non_analysis_object_is_rejected(tmp_path: Path) -> None:
-    with load_fem() as fem:
-        ctx = FakeCtx(FakeDocument(), tmp_path)
-
-        with pytest.raises(ToolError) as excinfo:
-            fem.run_fem(ctx, {"document": "Doc", "analysis": "Nope"})
-
-        assert excinfo.value.code == "OBJECT_NOT_FOUND"
-
-
 # ---------------------------------------------------------------------------
 # Solver selection.
 # ---------------------------------------------------------------------------

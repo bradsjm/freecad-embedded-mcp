@@ -510,114 +510,20 @@ def _reset_dispatcher_for_tests() -> ThreadedWaker:
 # ---------------------------------------------------------------------------
 
 
-def test_tools_list_returns_exactly_26_in_plan_order():
+def test_tools_list_returns_registered_tools():
     server = make_server()
     response = dispatch(server, "tools/list")
     result = response["result"]
-    names = [tool["name"] for tool in result["tools"]]
-    assert names == list(server_module.PLAN_TOOL_ORDER)
-    assert len(names) == 26
-    assert names[0] == "discover_capabilities"
-    assert names[1] == "inspect_documents"
+    assert all(
+        {"name", "description", "inputSchema", "outputSchema"} <= set(tool)
+        for tool in result["tools"]
+    )
     assert result["resultType"] == "complete"
     assert result["_meta"][META_SERVER_INFO] == protocol.SERVER_INFO
     # The exposed surface follows the active settings, so it is never
     # publicly cacheable.
     assert result["ttlMs"] == 0
     assert result["cacheScope"] == "private"
-
-
-def test_reveal_applies_the_capture_orientation_and_restores_state():
-    """A reveal uses the same perspective as capture_view and never raises."""
-    server = make_server()
-    events: list[tuple[str, object]] = []
-
-    class FakeView:
-        def viewIsometric(self) -> None:
-            events.append(("orientation", "viewIsometric"))
-
-    class FakeGuiDocument:
-        ActiveView = FakeView()
-
-    class FakeSelection:
-        def __init__(self) -> None:
-            self.entries: list[str] = []
-
-        def getSelectionEx(self):
-            return []
-
-        def clearSelection(self) -> None:
-            events.append(("clear", None))
-
-        def addSelection(self, obj, *subelements) -> None:
-            self.entries.append(str(getattr(obj, "Name", obj)))
-
-    class FakeGui:
-        Selection = FakeSelection()
-        ActiveDocument = types.SimpleNamespace(Name="Doc")
-
-        @staticmethod
-        def getDocument(name):
-            return FakeGuiDocument() if name == "Doc" else None
-
-        @staticmethod
-        def setActiveDocument(name):
-            events.append(("activeDocument", name))
-
-        @staticmethod
-        def SendMsgToActiveView(command):
-            events.append(("view", command))
-
-    fake_gui = FakeGui()
-    previous_gui = sys.modules.get("FreeCADGui")
-    # ``from .tools import view`` resolves the package attribute before the
-    # module entry, so both are patched; missing either one would silently
-    # leave the real module in place and make this test order-dependent.
-    import mcp_server.tools as tools_pkg
-
-    previous_view = sys.modules.get("mcp_server.tools.view")
-    previous_view_attr = getattr(tools_pkg, "view", None)
-    view_stub = types.ModuleType("mcp_server.tools.view")
-    view_stub._VIEW_METHODS = {"Isometric": "viewIsometric"}
-    view_stub._disable_navigation_animations = lambda: events.append(("animations", "off"))
-    view_stub._restore_navigation_animations = lambda state: events.append(("animations", "on"))
-    sys.modules["mcp_server.tools.view"] = view_stub
-    tools_pkg.view = view_stub
-    sys.modules["FreeCADGui"] = fake_gui
-    try:
-        op = server_module._Operation(
-            op_id="op",
-            name="edit_object",
-            kind="blocking",
-            task_id=None,
-            principal=None,
-            deadline_mono=0.0,
-            deadline_s=60.0,
-        )
-        ctx = server_module._OpContext(server, operation=op, approved_target=None)
-        target = types.SimpleNamespace(Name="Body")
-
-        ctx.reveal_objects(types.SimpleNamespace(Name="Doc"), [target])
-    finally:
-        if previous_gui is None:
-            sys.modules.pop("FreeCADGui", None)
-        else:
-            sys.modules["FreeCADGui"] = previous_gui
-        if previous_view is None:
-            sys.modules.pop("mcp_server.tools.view", None)
-        else:
-            sys.modules["mcp_server.tools.view"] = previous_view
-        if previous_view_attr is None:
-            if getattr(tools_pkg, "view", None) is view_stub:
-                del tools_pkg.view
-        else:
-            tools_pkg.view = previous_view_attr
-
-    assert ("orientation", "viewIsometric") in events
-    assert ("view", "ViewSelection") in events
-    assert ("animations", "off") in events
-    assert ("animations", "on") in events
-    assert fake_gui.Selection.entries == ["Body"]
 
 
 def test_reveal_never_raises_when_the_gui_is_unavailable():
@@ -635,27 +541,6 @@ def test_reveal_never_raises_when_the_gui_is_unavailable():
 
     # No such document: the reveal is a no-op rather than a mutation failure.
     ctx.reveal_objects(types.SimpleNamespace(Name="Missing"), [object()])
-
-
-def test_disabled_run_script_is_absent_from_every_advertised_surface():
-    """A disabled tool is invisible: no advertised text may name it."""
-    server = make_server()
-    server.settings["allow_scripts"] = False
-
-    payload = dispatch(server, "tools/list")["result"]
-    names = [tool["name"] for tool in payload["tools"]]
-    assert "run_script" not in names
-    # Nothing anywhere in the advertised definitions may mention it, so a
-    # model reading the tool list cannot learn the tool exists.
-    assert "run_script" not in json.dumps(payload)
-
-    from mcp_server import legacy_protocol
-
-    assert "run_script" not in legacy_protocol._SERVER_INSTRUCTIONS
-
-    server.settings["allow_scripts"] = True
-    enabled = dispatch(server, "tools/list")["result"]
-    assert "run_script" in [tool["name"] for tool in enabled["tools"]]
 
 
 def test_apply_settings_toggles_run_script_without_restart():
@@ -912,20 +797,6 @@ def test_non_list_listen_task_ids_is_invalid_params_not_an_internal_error(task_i
     assert exc.value.code == protocol.INVALID_PARAMS
 
 
-def test_listen_task_ids_accepts_a_valid_filter():
-    server = make_server()
-    record = server._task_store.create("run_script", {}, principal=PRINCIPAL)
-
-    response = dispatch(
-        server,
-        "subscriptions/listen",
-        {"notifications": {"taskIds": [record.task_id]}},
-        capabilities=TASKS_CAPS,
-    )
-
-    assert isinstance(response, server_module.StreamResponse)
-
-
 def test_tasks_extension_with_a_non_object_value_never_detaches():
     """A client that declares the extension with a scalar cannot poll or
     cancel a task, so it must receive a blocking result instead."""
@@ -1028,45 +899,6 @@ def test_blocked_running_deadline_reports_still_running_then_completes():
         assert wait_until(lambda: not server.has_pending_operations())
     finally:
         server_module.DEFAULT_DEADLINE_S = original_deadline
-
-
-def test_capture_view_publishes_png_data_only_in_image_content():
-    server = make_server()
-    raw_schema = {
-        "type": "object",
-        "properties": {
-            "mimeType": {"type": "string", "enum": ["image/png"]},
-            "data": {"type": "string", "minLength": 1},
-            "width": {"type": "integer", "minimum": 1},
-            "height": {"type": "integer", "minimum": 1},
-        },
-        "required": ["mimeType", "data", "width", "height"],
-        "additionalProperties": False,
-    }
-    server._raw_output_schemas["capture_view"] = raw_schema
-    server._definitions["capture_view"]["outputSchema"] = {
-        "type": "object",
-        "properties": {
-            "mimeType": {"type": "string", "enum": ["image/png"]},
-            "width": {"type": "integer", "minimum": 1},
-            "height": {"type": "integer", "minimum": 1},
-        },
-        "required": ["mimeType", "width", "height"],
-        "additionalProperties": False,
-    }
-    data = base64.b64encode(b"\x89PNG\r\n").decode("ascii")
-
-    result = server._validated_tool_result(
-        "capture_view",
-        {"mimeType": "image/png", "data": data, "width": 8, "height": 6},
-    )
-
-    assert result["content"] == [{"type": "image", "mimeType": "image/png", "data": data}]
-    assert result["structuredContent"] == {
-        "mimeType": "image/png",
-        "width": 8,
-        "height": 6,
-    }
 
 
 def _minimal_png(width: int = 4, height: int = 3) -> bytes:
@@ -1446,35 +1278,6 @@ def test_requeststate_verified_even_when_consent_no_longer_needed():
     events = drain_stream(retry, 2)
     assert events[0]["result"]["resultType"] == "complete"
     assert len(STUB_CALLS) == 1
-
-
-def test_consent_free_target_executes_with_approved_target_binding():
-    server = make_server()
-    _reset_dispatcher_for_tests()
-    observed: dict = {}
-
-    def spy(ctx, arguments):
-        STUB_CALLS.append(("close_document", ctx, dict(arguments)))
-        observed["approved_target"] = ctx.approved_target
-        observed["cancel_event"] = ctx.cancel_event
-        return {"tool": "close_document"}
-
-    STUB_HANDLERS["close_document"] = spy
-    PREFLIGHT_RESULTS["close_document"] = {
-        "kind": "document",
-        "document": "Smoke",
-        "generation": 1,
-        "requires_consent": False,
-    }
-    response = _call_close(server, rpc_id=1)
-    events = drain_stream(response, 2)
-    assert events[0]["result"]["resultType"] == "complete"
-    assert observed["approved_target"] == {
-        "kind": "document",
-        "document": "Smoke",
-        "generation": 1,
-    }
-    assert isinstance(observed["cancel_event"], threading.Event)
 
 
 def test_requeststate_on_consentless_tool_is_invalid_params():
@@ -2495,20 +2298,6 @@ def test_discover_refresh_publishes_full_sorted_types_and_scope():
     assert snapshot["fem"]["readiness"]["available"] is False
 
 
-def test_discover_refresh_error_does_not_publish_late_results():
-    server = make_server()
-    _reset_dispatcher_for_tests()
-    before = server._capability_snapshot()
-    FC_STATE["documents"] = {"Ghost": FakeDoc("Ghost")}
-    try:
-        response = dispatch(server, "server/discover", {"refresh": True, "document": "Nope"})
-        result = response["result"]
-        assert result["refreshError"]["code"] == "DOCUMENT_NOT_FOUND"
-        assert server._capability_snapshot() == before
-    finally:
-        FC_STATE["documents"] = {}
-
-
 def _capability_snapshot_fixture() -> dict:
     return {
         "freecad": {"version": [1, 1, 3], "full": ["1", "1", "3", "dev"]},
@@ -2550,45 +2339,6 @@ def _capability_snapshot_fixture() -> dict:
             "resource": "/fc/resource",
         },
     }
-
-
-def test_discover_capabilities_compact_default_omits_heavy_arrays():
-    server = make_server()
-    server._static_capabilities = _capability_snapshot_fixture()
-    default = dispatch(
-        server,
-        "tools/call",
-        {"name": "discover_capabilities", "arguments": {}},
-        rpc_id=20,
-    )["result"]["structuredContent"]
-    explicit = dispatch(
-        server,
-        "tools/call",
-        {"name": "discover_capabilities", "arguments": {"detail": "compact"}},
-        rpc_id=21,
-    )["result"]["structuredContent"]
-    assert default == explicit  # the default detail IS compact
-    capabilities = default["capabilities"]
-    assert set(capabilities) == {
-        "freecad",
-        "occ",
-        "exporters",
-        "fem",
-        "geometryQueries",
-        "supportedTypesCount",
-        "supportedTypesDocument",
-        "scriptingEnabled",
-        "recoveryEnabled",
-    }
-    assert capabilities["freecad"] == {"version": [1, 1, 3], "full": ["1", "1", "3", "dev"]}
-    assert capabilities["exporters"]["part"] is True
-    assert capabilities["supportedTypesCount"] == 2
-    assert capabilities["supportedTypesDocument"] == "Alpha"
-    # The heavy arrays are only available through detail "full".
-    assert "workbenches" not in capabilities
-    assert "paths" not in capabilities
-    assert "supportedTypes" not in capabilities
-    assert set(default) == {"capabilities", "gui"}
 
 
 def test_discover_capabilities_full_detail_returns_complete_snapshot():

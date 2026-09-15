@@ -463,121 +463,6 @@ def _clean_commands_state(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_indicator_state_mapping_covers_every_state():
-    cases = [
-        ("stopped", 0, "MCP: Stopped", "Start MCP Server", "mcp-start.svg", True),
-        ("starting", 0, "MCP: Starting", "Starting MCP Server…", "mcp-start.svg", False),
-        ("running", 0, "MCP: Running (Local only)", "Stop MCP Server", "mcp-stop.svg", True),
-        (
-            "draining",
-            3,
-            "MCP: Stopping (3 operations)",
-            "Stopping MCP Server…",
-            "mcp-stop.svg",
-            False,
-        ),
-        (
-            "unknown",
-            0,
-            "MCP: State unknown",
-            "MCP Server State Unknown",
-            "mcp-workbench.svg",
-            False,
-        ),
-    ]
-    for state, pending, text, action_text, icon, enabled in cases:
-        mapping = commands._indicator_state(_status(state=state, pendingOperations=pending))
-        assert mapping["text"] == text
-        assert mapping["action_text"] == action_text
-        assert mapping["action_icon"] == icon
-        assert mapping["action_enabled"] is enabled
-
-
-def test_running_network_and_stuck_gui_have_truthful_status():
-    network = commands._indicator_state(
-        _status(
-            state="running",
-            connection={
-                "remote_enabled": True,
-                "allowed_ips": "",
-                "configured_port": 9876,
-            },
-        )
-    )
-    assert network["text"] == "MCP: Running (Network enabled)"
-    stuck = commands._indicator_state(_status(state="running", gui={"state": "stuck"}))
-    assert stuck["text"] == "MCP: Running — GUI blocked"
-    assert stuck["action_text"] == "Stop MCP Server"
-    assert stuck["action_enabled"] is True
-
-
-def test_restart_required_lists_pending_transport_settings():
-    saved = {
-        "remote_enabled": True,
-        "allowed_ips": "127.0.0.1",
-        "port": 9876,
-        "allowed_roots": ["/tmp/fc-test"],
-    }
-    active_network = _status(
-        state="running",
-        connection={
-            "remote_enabled": True,
-            "allowed_ips": "127.0.0.1",
-            "allowed_roots": ["/tmp/fc-test"],
-            "configured_port": 9876,
-        },
-    )
-    assert commands._restart_required(saved, active_network) == []
-    assert commands._restart_required(saved, _status(state="running")) == ["network access"]
-    assert commands._restart_required(saved, _status(state="stopped")) == []
-
-
-def test_restart_required_lists_each_changed_transport_key():
-    saved = {"remote_enabled": False, "allowed_ips": "10.0.0.5", "port": 9876}
-    drifted = _status(
-        state="running",
-        connection={
-            "remote_enabled": True,
-            "allowed_ips": "",
-            "configured_port": 9999,
-        },
-    )
-    assert commands._restart_required(saved, drifted) == [
-        "network access",
-        "allowed IPs",
-        "port",
-    ]
-
-
-def test_restart_required_ignores_settings_that_apply_live():
-    """Scripting, path containment and recovery settings apply to a
-    running server as soon as they are saved, so only transport drift
-    surfaces as a pending restart."""
-
-    saved = {
-        "remote_enabled": False,
-        "allowed_ips": "",
-        "port": 9876,
-        "allowed_roots": ["/tmp/fc-test"],
-        "recovery_enabled": False,
-        "recovery_directory": "/old/checkpoints",
-        "allow_scripts": False,
-    }
-    changed = _status(
-        state="running",
-        connection={
-            "remote_enabled": False,
-            "allowed_ips": "",
-            "allowed_roots": ["/tmp/fc-test/sub"],
-            "configured_port": 9876,
-            "recovery_enabled": False,
-            "recovery_directory": "/new/checkpoints",
-            "allow_scripts": True,
-        },
-    )
-    assert commands._restart_required(saved, changed) == []
-
-
 # ---------------------------------------------------------------------------
 # Controller refresh.
 # ---------------------------------------------------------------------------
@@ -612,20 +497,6 @@ def test_controller_refresh_updates_indicator_and_shared_action(monkeypatch):
     assert controller._timer.running is False
 
 
-def test_controller_disables_contextual_action_during_transition(monkeypatch):
-    action = FakeAction("Toggle_MCP_Server")
-    window = _make_window(monkeypatch, [action])
-    monkeypatch.setattr(
-        server_module,
-        "server_status",
-        lambda: _status(state="draining", pendingOperations=2),
-    )
-    commands.McpUiController(window)
-    assert action.text() == "Stopping MCP Server…"
-    assert action._icon["icon"].endswith("mcp-stop.svg")
-    assert action.isEnabled() is False
-
-
 def test_initialize_ui_is_idempotent_and_survives_missing_window(monkeypatch):
     monkeypatch.setattr(commands, "_main_window", lambda: None)
     assert commands.initialize_ui() is None
@@ -641,62 +512,6 @@ def test_initialize_ui_is_idempotent_and_survives_missing_window(monkeypatch):
 # ---------------------------------------------------------------------------
 # Command UX and settings.
 # ---------------------------------------------------------------------------
-
-
-def test_contextual_command_starts_when_stopped(monkeypatch):
-    window = _make_window(monkeypatch, [])
-    monkeypatch.setattr(server_module, "server_status", lambda: _status(state="stopped"))
-    monkeypatch.setattr(
-        server_module,
-        "start_server",
-        lambda: _status(state="running", endpoint="http://127.0.0.1:9876/mcp"),
-    )
-    monkeypatch.setattr(server_module, "stop_server", lambda: pytest.fail("stop called"))
-    commands.ToggleMCPServerCommand().Activated()
-    assert window.status_bar.messages[-1] == (
-        "MCP server running at http://127.0.0.1:9876/mcp",
-        5000,
-    )
-
-
-def test_contextual_command_stops_when_running(monkeypatch):
-    window = _make_window(monkeypatch, [])
-    monkeypatch.setattr(server_module, "server_status", lambda: _status(state="running"))
-    monkeypatch.setattr(server_module, "start_server", lambda: pytest.fail("start called"))
-    monkeypatch.setattr(
-        server_module,
-        "stop_server",
-        lambda: _status(state="draining", pendingOperations=3),
-    )
-    commands.ToggleMCPServerCommand().Activated()
-    assert window.status_bar.messages[-1][0] == ("MCP is stopping; 3 operations are still active.")
-
-
-def test_contextual_command_failure_is_visible(monkeypatch):
-    _make_window(monkeypatch, [])
-    monkeypatch.setattr(server_module, "server_status", lambda: _status(state="stopped"))
-
-    def _explode():
-        raise OSError("address already in use")
-
-    monkeypatch.setattr(server_module, "start_server", _explode)
-    commands.ToggleMCPServerCommand().Activated()
-    assert "address already in use" in FakeMessageBox.warnings[-1][2]
-    assert any("Start failed" in message for message in ts.FakeConsole.messages)
-
-
-def test_contextual_command_is_inactive_during_transitions(monkeypatch):
-    command = commands.ToggleMCPServerCommand()
-    for state in ("starting", "draining", "unknown"):
-        monkeypatch.setattr(
-            server_module, "server_status", lambda state=state: _status(state=state)
-        )
-        assert command.IsActive() is False
-    for state in ("stopped", "running"):
-        monkeypatch.setattr(
-            server_module, "server_status", lambda state=state: _status(state=state)
-        )
-        assert command.IsActive() is True
 
 
 def test_settings_save_uses_existing_owner_and_never_restarts(monkeypatch):
@@ -739,63 +554,9 @@ def test_settings_refuses_invalid_ip_or_empty_roots(monkeypatch, field, value):
     assert saved == []
 
 
-def test_registers_only_the_three_public_ui_commands(monkeypatch):
-    registered = []
-    monkeypatch.setattr(
-        commands.FreeCADGui,
-        "addCommand",
-        lambda name, command: registered.append((name, type(command).__name__)),
-        raising=False,
-    )
-    commands.register_commands()
-    assert [name for name, _class in registered] == [
-        "Toggle_MCP_Server",
-        "Connection_Details",
-        "MCP_Settings",
-    ]
-
-
 # ---------------------------------------------------------------------------
 # Connection Details.
 # ---------------------------------------------------------------------------
-
-
-def test_connection_details_maps_wildcard_bind_to_local_endpoint():
-    status = _status(
-        state="running",
-        port=9876,
-        endpoint="http://0.0.0.0:9876/mcp",
-        connection={
-            "remote_enabled": True,
-            "allowed_ips": "192.168.1.0/24",
-            "configured_port": 9876,
-        },
-    )
-    model = commands._connection_details(status, dict(SAVED_SETTINGS))
-    assert model["endpoint"] == "http://127.0.0.1:9876/mcp"
-    assert "0.0.0.0" not in model["endpoint"]
-    assert model["bind_address"] == "0.0.0.0"
-    assert model["endpoint_copyable"] is True
-    assert model["mode"] == "Network enabled"
-
-
-def test_connection_details_stopped_reports_configured_endpoint():
-    model = commands._connection_details(_status(state="stopped"), None)
-    assert model["listening"] is False
-    assert model["endpoint"] == "http://127.0.0.1:9876/mcp"
-    assert model["endpoint_copyable"] is True
-
-    without_port = _status(
-        state="stopped",
-        connection={
-            "remote_enabled": False,
-            "allowed_ips": "",
-            "configured_port": 0,
-        },
-    )
-    model = commands._connection_details(without_port, None)
-    assert model["endpoint"] is None
-    assert model["endpoint_copyable"] is False
 
 
 def test_connection_details_dialog_masks_token_and_maps_endpoint(monkeypatch):

@@ -32,18 +32,6 @@ class FreeCADMCPAddonWorkbench(Workbench):
         self.appendMenu("FreeCAD MCP", _MENU_COMMANDS)
         commands.initialize_ui()
 
-    def Activated(self):
-        """Empty hook: nothing to do when the workbench is activated."""
-        pass
-
-    def Deactivated(self):
-        """Empty hook: nothing to do when the workbench is deactivated."""
-        pass
-
-    def ContextMenu(self, recipient):
-        """Empty hook: no context-menu entries are contributed."""
-        pass
-
     def GetClassName(self):
         """Return the native workbench class name for FreeCAD's framework."""
         return "Gui::PythonWorkbench"

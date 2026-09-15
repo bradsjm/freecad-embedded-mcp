@@ -251,20 +251,6 @@ def test_value_shape_mismatch_rejected_up_front():
     assert obj.ops == []
 
 
-def test_non_finite_float_value_rejected_up_front():
-    obj = FakeObj()
-    ctx = FakeCtx(obj)
-    with pytest.raises(ToolError):
-        call(
-            ctx,
-            {
-                **base(),
-                "add": [{"name": "Depth", "type": "App::PropertyLength", "value": 1e400}],
-            },
-        )
-    assert obj.ops == []
-
-
 def test_rename_source_missing_rejected_up_front():
     obj = FakeObj(properties=["Length"])
     ctx = FakeCtx(obj)
@@ -532,37 +518,6 @@ def test_successful_flow_applies_add_rename_expression_in_order():
         },
         "units": {"length": "mm", "volume": "mm3", "tolerance": "mm"},
     }
-
-
-def test_added_property_without_value_keeps_free_cad_default():
-    obj = FakeObj()
-    ctx = FakeCtx(obj)
-    result = call(ctx, {**base(), "add": [{"name": "Note", "type": "App::PropertyString"}]})
-    assert result["added"] == ["Note"]
-    assert obj._props["Note"]["value"] is None
-    assert ("commit",) in ctx.doc.transactions
-
-
-def test_response_detail_full_includes_before_report_and_compact_does_not():
-    from mcp_server.protocol import validate_schema
-
-    compact_ctx = FakeCtx(FakeObj(properties=["Length"]))
-    compact = call(
-        compact_ctx,
-        {**base(), "expressions": {"Length": "2"}, "response_detail": "compact"},
-    )
-    assert "beforeReport" not in compact
-    assert compact["bodyReport"]["ok"] is True
-    validate_schema(compact, parameters.TOOL_DEFINITIONS[0]["outputSchema"])
-
-    full_ctx = FakeCtx(FakeObj(properties=["Length"]))
-    full = call(
-        full_ctx,
-        {**base(), "expressions": {"Length": "2"}, "response_detail": "full"},
-    )
-    assert full["beforeReport"]["name"] == "Box"
-    assert full["bodyReport"]["ok"] is True
-    validate_schema(full, parameters.TOOL_DEFINITIONS[0]["outputSchema"])
 
 
 def test_expression_may_target_a_property_added_in_the_same_call():

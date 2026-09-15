@@ -2,7 +2,7 @@
 
 This document records why the FreeCAD MCP server exposes the tools it does, in the shapes it does. It is the design rationale for translating the FreeCAD Python API into a tool set for language models. Use it when you add a tool, change a schema, or wonder why a refusal exists.
 
-The server registers 26 tools. `run_script` appears in `tools/list` only when the `allow_scripts` setting is enabled, so a default server exposes 25. The companion documents describe behavior: `README.md` for transport and install, `skills/freecad-mcp/SKILL.md` for the agent-facing contract, and `AGENTS.md` for code conventions. This document describes intent.
+The live `tools/list` response is the source of truth for the enabled tool surface. `run_script` appears there only when the `allow_scripts` setting is enabled. The companion documents describe behavior: `README.md` for transport and install, `skills/freecad-mcp/SKILL.md` for the agent-facing contract, and `AGENTS.md` for code conventions. This document describes intent.
 
 ## The client model
 
@@ -24,7 +24,7 @@ The tool set groups by model workflow phase, not by native class hierarchy. Free
 
 Each tool is one verb on one domain: `create_object`, `edit_object`, `delete_object`; `create_feature`, `edit_feature`; `inspect_documents`, `inspect_objects`, `inspect_topology`. The model composes verbs into workflows. It never assembles constructor calls.
 
-The fixed registration order (`PLAN_TOOL_ORDER` in `server.py`) mirrors the canonical build loop: discover, documents, objects, mutations, validation, parameters, sketches, features, delivery, script escape. `tools/list` returns tools in this order, **so the listing itself teaches the loop.**
+The recommended call order mirrors the client workflow: discover, documents, objects, mutations, validation, parameters, sketches, features, delivery, and script escape. Use `tools/list` for the live schemas; do not infer the workflow from list ordering.
 
 ### 2. Results are contracts
 

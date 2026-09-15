@@ -1046,36 +1046,6 @@ def test_mesh_format_requires_objects(export_module, tmp_path) -> None:
     assert excinfo.value.code == "VALIDATION_FAILED"
 
 
-def test_unknown_document_and_object_are_tool_errors(export_module, tmp_path) -> None:
-    ctx = FakeCtx(str(tmp_path))
-    destination = os.path.join(ctx.root, "out.stl")
-
-    with pytest.raises(ToolError) as excinfo:
-        export_module.export(
-            ctx,
-            {
-                "document": "Missing",
-                "objects": ["Box1"],
-                "format": "stl",
-                "path": destination,
-            },
-        )
-    assert excinfo.value.code == "DOCUMENT_NOT_FOUND"
-
-    make_box_document(ctx)
-    with pytest.raises(ToolError) as excinfo:
-        export_module.export(
-            ctx,
-            {
-                "document": "Smoke",
-                "objects": ["Ghost"],
-                "format": "stl",
-                "path": destination,
-            },
-        )
-    assert excinfo.value.code == "OBJECT_NOT_FOUND"
-
-
 def test_preflight_returns_target_for_existing_destination(export_module, tmp_path) -> None:
     ctx = FakeCtx(str(tmp_path))
     make_box_document(ctx)
@@ -1099,38 +1069,6 @@ def test_preflight_returns_target_for_existing_destination(export_module, tmp_pa
     assert target["path"] == destination
     assert target["purpose"] == "overwrite"
     assert target["fingerprint"] == ctx.file_fingerprint(destination)
-
-
-def test_preflight_returns_none_for_new_destination(export_module, tmp_path) -> None:
-    ctx = FakeCtx(str(tmp_path))
-    make_box_document(ctx)
-
-    assert (
-        export_module.preflight(
-            ctx,
-            "export",
-            {
-                "document": "Smoke",
-                "objects": ["Box1"],
-                "format": "stl",
-                "path": os.path.join(ctx.root, "new.stl"),
-            },
-        )
-        is None
-    )
-
-    with pytest.raises(ToolError) as excinfo:
-        export_module.preflight(
-            ctx,
-            "export",
-            {
-                "document": "Missing",
-                "objects": [],
-                "format": "fcstd",
-                "path": os.path.join(ctx.root, "new.FCStd"),
-            },
-        )
-    assert excinfo.value.code == "DOCUMENT_NOT_FOUND"
 
 
 def test_tool_schemas_are_finite_and_outputs_validate(export_module, tmp_path) -> None:

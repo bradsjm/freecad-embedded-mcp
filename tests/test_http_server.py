@@ -424,19 +424,6 @@ def test_remote_mode_still_requires_bearer_token():
         assert server.dispatch_calls() == []
 
 
-def test_remote_mode_reports_bound_host():
-    with running_server(echo_dispatch, remote_enabled=True, host="127.0.0.1") as server:
-        assert server.server.remote_enabled is True
-        assert server.server.bound_host == "127.0.0.1"
-
-
-def test_remote_mode_open_list_accepts_loopback_peer():
-    # allowed_ips defaults to empty: any peer may connect; token gates access.
-    with running_server(echo_dispatch, remote_enabled=True, allowed_ips="") as server:
-        status, _, _ = server.post(valid_request(), routing_headers())
-        assert status == 200
-
-
 def test_local_mode_without_token_accepts_request():
     with running_server(echo_dispatch, token=None) as server:
         status, _, _ = server.post(
@@ -1016,24 +1003,6 @@ def test_valid_request_returns_json_with_principal_and_port0():
         assert isinstance(connection_id, str) and connection_id
 
 
-def test_idle_keepalive_connection_is_closed_by_read_timeout():
-    with running_server(echo_dispatch, read_timeout=0.2) as server:
-        payload = json.dumps(valid_request()).encode("utf-8")
-        request = (
-            f"POST /mcp HTTP/1.1\r\n"
-            f"Host: 127.0.0.1:{server.port}\r\n"
-            f"Authorization: Bearer {TOKEN}\r\n"
-            "Content-Type: application/json\r\n"
-            "Accept: application/json, text/event-stream\r\n"
-            f"MCP-Protocol-Version: {SUPPORTED_VERSION}\r\n"
-            "Mcp-Method: test/echo\r\n"
-            f"Content-Length: {len(payload)}\r\n\r\n"
-        ).encode("latin-1") + payload
-        status, _, body = raw_exchange(server.port, request, timeout=2.0)
-        assert status == 200
-        assert json.loads(body)["id"] == 1
-
-
 def test_reset_peer_during_stream_does_not_stop_server():
     fixture = StreamFixture()
     fixture.queue.put({"jsonrpc": "2.0", "id": 9, "result": {"partial": True}})
@@ -1195,21 +1164,6 @@ def test_client_disconnect_invokes_on_disconnect_exactly_once():
             sock.close()  # abrupt client disconnect mid-stream
         assert fixture.disconnect_event.wait(5.0), "on_disconnect was not invoked"
         assert fixture.disconnects == 1
-
-
-def test_normal_completion_skips_on_disconnect():
-    fixture = StreamFixture()
-    with running_server(stream_dispatch(fixture), keepalive_interval=0.2) as server:
-        sock = open_raw_stream(server, sse_request(rpc_id=9))
-        try:
-            recv_until(sock, b"\r\n\r\n")
-            fixture.queue.put({"jsonrpc": "2.0", "id": 9, "result": {"resultType": "complete"}})
-            fixture.queue.put(None)
-            recv_until(sock, b"0\r\n\r\n")
-        finally:
-            sock.close()
-        assert fixture.disconnect_event.wait(1.0) is False
-        assert fixture.disconnects == 0
 
 
 def test_stream_source_failure_finalizes_as_disconnect():

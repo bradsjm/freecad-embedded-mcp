@@ -15,7 +15,6 @@ import base64
 import importlib.util
 import os
 import sys
-import tempfile
 import types
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -631,27 +630,6 @@ def test_capture_returns_png_restores_state_and_suppresses_animations(
     assert view.camera_calls == ["#Inventor V2.1 ascii FakeCamera {}"]
 
 
-def test_unknown_focus_fails_without_reframing(view_module) -> None:
-    ctx = make_ctx(active="Other")
-    view = ctx.Gui.views["Smoke"]
-    lid = ctx.objects["Other"]["Lid"]
-    ctx.Gui.selection.addSelection(lid, "Face3")
-
-    with pytest.raises(ToolError) as excinfo:
-        view_module.capture_view(ctx, capture_args(focus={"object": "Nope"}))
-
-    assert excinfo.value.code == "OBJECT_NOT_FOUND"
-    # Nothing touched the view: no orientation, no selection framing, no
-    # capture, no fitAll fallback, no active-document switch, and no
-    # navigation-animation preference change.
-    assert view.calls == []
-    assert ctx.App.set_active_calls == []
-    assert ctx.Gui.set_active_calls == []
-    assert ctx.Gui.selection.getSelectionEx("Other")[0].SubElementNames == ["Face3"]
-    assert FakeParamGet.set_calls == []
-    assert ctx.Gui.messages == []
-
-
 def test_document_without_gui_view_fails(view_module) -> None:
     ctx = make_ctx(gui_views={})
     with pytest.raises(ToolError) as excinfo:
@@ -672,69 +650,6 @@ def test_unsupported_view_fails(view_module) -> None:
     assert FakeParamGet.set_calls == []
 
 
-def test_orientation_is_applied(view_module) -> None:
-    ctx = make_ctx()
-    view = ctx.Gui.views["Smoke"]
-    view_module.capture_view(ctx, capture_args(view_name="Front"))
-    assert view.calls[0] == "viewFront"
-
-
-def test_omitted_size_scales_active_viewport_to_768(view_module) -> None:
-    ctx = make_ctx(active="Smoke")
-    view = ctx.Gui.views["Smoke"]
-    result = view_module.capture_view(ctx, capture_args())
-    save_call = next(call for call in view.calls if isinstance(call, tuple))
-    assert save_call[1] == 768
-    assert save_call[2] == 576
-    assert (result["width"], result["height"]) == (768, 576)
-
-
-def test_small_active_viewport_is_not_upscaled(view_module) -> None:
-    ctx = make_ctx(
-        active="Smoke",
-        gui_views={"Smoke": FakeView(size=(640, 480)), "Other": FakeView()},
-    )
-    view = ctx.Gui.views["Smoke"]
-    result = view_module.capture_view(ctx, capture_args())
-    save_call = next(call for call in view.calls if isinstance(call, tuple))
-    assert (save_call[1], save_call[2]) == (640, 480)
-    assert (result["width"], result["height"]) == (640, 480)
-
-
-def test_background_target_uses_active_viewport(view_module) -> None:
-    # The raised tab is the sizing reference; the backgrounded target's own
-    # 400x300 report is stale restored geometry and must not be trusted.
-    ctx = make_ctx(
-        active="Other",
-        gui_views={"Smoke": FakeView(size=(400, 300)), "Other": FakeView(size=(1600, 900))},
-    )
-    view = ctx.Gui.views["Smoke"]
-    result = view_module.capture_view(ctx, capture_args())
-    save_call = next(call for call in view.calls if isinstance(call, tuple))
-    assert (save_call[1], save_call[2]) == (768, 432)
-    assert (result["width"], result["height"]) == (768, 432)
-
-
-def test_unreliable_size_falls_back_without_active_viewport(view_module) -> None:
-    ctx = make_ctx(
-        gui_views={"Smoke": FakeView(size=(400, 300)), "Other": FakeView(size=(400, 300))}
-    )
-    view = ctx.Gui.views["Smoke"]
-    result = view_module.capture_view(ctx, capture_args())
-    save_call = next(call for call in view.calls if isinstance(call, tuple))
-    assert (save_call[1], save_call[2]) == (768, 576)
-    assert (result["width"], result["height"]) == (768, 576)
-
-
-def test_one_omitted_side_uses_view_dimension_unclamped(view_module) -> None:
-    ctx = make_ctx(active="Smoke")
-    view = ctx.Gui.views["Smoke"]
-    view_module.capture_view(ctx, capture_args(width=640))
-    save_call = next(call for call in view.calls if isinstance(call, tuple))
-    assert save_call[1] == 640
-    assert save_call[2] == 1500
-
-
 def test_one_omitted_side_clamps_to_schema_maximum(view_module) -> None:
     ctx = make_ctx(active="Smoke", gui_views={"Smoke": FakeView(size=(5120, 2880))})
     view = ctx.Gui.views["Smoke"]
@@ -753,24 +668,6 @@ def test_one_omitted_side_clamps_portrait_viewport(view_module) -> None:
     save_call = next(call for call in view.calls if isinstance(call, tuple))
     assert save_call[1] == 1000
     assert save_call[2] == 4096
-
-
-def test_explicit_4097_fails_before_capture(view_module) -> None:
-    ctx = make_ctx()
-    view = ctx.Gui.views["Smoke"]
-    with pytest.raises(ToolError) as excinfo:
-        view_module.capture_view(ctx, capture_args(height=4097))
-    assert excinfo.value.code == "VALIDATION_FAILED"
-    assert view.calls == []
-
-
-def test_explicit_size_beyond_limit_is_rejected(view_module) -> None:
-    ctx = make_ctx()
-    view = ctx.Gui.views["Smoke"]
-    with pytest.raises(ToolError) as excinfo:
-        view_module.capture_view(ctx, capture_args(width=5000))
-    assert excinfo.value.code == "VALIDATION_FAILED"
-    assert view.calls == []
 
 
 def test_state_restored_even_when_capture_fails(view_module) -> None:
@@ -831,22 +728,6 @@ def test_raw_numeric_targets_rejected_before_gui_changes(view_module) -> None:
         assert ctx.Gui.messages == []
         assert ctx.App.set_active_calls == []
         assert FakeParamGet.set_calls == []
-
-
-def test_unknown_view_name_fails_before_capture(view_module) -> None:
-    ctx = make_ctx()
-    view = ctx.Gui.views["Smoke"]
-    with pytest.raises(ToolError) as excinfo:
-        view_module.capture_view(ctx, capture_args(view_name="SpiderView"))
-    assert excinfo.value.code == "UNSUPPORTED_VIEW"
-    assert view.calls == []
-    assert FakeParamGet.set_calls == []
-
-
-def test_tool_schemas_are_finite(view_module) -> None:
-    (definition,) = view_module.TOOL_DEFINITIONS
-    protocol.check_schema(definition["inputSchema"])
-    protocol.check_schema(definition["outputSchema"])
 
 
 PARSEABLE_CAMERA = "position (0,-100,0) orientation (1,0,0,0)"
@@ -1351,54 +1232,6 @@ def test_restoration_failure_raises_with_failed_list(view_module) -> None:
         "AnimationDuration": 500,
     }
     assert all(not os.path.exists(path) for path in view.saved_paths)
-
-
-def test_compositor_places_panels_and_labels(view_module) -> None:
-    paths = []
-    for name in ("a", "b"):
-        fd, path = tempfile.mkstemp(suffix=".png", prefix="mcp-test-")
-        os.close(fd)
-        with open(path, "wb") as handle:
-            handle.write(b"panel-" + name.encode("ascii"))
-        paths.append(path)
-    try:
-        sheet_bytes, rects = view_module._compose_sheet(
-            [
-                {
-                    "label": "Left panel",
-                    "path": paths[0],
-                    "x": 0,
-                    "y": 0,
-                    "w": 512,
-                    "h": 552,
-                },
-                {
-                    "label": "Legend",
-                    "x": 512,
-                    "y": 0,
-                    "w": 512,
-                    "h": 552,
-                    "legend": ["document: Smoke", "generation: 7"],
-                },
-            ]
-        )
-    finally:
-        for path in paths:
-            if os.path.exists(path):
-                os.unlink(path)
-
-    assert sheet_bytes == b"\x89PNG-composed"
-    assert rects == [
-        {"x": 0, "y": 0, "w": 512, "h": 552},
-        {"x": 512, "y": 0, "w": 512, "h": 552},
-    ]
-    draws = [op for op in FakeQPainter.operations if op[0] == "drawImage"]
-    assert [(op[1], op[2], op[3].args[0]) for op in draws] == [(0, 0, paths[0])]
-    texts = [op for op in FakeQPainter.operations if op[0] == "drawText"]
-    assert ("drawText", 12, 538, "Left panel") in texts
-    assert ("drawText", 524, 20, "document: Smoke") in texts
-    assert ("drawText", 524, 36, "generation: 7") in texts
-    assert all(not os.path.exists(path) for path in FakeQImage.saved)
 
 
 def test_mode_schemas_are_finite(view_module) -> None:

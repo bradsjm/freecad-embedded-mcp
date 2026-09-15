@@ -50,7 +50,6 @@ import sys
 import urllib.parse
 
 PROTOCOL_VERSION = "2026-07-28"
-EXPECTED_TOOLS = 23
 
 DOC = "MCPExampleCantilever"
 BEAM = "Beam"
@@ -393,17 +392,6 @@ def main() -> int:
         return 2
     url = os.environ.get("FREECAD_MCP_URL", "http://127.0.0.1:9876/mcp")
     client = FreeCadMcpClient(url, token)
-
-    discover = tool_payload("server/discover", client.request("server/discover"))
-    listing = tool_payload("tools/list", client.request("tools/list"))
-    tool_names = [tool["name"] for tool in listing["tools"]]
-    if len(tool_names) != EXPECTED_TOOLS:
-        print(f"FATAL: expected {EXPECTED_TOOLS} tools, got {len(tool_names)}: {tool_names}")
-        return 3
-    server_info = (discover.get("_meta") or {}).get("io.modelcontextprotocol/serverInfo", {})
-    print(
-        f"   server {server_info.get('name')} {server_info.get('version')}, {len(tool_names)} tools"
-    )
 
     doc_name, beam_name, analysis_name = build_fixture(client)
     prepare_fem_model(client, doc_name, beam_name, analysis_name)

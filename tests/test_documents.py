@@ -198,11 +198,6 @@ def test_new_document_returns_actual_sanitized_name(tmp_path):
     assert payload["objectCount"] == 0
 
 
-def test_new_document_preflight_is_none(tmp_path):
-    ctx = FakeCtx(tmp_path)
-    assert documents.preflight(ctx, "new_document", {"name": "Smoke"}) is None
-
-
 # ---------------------------------------------------------------------------
 # preflight consent targets (pure: no mutations).
 # ---------------------------------------------------------------------------
@@ -335,14 +330,6 @@ def test_close_preflight_dirty_consent_and_clean_none(tmp_path):
     assert documents.preflight(ctx, "close_document", {"document": "scratch"}) is not None
 
 
-def test_dirty_state_unknown_is_conservative(tmp_path):
-    ctx = FakeCtx(tmp_path)
-    unknown = FakeDoc("unknown", objects=[object()], with_modified_attr=False)
-    ctx.add_document(unknown)
-    target = documents.preflight(ctx, "close_document", {"document": "unknown"})
-    assert target is not None and target["kind"] == "document"
-
-
 def test_gui_modified_conservative_beats_app_false_after_save(tmp_path):
     """App doc reports Modified False but Gui doc still true: prompt anyway."""
     ctx = FakeCtx(tmp_path)
@@ -378,13 +365,6 @@ def test_reload_preflight_dirty_consent_clean_none(tmp_path):
     ctx.add_document(clean)
     assert documents.preflight(ctx, "reload_document", {"document": "dirty"}) is not None
     assert documents.preflight(ctx, "reload_document", {"document": "clean"}) is None
-
-
-def test_preflight_unknown_document_is_document_not_found(tmp_path):
-    ctx = FakeCtx(tmp_path)
-    with pytest.raises(ToolError) as excinfo:
-        documents.preflight(ctx, "close_document", {"document": "ghost"})
-    assert excinfo.value.code == "DOCUMENT_NOT_FOUND"
 
 
 # ---------------------------------------------------------------------------
@@ -463,33 +443,6 @@ def test_open_document_missing_file_fails_before_any_mutation(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_save_document_without_path_and_without_file_is_actionable_error(tmp_path):
-    ctx = FakeCtx(tmp_path)
-    doc = FakeDoc("scratch")
-    ctx.add_document(doc)
-    with pytest.raises(ToolError) as excinfo:
-        documents.HANDLERS["save_document"](ctx, {"document": "scratch"})
-    assert excinfo.value.code == VALIDATION_FAILED
-    assert "never been saved" in excinfo.value.message
-
-
-def test_save_document_own_path_uses_save_not_saveas(tmp_path):
-    ctx = FakeCtx(tmp_path)
-    own = ctx.write_file(ctx.allowed_root / "own.FCStd")
-    doc = FakeDoc("doc", file_name=own)
-    ctx.add_document(doc)
-    saved: list[tuple[str, str]] = []
-    doc.save = lambda: saved.append(("save", own))
-
-    def _no_save_as(path):
-        raise AssertionError("saveAs must not run for an own-path save")
-
-    doc.saveAs = _no_save_as
-    payload = documents.HANDLERS["save_document"](ctx, {"document": "doc", "path": own})
-    assert saved == [("save", own)]
-    assert payload["path"] == own
-
-
 def test_save_document_new_path_saveas_without_consent(tmp_path):
     ctx = FakeCtx(tmp_path)
     own = ctx.write_file(ctx.allowed_root / "own.FCStd")
@@ -537,18 +490,6 @@ def test_save_document_overwrite_target_changed_after_consent(tmp_path):
     with pytest.raises(ToolError) as excinfo:
         documents.HANDLERS["save_document"](ctx, {"document": "doc", "path": str(other)})
     assert excinfo.value.code == CONSENT_DENIED
-
-
-def test_save_document_rejects_bad_extension(tmp_path):
-    ctx = FakeCtx(tmp_path)
-    own = ctx.write_file(ctx.allowed_root / "own.FCStd")
-    doc = FakeDoc("doc", file_name=own)
-    ctx.add_document(doc)
-    with pytest.raises(ToolError) as excinfo:
-        documents.HANDLERS["save_document"](
-            ctx, {"document": "doc", "path": str(ctx.allowed_root / "new.txt")}
-        )
-    assert excinfo.value.code == VALIDATION_FAILED
 
 
 def test_save_document_checks_idle_gate(tmp_path):

@@ -40,8 +40,8 @@ export(document=<name>, objects=["Final"], format="stl", path="/absolute/path/Fi
 ```
 
 - `stl`, `step`, and `3mf` require a nonempty `objects` list. `fcstd` serializes the entire native document: pass an empty `objects` list and no mesh or bed options, because `linear_deflection`, `angular_deflection`, and `bed_align` are rejected for it.
-- `linear_deflection` and `angular_deflection` apply to `stl` and `3mf` only; `step` accepts the argument but ignores it. Defaults are `0.03` and `0.12`; maximums are `1000.0` and `3.14159`.
-- `bed_align` applies to `stl`, `3mf`, and `step`, and defaults off. It applies one collective translation that moves the minimum Z of all copies to zero.
+- `linear_deflection` and `angular_deflection` apply to `stl` and `3mf` only; they are rejected for `step` and `fcstd`. Defaults are `0.03` and `0.12`; maximums are `1000.0` and `3.14159`.
+- `bed_align` applies to `stl` and `3mf` only, and defaults off. It applies one collective translation that moves the minimum Z of all copies to zero.
 - An absolute path inside an allowed root is required. A path outside `allowed_roots` fails with `PATH_NOT_ALLOWED`.
 - The tool writes to a temporary sibling file, verifies the result by readback, then publishes. Overwriting an existing destination requires consent.
 - `export` may detach as a task under the Tasks extension. Poll with `tasks/get` until terminal.

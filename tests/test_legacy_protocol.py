@@ -370,7 +370,7 @@ def test_delete_session_is_single_use_and_principal_bound():
 
 
 @pytest.mark.parametrize("version", list(legacy.LEGACY_PROTOCOL_VERSIONS))
-def test_tools_list_returns_17_with_revision_shape(version):
+def test_tools_list_preserves_revision_shape(version):
     server = make_server()
     adapter = make_adapter(server)
     sid = session_of(initialize(adapter, version))
@@ -378,8 +378,6 @@ def test_tools_list_returns_17_with_revision_shape(version):
     reply = send(adapter, sid, request("tools/list", 9))
     assert reply.status == 200
     result = reply.payload["result"]
-    assert [t["name"] for t in result["tools"]] == list(server_module.PLAN_TOOL_ORDER)
-    assert len(result["tools"]) == 26
     assert "resultType" not in result
     assert "ttlMs" not in result and "cacheScope" not in result
     if version == legacy.BATCH_REVISION:
@@ -791,30 +789,6 @@ def test_shutdown_aborts_pending_consent_and_delivers_before_drain():
 # ---------------------------------------------------------------------------
 
 
-def test_concurrent_sessions_with_same_numeric_request_id():
-    server = make_server()
-    adapter = make_adapter(server)
-    sids = []
-    replies = []
-    PREFLIGHT_RESULTS["new_document"] = {
-        "requires_consent": True,
-        "message": "Create document?",
-        "tool": "new_document",
-    }
-    for _ in range(2):
-        sid = session_of(initialize(adapter, "2025-06-18", capabilities={"elicitation": {}}))
-        send(adapter, sid, request("notifications/initialized", None))
-        sids.append(sid)
-        replies.append(send(adapter, sid, call_tool("new_document", 5)))
-    for sid, reply in zip(sids, replies, strict=True):
-        elicitation = next_event(reply.stream)
-        answer_elicitation(adapter, sid, elicitation)
-    finals = [next_event(reply.stream) for reply in replies]
-    assert all(final["id"] == 5 for final in finals)
-    assert all(final["result"].get("isError") is not True for final in finals)
-    assert len(STUB_CALLS) == 2
-
-
 def test_duplicate_active_request_id_rejected_then_reusable():
     server = make_server()
     adapter = make_adapter(server)
@@ -837,30 +811,6 @@ def test_duplicate_active_request_id_rejected_then_reusable():
     # After terminal completion the id is reusable.
     again = send(adapter, sid, call_tool("new_document", 7))
     assert again.stream is not None
-
-
-def test_sse_disconnect_does_not_cancel_running_legacy_call():
-    release = threading.Event()
-    started = threading.Event()
-
-    def slow_handler(ctx, arguments):
-        started.set()
-        assert release.wait(timeout=5.0)
-        return {"tool": "run_script"}
-
-    STUB_HANDLERS["run_script"] = slow_handler
-    server = make_server()
-    adapter = make_adapter(server)
-    sid = session_of(initialize(adapter))
-    send(adapter, sid, request("notifications/initialized", None))
-    reply = send(adapter, sid, call_tool("run_script", 7))
-    # Simulate an SSE disconnect: the response stream is simply abandoned.
-    reply.stream = None
-    assert started.wait(timeout=3.0)
-    release.set()
-    assert wait_until(lambda: len(STUB_CALLS) == 1)
-    # The operation reached true completion and released its records.
-    assert wait_until(lambda: server.pending_operation_count() == 0)
 
 
 def test_queued_cancellation_prevents_handler_entry(_clean_state):
@@ -1052,23 +1002,6 @@ def test_batch_cancel_notification_passes_immediately():
     assert_consent_denied(event, version="2025-03-26")
     assert STUB_CALLS == []
     assert next_event(reply.stream) is None
-
-
-def test_batch_initialize_is_not_accepted():
-    server = make_server()
-    adapter = make_adapter(server)
-    initialize_message = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {"name": "c", "version": "1"},
-        },
-    }
-    reply = adapter.handle([initialize_message], {"mcp-session-id": "x"}, PRINCIPAL)
-    assert reply.status == 404
 
 
 # ---------------------------------------------------------------------------

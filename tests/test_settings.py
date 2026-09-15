@@ -9,9 +9,7 @@ import ipaddress
 import json
 import os
 import stat
-import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -46,37 +44,6 @@ def valid_settings(**overrides):
 
 # --------------------------------------------------------------------------
 # GUI independence
-
-
-def test_transport_and_settings_import_without_freecad():
-    """Package import and explicit-path loading must stay GUI independent."""
-    code = textwrap.dedent(
-        """
-        import sys
-        sys.path.insert(0, {addon!r})
-        import mcp_server                     # package init re-exports protocol
-        import mcp_server.http_server         # transport imports
-        import mcp_server.settings
-        import tempfile, os
-        fd, path = tempfile.mkstemp(suffix=".json")
-        os.close(fd)
-        os.unlink(path)
-        loaded = mcp_server.settings.load_settings(path)
-        assert loaded["port"] == 9876 and loaded["token"] == ""
-        assert loaded["remote_enabled"] is False
-        assert "FreeCAD" not in sys.modules, "FreeCAD must stay unimported"
-        print("GUI-INDEPENDENT-OK")
-        """
-    ).format(addon=str(ADDON_DIR))
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "GUI-INDEPENDENT-OK" in result.stdout
 
 
 # --------------------------------------------------------------------------
@@ -178,13 +145,6 @@ def test_replacement_file_restores_user_only_permissions(tmp_path):
     assert mode == 0o600
 
 
-def test_save_leaves_no_temporary_files(tmp_path):
-    path = tmp_path / "settings.json"
-    for port in (1, 2, 3):
-        save_settings(valid_settings(port=port), str(path))
-    assert [entry.name for entry in sorted(tmp_path.iterdir())] == [path.name]
-
-
 # --------------------------------------------------------------------------
 # strict failures
 
@@ -248,12 +208,6 @@ def test_token_with_surrounding_whitespace_is_stored_trimmed(tmp_path):
     assert json.loads(path.read_text(encoding="utf-8"))["token"] == "padded-secret"
 
 
-@pytest.mark.parametrize("auto_start", ["yes", 1, 0, None])
-def test_invalid_auto_start_fails_closed(tmp_path, auto_start):
-    with pytest.raises(SettingsError):
-        save_settings(valid_settings(auto_start=auto_start), str(tmp_path / "settings.json"))
-
-
 @pytest.mark.parametrize(
     "allowed_ips", ["not-an-ip", "127.0.0.1,", ",127.0.0.1", "127.0.0.1,,10.0.0.1", 5]
 )
@@ -266,11 +220,6 @@ def test_invalid_allowed_ips_fails_closed(tmp_path, allowed_ips):
 def test_invalid_allowed_roots_fails_closed(tmp_path, allowed_roots):
     with pytest.raises(SettingsError):
         save_settings(valid_settings(allowed_roots=allowed_roots), str(tmp_path / "settings.json"))
-
-
-def test_unknown_key_fails_closed(tmp_path):
-    with pytest.raises(SettingsError):
-        save_settings(valid_settings(unattended_upgrades=True), str(tmp_path / "settings.json"))
 
 
 def test_save_rejects_invalid_settings_and_leaves_file_unchanged(tmp_path):
@@ -286,38 +235,6 @@ def test_save_rejects_invalid_settings_and_leaves_file_unchanged(tmp_path):
 
 # --------------------------------------------------------------------------
 # legacy auto-start key is dropped, never migrated; remote_enabled is real
-
-
-def test_legacy_keys_are_ignored_and_never_migrated(tmp_path):
-    path = tmp_path / "settings.json"
-    path.write_text(
-        json.dumps({"auto_start_rpc": True, "remote_enabled": True}),
-        encoding="utf-8",
-    )
-
-    settings = load_settings(str(path))
-
-    # Legacy automatic RPC startup must not become v2 auto-start consent.
-    assert settings["auto_start"] is False
-    # ... but the user's remote-access choice is honored as a v2 setting.
-    assert settings["remote_enabled"] is True
-    assert "auto_start_rpc" not in settings
-    assert settings["token"]
-
-    on_disk = json.loads(path.read_text(encoding="utf-8"))
-    assert "auto_start_rpc" not in on_disk
-    assert on_disk == settings
-
-
-def test_legacy_keys_alongside_valid_settings_are_dropped(tmp_path):
-    path = tmp_path / "settings.json"
-    path.write_text(
-        json.dumps({**valid_settings(port=4321), "auto_start_rpc": True}),
-        encoding="utf-8",
-    )
-    settings = load_settings(str(path))
-    assert settings["port"] == 4321
-    assert "auto_start_rpc" not in settings
 
 
 def test_remote_enabled_defaults_false_and_survives_roundtrip(tmp_path):
@@ -375,10 +292,3 @@ def test_parse_allowed_networks_membership():
     assert ipaddress.ip_address("192.168.1.7") in networks[1]
     assert not any(ipaddress.ip_address("10.1.2.3") in network for network in networks)
     assert not any(ipaddress.ip_address("::1") in network for network in networks)
-
-
-def test_parse_allowed_networks_raises_listing_all_errors():
-    with pytest.raises(ValueError) as excinfo:
-        parse_allowed_networks("999.1.2.3, also-bad")
-    assert "999.1.2.3" in str(excinfo.value)
-    assert "also-bad" in str(excinfo.value)

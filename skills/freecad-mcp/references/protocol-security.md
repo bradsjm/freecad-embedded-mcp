@@ -87,7 +87,7 @@ The store allows 32 active tasks. It retains at most 1024 records for one hour a
 
 Use `resources/list` to discover `freecad://documents`. Use `resources/read` to get the live document inventory.
 
-Use `subscriptions/listen` for acknowledged events, document-resource changes, and same-principal task updates. The server does not honor list-changed boolean filters.
+Use `subscriptions/listen` for acknowledged events, document-resource changes, same-principal task updates, and tool-list changes (`"toolsListChanged": true`). Toggling `allow_scripts` publishes `notifications/tools/list_changed` to streams that requested the filter. Prompt-list and resource-list changed filters are not honored.
 
 The server allows 32 active subscriptions. Each queue allows 256 events and 4 MiB. One event can be at most 1 MiB.
 

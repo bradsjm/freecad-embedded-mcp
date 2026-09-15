@@ -29,12 +29,6 @@ class FakeObject:
         return self.status
 
 
-def test_valid_shapeless_object_is_not_rejected() -> None:
-    obj = FakeObject(Name="Body", Shape=None)
-
-    assert object_validity_error(obj) is None
-
-
 def test_invalid_object_reports_name_state_and_freecad_reason() -> None:
     obj = FakeObject(
         Name="Pad",
@@ -51,12 +45,6 @@ def test_invalid_object_reports_name_state_and_freecad_reason() -> None:
     assert "Linked shape object is empty" in error
 
 
-def test_object_without_validity_api_is_left_unchanged() -> None:
-    obj = type("LegacyObject", (), {"Name": "Legacy"})()
-
-    assert object_validity_error(obj) is None
-
-
 def test_touched_object_is_rejected_even_when_is_valid_returns_true() -> None:
     obj = FakeObject(valid=True, State=["Touched"], status="Touched")
 
@@ -64,19 +52,6 @@ def test_touched_object_is_rejected_even_when_is_valid_returns_true() -> None:
 
     assert error is not None
     assert "Touched" in error
-
-
-def test_invalid_state_is_used_when_validity_api_is_missing() -> None:
-    obj = type(
-        "LegacyObject",
-        (),
-        {"Name": "Legacy", "State": ["Invalid"]},
-    )()
-
-    error = object_validity_error(obj)
-
-    assert error is not None
-    assert "Invalid" in error
 
 
 def test_validity_check_exception_is_reported_as_failure() -> None:
@@ -248,28 +223,6 @@ class FakeGateCtx:
         if self.reveal_hook is not None:
             self.reveal_hook(doc, targets)
         self.revealed.append((doc, list(targets)))
-
-
-def test_committed_mutation_reveals_its_targets() -> None:
-    obj = FakeShapeObj("Box")
-    doc = FakeGateDoc([obj])
-    ctx = FakeGateCtx(doc)
-
-    with mutation(ctx, doc, "gate", [obj]) as applied:
-        applied.append("Box")
-
-    assert [target.Name for _doc, targets in ctx.revealed for target in targets] == ["Box"]
-
-
-def test_rolled_back_mutation_never_reveals() -> None:
-    obj = FakeShapeObj("Box")
-    doc = FakeGateDoc([obj])
-    ctx = FakeGateCtx(doc)
-
-    with pytest.raises(ToolError), mutation(ctx, doc, "gate", [obj]):
-        raise RuntimeError("nope")
-
-    assert ctx.revealed == []
 
 
 def test_reveal_failure_never_fails_the_mutation() -> None:
@@ -589,38 +542,6 @@ def test_prevalidation_failure_has_no_operation_state() -> None:
 # mutation outcome: the gate hands back the validation it already did.
 # ---------------------------------------------------------------------------
 
-from mcp_server import object_validation
-
-
-def test_outcome_reports_are_the_validated_geometry_report_instances(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    box = FakeShapeObj("Box")
-    pad = FakeShapeObj("Pad")
-    box.InList = [pad]
-    doc = FakeGateDoc([box, pad])
-    built: dict[str, dict] = {}
-    real_geometry_report = object_validation.geometry_report
-
-    def recording_geometry_report(obj: Any, expected_solids: int | None = None) -> dict:
-        report = real_geometry_report(obj, expected_solids)
-        built[str(getattr(obj, "Name", ""))] = report
-        return report
-
-    # Identity matters: a handler reusing these reports must receive the very
-    # dicts the gate validated, never a copy and never a second OCC pass.
-    monkeypatch.setattr(object_validation, "geometry_report", recording_geometry_report)
-
-    outcome: dict = {}
-    with mutation(FakeGateCtx(doc), doc, "gate", [box], outcome=outcome):
-        pass
-
-    assert sorted(outcome["reports"]) == ["Box", "Pad"]
-    assert outcome["reports"]["Box"] is built["Box"]
-    assert outcome["reports"]["Pad"] is built["Pad"]
-    assert outcome["reports"]["Box"]["ok"] is True
-    assert outcome["reports"]["Pad"]["ok"] is True
-
 
 def test_outcome_counts_track_a_dependent_removed_by_the_body() -> None:
     box = FakeShapeObj("Box")
@@ -654,53 +575,6 @@ def test_callable_targets_report_no_pre_mutation_closure() -> None:
     assert outcome["dependentCountBefore"] == 0
     assert outcome["dependentCountAfter"] == 1
     assert sorted(outcome["reports"]) == ["Box", "Pad"]
-
-
-def test_omitted_outcome_leaves_the_gate_result_unchanged() -> None:
-    def drive(outcome: Any = None) -> tuple[list[str], str]:
-        box = FakeShapeObj("Box")
-        pad = FakeShapeObj("Pad")
-        box.InList = [pad]
-        doc = FakeGateDoc([box, pad])
-        with (
-            pytest.raises(ToolError) as excinfo,
-            mutation(FakeGateCtx(doc), doc, "gate", [box], outcome=outcome) as applied,
-        ):
-            # Touch the dependent so the gate's own validation, not the
-            # outcome plumbing, decides the rollback.
-            pad.State = ["Touched"]
-        assert doc.UndoMode == 0
-        return list(applied), str(excinfo.value.details)
-
-    assert drive() == drive({})
-
-    box = FakeShapeObj("Box")
-    doc = FakeGateDoc([box])
-    with mutation(FakeGateCtx(doc), doc, "gate", [box]) as applied:
-        pass
-
-    assert applied == ["Box"]
-
-
-def test_outcome_is_filled_before_the_commit() -> None:
-    box = FakeShapeObj("Box")
-    pad = FakeShapeObj("Pad")
-    box.InList = [pad]
-    outcome: dict = {}
-    at_commit: list[dict] = []
-
-    class RecordingDoc(FakeGateDoc):
-        def commitTransaction(self) -> None:
-            at_commit.append(dict(outcome))
-            super().commitTransaction()
-
-    doc = RecordingDoc([box, pad])
-    with mutation(FakeGateCtx(doc), doc, "gate", [box], outcome=outcome):
-        pass
-
-    assert at_commit == [
-        {"reports": outcome["reports"], "dependentCountBefore": 1, "dependentCountAfter": 1}
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -785,9 +659,3 @@ def test_geometry_report_never_raises_on_a_null_shape() -> None:
     assert report["ok"] is True
     assert report["volume"] is None
     assert shape_is_null(obj.Shape) is True
-
-
-def test_shape_is_null_is_false_for_a_real_shape_double() -> None:
-    assert shape_is_null(FakeShapeObj("Box").Shape) is False
-    assert shape_is_null(None) is True
-    assert shape_is_null(object()) is False

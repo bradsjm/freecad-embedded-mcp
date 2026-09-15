@@ -1,6 +1,6 @@
 """Server orchestration for the embedded MCP v2 add-on.
 
-Owns startup/shutdown, the exact 26-tool registry, request dispatch
+Owns startup/shutdown, the registered tool registry, request dispatch
 (discovery, tools, tasks, subscriptions and document resources), the
 document observer with per-document generations, the shared consent
 preflight choreography and the one execution lifecycle for blocking calls
@@ -160,36 +160,6 @@ from mcp_server.tools.view import (
     TOOL_DEFINITIONS as _VIEW_DEFS,
 )
 
-#: The 26 registered tools, in the exact plan section 5 order.
-PLAN_TOOL_ORDER = (
-    "discover_capabilities",
-    "inspect_documents",
-    "new_document",
-    "open_document",
-    "import_model",
-    "save_document",
-    "close_document",
-    "reload_document",
-    "inspect_objects",
-    "create_object",
-    "create_objects",
-    "edit_object",
-    "edit_objects",
-    "delete_object",
-    "validate_geometry",
-    "measure",
-    "inspect_topology",
-    "edit_parameters",
-    "inspect_sketch",
-    "edit_sketch",
-    "create_feature",
-    "edit_feature",
-    "export",
-    "capture_view",
-    "run_fem",
-    "run_script",
-)
-
 _READ_ONLY_TOOLS = frozenset(
     {
         "discover_capabilities",
@@ -231,8 +201,6 @@ _RESTART_SETTINGS_KEYS = ("port", "remote_enabled", "allowed_ips", "token")
 def _tool_annotations(name: str) -> dict[str, bool]:
     """Return the fixed advisory policy for one registered tool."""
 
-    if name not in PLAN_TOOL_ORDER:
-        raise RuntimeError(f"tool {name} has no annotation policy")
     read_only = name in _READ_ONLY_TOOLS
     return {
         "readOnlyHint": read_only,
@@ -743,11 +711,11 @@ class Server:
         self._register_tools()
 
     # ------------------------------------------------------------------
-    # Tool registration (exact plan order, finite schemas, no silent skips)
+    # Tool registration (finite schemas and handler coverage)
     # ------------------------------------------------------------------
 
     def _register_tools(self) -> None:
-        """Consume every tool module and enforce the exact 26-tool PLAN_TOOL_ORDER."""
+        """Consume every tool module and validate each registered definition."""
         modules = (
             (_DOCUMENT_DEFS, _DOCUMENT_HANDLERS, _documents_preflight),
             (_OBJECTS_DEFS, _OBJECTS_HANDLERS, None),
@@ -777,13 +745,7 @@ class Server:
             {"inspect_documents": self._handle_inspect_documents},
             None,
         )
-        missing = [n for n in PLAN_TOOL_ORDER if n not in self._definitions]
-        if missing:
-            raise RuntimeError(f"tool registration incomplete; missing: {missing}")
-        extra = [n for n in self._definitions if n not in PLAN_TOOL_ORDER]
-        if extra:
-            raise RuntimeError(f"unexpected tools registered: {extra}")
-        self._tool_defs = [self._definitions[name] for name in PLAN_TOOL_ORDER]
+        self._tool_defs = list(self._definitions.values())
 
     def _tool_enabled(self, name: str) -> bool:
         """Return whether one registered tool is exposed on the wire.
@@ -2639,7 +2601,7 @@ class Server:
     def _enabled_tool_names(self) -> frozenset[str]:
         """Return the tools currently exposed on the wire."""
 
-        return frozenset(name for name in PLAN_TOOL_ORDER if self._tool_enabled(name))
+        return frozenset(name for name in self._definitions if self._tool_enabled(name))
 
     def apply_settings(self, new_settings: Mapping[str, Any]) -> dict:
         """Adopt saved settings on a running server without a restart.

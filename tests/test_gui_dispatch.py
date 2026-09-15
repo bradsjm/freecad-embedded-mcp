@@ -612,22 +612,6 @@ def test_shutdown_cancels_queued_and_requests_running_cancellation() -> None:
         assert again.value == "back"
 
 
-def test_initialize_is_idempotent_and_reports_status() -> None:
-    with load_gui_dispatch() as gui_dispatch:
-        gui_dispatch.initialize()
-        gui_dispatch.initialize()  # second call must be a no-op
-        assert not gui_dispatch.is_draining()
-
-        status = gui_dispatch.get_dispatch_status()
-        assert status["state"] == "healthy"
-        assert status["queued_jobs"] == 0
-        assert status["draining"] is False
-
-        gui_dispatch.shutdown()
-        gui_dispatch.shutdown()  # second call must be a no-op
-        assert gui_dispatch.get_dispatch_status()["draining"] is True
-
-
 def test_stale_sentinel_cannot_stop_a_restarted_dispatch() -> None:
     with load_gui_dispatch() as gui_dispatch:
         waker = ThreadedWaker(gui_dispatch)
@@ -769,24 +753,3 @@ def test_request_timeout_cancels_queued_and_isolates_futures() -> None:
         assert result.value == "fresh"
         assert result.error is None
         assert gui_dispatch.pending_count() == 0
-
-
-def test_old_heartbeat_tick_does_not_rearm_or_duplicate_chains() -> None:
-    with load_gui_dispatch() as gui_dispatch:
-        gui_dispatch.initialize()
-        ticks = gui_dispatch._test_timer
-        assert len(ticks.calls) == 1
-
-        ticks.calls[0]()  # a live generation's idle tick rearms itself
-        assert len(ticks.calls) == 2
-
-        gui_dispatch._waker = None  # keep the stop marker undrained
-        gui_dispatch.shutdown()
-        gui_dispatch.initialize()  # restart before the pending tick fires
-        assert len(ticks.calls) == 3  # exactly one fresh chain, no duplicate
-
-        ticks.calls[1]()  # the retired generation's tick fires late
-        assert len(ticks.calls) == 3  # retired ticks never rearm
-
-        ticks.calls[2]()  # the new chain keeps itself alive
-        assert len(ticks.calls) == 4

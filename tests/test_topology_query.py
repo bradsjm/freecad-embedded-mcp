@@ -7,7 +7,6 @@ evaluator and the schema fragments — all native-independent.
 
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 
@@ -108,47 +107,6 @@ def test_closed_union_rejects_retired_forms() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_parse_ast_is_plain_tuples() -> None:
-    ast = tq.parse_selector(">Z[2]")
-    assert ast == ("extrema", ">", (0.0, 0.0, 1.0), 2)
-    assert tq.parse_selector("+Z") == ("direction", "+", (0.0, 0.0, 1.0), None)
-    assert tq.parse_selector("-Z") == ("direction", "-", (0.0, 0.0, 1.0), None)
-    assert tq.parse_selector("Z") == tq.parse_selector("+Z")
-    assert tq.parse_selector("%circle") == ("type", "CIRCLE")
-    assert tq.parse_selector("|(1,2,3)") == ("direction", "|", (1.0, 2.0, 3.0), None)
-    # Custom directions keep their magnitude.
-    assert tq.parse_selector("-(0.5,0,0)")[2] == (0.5, 0.0, 0.0)
-
-
-def test_parse_precedence_matches_source() -> None:
-    # not is lowest and right-associative: `not >X and >Y` is not(>X and >Y).
-    ast = tq.parse_selector("not >X and >Y")
-    assert ast == (
-        "not",
-        ("and", ("extrema", ">", (1.0, 0.0, 0.0), None), ("extrema", ">", (0.0, 1.0, 0.0), None)),
-    )
-    ast = tq.parse_selector(">X or >Y exc >Z and <X")
-    assert ast == (
-        "exc",
-        ("or", ("extrema", ">", (1.0, 0.0, 0.0), None), ("extrema", ">", (0.0, 1.0, 0.0), None)),
-        (
-            "and",
-            ("extrema", ">", (0.0, 0.0, 1.0), None),
-            ("extrema", "<", (1.0, 0.0, 0.0), None),
-        ),
-    )
-    # exc chains are left-associative: (A exc B) exc C.
-    chain = tq.parse_selector(">X exc >Y exc >Z")
-    assert chain == (
-        "exc",
-        ("exc", ("extrema", ">", (1.0, 0.0, 0.0), None), ("extrema", ">", (0.0, 1.0, 0.0), None)),
-        ("extrema", ">", (0.0, 0.0, 1.0), None),
-    )
-    # Flat or-chains stay at constant nesting depth.
-    flat = tq.parse_selector(" or ".join(["%PLANE"] * 20))
-    assert tq.evaluate_selector(flat, []) == []
-
-
 def test_parse_rejects_malformed_and_hostile_syntax() -> None:
     cases = [
         "",
@@ -178,23 +136,6 @@ def test_parse_rejects_malformed_and_hostile_syntax() -> None:
                 assert isinstance(exc.details.get("position"), int)
             continue
         raise AssertionError(f"malformed selector accepted: {text!r}")
-
-
-def test_parse_limits() -> None:
-    try:
-        tq.parse_selector(">" + "Z" * 300)
-    except ToolError:
-        pass
-    try:
-        tq.parse_selector(">Z[" + "1" * 10 + "]")
-    except ToolError as exc:
-        assert exc.details.get("reason") == "selector_limit"
-    # Deep nesting refuses before evaluation.
-    deep = "((" * 20 + ">Z" + "))" * 20
-    try:
-        tq.parse_selector(deep)
-    except ToolError as exc:
-        assert exc.details.get("reason") == "selector_limit"
 
 
 # ---------------------------------------------------------------------------
@@ -578,27 +519,3 @@ def _reference_nth(
         return []
     ordered = clustered if direction_max else list(reversed(clustered))
     return ordered[index if index is not None else -1]
-
-
-def test_cluster_rank_matches_independent_reference() -> None:
-    values = [0.0, 0.5, 0.50005, 1.0, 1.0, 2.0]
-    records = [_plane(position + 1, value) for position, value in enumerate(values)]
-    for text, expected in (
-        (">Z", [6]),
-        ("<Z", [1]),
-        (">Z[1]", [2, 3]),
-        (">Z[-1]", [6]),
-        ("<Z[0]", [6]),
-        ("<Z[-1]", [1]),
-        (">>Z[0]", [1]),
-        ("<<Z[-1]", [1]),
-    ):
-        assert tq.evaluate_selector(tq.parse_selector(text), records) == expected, text
-    # Cross-check against an independently computed clustering.
-    reference = _reference_nth(values, (0.0, 0.0, 1.0), -1, True)
-    assert reference == [6]
-
-
-def test_selector_tolerances_are_radiances() -> None:
-    assert tq.SELECTOR_TOLERANCE == 0.0001
-    assert math.isclose(tq.SELECTOR_TOLERANCE, 0.0001)

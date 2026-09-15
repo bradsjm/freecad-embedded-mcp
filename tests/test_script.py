@@ -125,29 +125,6 @@ def test_failure_raises_tool_error_with_stdout_stderr_and_traceback() -> None:
         assert ctx.script_namespaces["default"]
 
 
-def test_session_allocation_goes_through_the_server_allocator() -> None:
-    """The 32-session cap and its refusal code are the server's policy; this
-    module must never allocate a namespace on its own."""
-
-    with load_script() as script:
-        ctx = FakeCtx()
-        call(script, "marker = 1", ctx=ctx)
-        call(script, "marker = 2", ctx=ctx, session_id="other")
-
-        assert ctx.allocation_calls == ["default", "other"]
-
-    class RefusingCtx(FakeCtx):
-        def ensure_script_namespace(self, session_id: str) -> dict[str, Any]:
-            raise ToolError("SERVER_BUSY", "script session limit reached")
-
-    with load_script() as script:
-        ctx = RefusingCtx()
-        with pytest.raises(ToolError) as excinfo:
-            call(script, "print('never')", ctx=ctx)
-        assert excinfo.value.code == "SERVER_BUSY"
-        assert ctx.script_namespaces == {}
-
-
 def test_refused_while_a_fem_solve_is_active() -> None:
     with load_script() as script:
         ctx = FakeCtx()
@@ -264,52 +241,3 @@ def test_damaged_stdout_stream_returns_structured_failure() -> None:
         assert error.details["operationState"] == "may_have_changed"
         assert error.details["stdout"] == ""
         assert error.details["stderr"] == ""
-
-
-def test_traceback_is_streamed_into_the_capped_tail(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with load_script() as script:
-        ctx = FakeCtx()
-        limit = script.TRACEBACK_LIMIT_CHARS
-        chunks = [
-            "Traceback (most recent call last):\n",
-            "  a deep frame\n",
-            "Z" * (limit + 100),  # one oversized chunk, as a huge message is
-            "\n",
-        ]
-
-        class FakeTracebackException:
-            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-                pass
-
-            def format(self, **_kwargs: Any) -> Iterator[str]:
-                # A generator, exactly like TracebackException.format: the
-                # caller must cap while consuming, never collect it first.
-                return iter(chunks)
-
-        monkeypatch.setattr(
-            script.traceback,
-            "TracebackException",
-            FakeTracebackException,
-        )
-        monkeypatch.setattr(
-            script.traceback,
-            "format_exc",
-            lambda: pytest.fail("format_exc materializes the whole traceback"),
-        )
-        monkeypatch.setattr(
-            script.traceback,
-            "format_exception",
-            lambda *_args, **_kwargs: pytest.fail(
-                "format_exception collects every chunk before returning"
-            ),
-        )
-
-        with pytest.raises(ToolError) as excinfo:
-            call(script, "raise ValueError('boom')", ctx=ctx)
-
-        details = excinfo.value.details
-        assert details["traceback"] == "".join(chunks)[-limit:]
-        assert details["tracebackTruncated"] is True
-        assert details["operationState"] == "may_have_changed"

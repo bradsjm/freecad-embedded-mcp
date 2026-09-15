@@ -43,12 +43,12 @@ The [Sketcher scripting](https://wiki.freecad.org/Sketcher_scripting) page defin
 `edit_sketch` applies one batch inside one transaction. A failure rolls back the whole batch and leaves the document unchanged.
 
 - Every operation accepts at most 64 entries.
-- `deleteGeometry` and `deleteConstraints` run first, in descending index order. A multi-delete therefore uses pre-delete indices.
+- Deletes run first, in descending index order within each kind, so a delete list uses pre-delete indices. `deleteGeometry` and `deleteConstraints` are mutually exclusive in one batch: delete the geometry first, then delete the surviving constraints from a fresh `inspect_sketch`.
 - `addGeometry` then appends in list order. The response returns the new indices in `addedGeometry`.
 - `addConstraints` then appends in list order. The response returns the new indices in `addedConstraints`.
 - `setDatums` and `setExpressions` indices refer to the final constraint state after the deletes and the additions. One index cannot receive both a datum and an expression in the same batch.
 - `deleteGeometry` cannot be combined with `setDatums` or `setExpressions` in one batch: deleting geometry removes the constraints attached to it and renumbers the survivors. Delete first, then edit the surviving constraints from a fresh `inspect_sketch`.
-- A constraint that references geometry added in the same batch must use the index that the new geometry will receive. Add the geometry in one batch, read `addedGeometry`, then add the constraints in the next batch. This keeps the indices unambiguous.
+- A constraint can reference geometry added in the same batch: give the `addGeometry` entry an `id` (unique per request, at most 64 characters) and reference it from any geometry or axis slot with `{"geometry": "<id>"}`; the server resolves it to the planned index before execution. Alternatively, add the geometry in one batch, read `addedGeometry`, then add the constraints in the next batch.
 - `edit_sketch` refuses an object that is not a `Sketcher::SketchObject`, and refuses an empty batch.
 
 ## Geometry entries
@@ -94,7 +94,7 @@ A sketch whose geometry is all construction has a null shape: the batch succeeds
 
 ## Constraint entries
 
-Send `{"type": ..., "arguments": [...], "datum": ...}`. `datum` is optional except where the table marks it required. The table lists the argument forms the server enforces. Every form was accepted by the native constructor on FreeCAD 1.1.3, and the acceptance is recorded in `tests/native_contract.json`.
+Send `{"type": ..., "arguments": [...], "datum": ...}`. Only `Angle`, `Distance`, `DistanceX`, `DistanceY`, `Radius`, and `Diameter` carry a datum: it is required where the table marks it required, and forbidden for every other recorded form. Either misuse is refused with `reason: unrecorded_constraint_shape` carrying the `datumRequired` or `datumForbidden` flag. The table lists the argument forms the server enforces. Every form was accepted by the native constructor on FreeCAD 1.1.3, and the acceptance is recorded in `tests/native_contract.json`.
 
 | `type` | Accepted `arguments` | `datum` |
 |---|---|---|
@@ -104,9 +104,9 @@ Send `{"type": ..., "arguments": [...], "datum": ...}`. `datum` is optional exce
 | `Tangent` | `[geoA, geoB]`, or the endpoint-specific `[geoA, posA, geoB, posB]` — `[geoA, 2, geoB, 1]` joins `geoA`'s end point to `geoB`'s start point | no |
 | `Parallel`, `Perpendicular`, `Equal` | `[geoA, geoB]` | no |
 | `Symmetric` | `[geoA, posA, geoB, posB, axisGeo]` or `[geoA, posA, geoB, posB, geoA2, posA2]` | no |
-| `DistanceX`, `DistanceY` | `[geoA, posA, geoB, posB]`, or `[geo, pos]` for one edge | required |
+| `DistanceX`, `DistanceY` | `[geoA, posA, geoB, posB]`, or `[geo, pos]` for one edge | required for the four-token form; forbidden for `[geo, pos]` |
 | `Distance` | `[geo, pos]`, `[geo, posA, posB]`, or `[geoA, posA, geoB, posB]` | required |
-| `Radius`, `Diameter` | `[geo]` | required |
+| `Radius`, `Diameter` | `[geo]`, or the value form `[geo, value]` | required for `[geo]`; forbidden for `[geo, value]` |
 | `Angle` | `[geoA, geoB]`, or `[geoA, geoB, geo, pos]` | required |
 
 Geometry indices must be `>= 0`, axis references must be `-1` or `-2`, and point positions must be `0`, `1`, or `2`. A point position outside that domain is the recorded crash input for the native constructor; the server rejects it with `VALIDATION_FAILED` before any native call.
@@ -119,7 +119,7 @@ Datum strings carry a unit: `"40 mm"`, `"30 mm"`, `"90 deg"`. The value lands in
 
 ## setDatums
 
-The server converts each datum string to a native `FreeCAD.Units.Quantity` before it calls `setDatum`. A datum that is not a valid quantity fails with `VALIDATION_FAILED` before the transaction opens.
+The server checks each datum string's shape before the batch and converts it to a native `FreeCAD.Units.Quantity` inside the mutation, before it calls `setDatum`. A datum that passes the shape check but is not a valid quantity (for example `"10 zz"`) fails with `VALIDATION_FAILED` inside the transaction, and the batch rolls back.
 
 ## setExpressions
 
@@ -170,7 +170,7 @@ Pad it with the `pad` payload in [Common recipes](recipes.md). The profile solve
 
 1. Read `inspect_sketch` again. Confirm the returned `addedGeometry` and `addedConstraints` indices, the geometry kinds, and the `datum` values.
 2. Confirm the profile closes. The wires must come from coincident endpoints, not from near-identical coordinates.
-3. Read the reported `degreesOfFreedom` and `fullyConstrained` fields. `degreesOfFreedom == 0` means fully constrained. Conflicting constraints can produce a negative `DoF` and state `['Touched', 'Invalid']`, because the native `addConstraint` accepts a conflicting entry (verified: two `DistanceX` datums of `10 mm` and `20 mm` produced solve status `-3`). `edit_sketch` rejects a sketch left in an invalid state; read `state`, `statusText`, and `solver.solverStatus` from either sketch response, and read [failure recovery](troubleshooting.md) to repair it.
+3. Read the reported `degreesOfFreedom` and `fullyConstrained` fields. `degreesOfFreedom == 0` means fully constrained, and the field is never negative: the server clamps a negative native value to `null`. Conflicting constraints can drive the native DoF negative and the state to `['Touched', 'Invalid']`, because the native `addConstraint` accepts a conflicting entry (verified: two `DistanceX` datums of `10 mm` and `20 mm` produced solve status `-3`). `edit_sketch` rejects a sketch left in an invalid state; read `state`, `statusText`, and `solver.solverStatus` from either sketch response, and read [failure recovery](troubleshooting.md) to repair it.
 4. Validate the solid after the profile becomes a feature. See [Geometry validation](validation.md).
 
 ## Scripted sketches

@@ -81,7 +81,7 @@ The result schema reports the loaded VTK multiblock summary, not pre-chewed scal
 
 - `pipeline` (the `Fem::FemPostPipeline` in the document), `analysis`, `solver`, `working_dir`, `vtk_path` (a `.vtm` file), and `vtu_files`.
 - `blocks`: per-block `points`, `cells`, and finite min/max ranges for each scalar and vector-magnitude array.
-- `aggregates`: block count and point/cell sums over the returned blocks (not deduplicated nodes).
+- `aggregates`: block count and point/cell sums over every traversed block, not only the returned ones (not deduplicated nodes).
 - `cancellation_requested`.
 
 Units are solver/report units, not a safety certification. Convert named array ranges into design decisions yourself; do not assume MPa or mm without reading the array names.

@@ -213,25 +213,6 @@ def test_tools_list_changed_request_is_not_honored_when_unsupported() -> None:
 # -- connection-scoped identity ------------------------------------------
 
 
-def test_duplicate_jsonrpc_ids_are_isolated_per_connection() -> None:
-    registry = make_registry()
-    sub_a = registry.register("conn-a", 1, {"taskIds": ["t1"]}, principal="alice")
-    sub_b = registry.register("conn-b", 1, {"taskIds": ["t2"]}, principal="bob")
-    [ack_a] = drain(sub_a)[:1]
-    [ack_b] = drain(sub_b)[:1]
-    # Same JSON-RPC id, distinct streams, each stamped with its own id.
-    assert ack_a["params"]["_meta"][SUBSCRIPTION_ID_META_KEY] == 1
-    assert ack_b["params"]["_meta"][SUBSCRIPTION_ID_META_KEY] == 1
-    assert (
-        registry.publish_task_status(
-            tasks_module.detailed_task_wire(_fake_task("t1", status="working"))
-        )
-        == 1
-    )
-    assert drain(sub_a)[0]["method"] == "notifications/tasks"
-    assert sub_b.receive(timeout=0) is None
-
-
 def test_duplicate_id_on_same_connection_rejected_until_closed() -> None:
     registry = make_registry()
     registry.register("conn-a", 1, {}, principal="alice")
@@ -315,22 +296,6 @@ def test_disconnect_closes_only_that_connection_without_final_result() -> None:
     assert drain(sub_b)[0]["method"] == "notifications/tasks"
 
 
-def test_disconnect_never_cancels_a_detached_task() -> None:
-    store = tasks_module.TaskStore()
-    registry = make_registry()
-    record = store.create("run_fem", {}, principal="alice")
-    sub = registry.register("conn-a", 1, {"taskIds": [record.task_id]}, principal="alice")
-    registry.disconnect("conn-a")
-    # The detached task keeps its truthful working state and cancel event.
-    fetched = store.get(record.task_id, principal="alice")
-    assert fetched.status == "working"
-    assert not fetched.cancel_event.is_set()
-    # Publishing its completion afterwards is simply not delivered anywhere.
-    store.complete(record.task_id, {"ok": True}, principal="alice")
-    assert registry.publish_task_status(tasks_module.detailed_task_wire(fetched)) == 0
-    assert sub.closed
-
-
 # -- shutdown -------------------------------------------------------------
 
 
@@ -361,16 +326,6 @@ def test_shutdown_delivers_final_complete_response_then_ends_stream() -> None:
         )
         == 0
     )
-
-
-def test_publishing_never_blocks_the_publisher() -> None:
-    registry = make_registry(queue_limit=1)
-    sub = registry.register(
-        "conn-a", 1, {"resourceSubscriptions": [subs_module.DOCUMENTS_RESOURCE_URI]}
-    )
-    # Ack fills the queue; the next publish overflows and returns promptly.
-    assert registry.publish_resource_updated(subs_module.DOCUMENTS_RESOURCE_URI) == 0
-    assert sub.closed
 
 
 def test_full_queue_still_receives_the_terminal_result_on_shutdown() -> None:

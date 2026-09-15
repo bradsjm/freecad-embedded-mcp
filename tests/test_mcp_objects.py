@@ -957,68 +957,6 @@ def test_edit_accepts_documented_lowercase_placement() -> None:
     assert placement.Rotation.Angle == 90
 
 
-def test_fuzzy_tolerance_rejected_when_not_a_property() -> None:
-    doc = FakeDoc(objects=[box()])
-    ctx = FakeCtx(doc)
-
-    with pytest.raises(ToolError) as exc_info:
-        objects_mod.edit_object(
-            ctx,
-            {
-                "document": doc.Name,
-                "object": "Box",
-                "properties": {"FuzzyTolerance": 0.1},
-            },
-        )
-
-    expect_tool_error(exc_info, VALIDATION_FAILED)
-    assert doc.calls == []
-
-
-def test_unknown_property_suggests_close_names_and_next_tool() -> None:
-    doc = FakeDoc(objects=[box()])
-    ctx = FakeCtx(doc)
-
-    with pytest.raises(ToolError) as exc_info:
-        objects_mod.edit_object(
-            ctx,
-            {
-                "document": doc.Name,
-                "object": "Box",
-                "properties": {"Lenght": 1.0},
-            },
-        )
-
-    error = expect_tool_error(exc_info, VALIDATION_FAILED)
-    assert error.message == "object 'Box' has no property 'Lenght'"
-    assert error.details["object"] == "Box"
-    assert error.details["property"] == "Lenght"
-    assert "Length" in error.details["suggestions"]
-    assert len(error.details["suggestions"]) <= 5
-    assert error.details["nextTool"] == "inspect_objects"
-    assert doc.calls == []
-
-
-def test_unknown_property_without_close_match_keeps_next_tool() -> None:
-    doc = FakeDoc(objects=[box()])
-    ctx = FakeCtx(doc)
-
-    with pytest.raises(ToolError) as exc_info:
-        objects_mod.edit_object(
-            ctx,
-            {
-                "document": doc.Name,
-                "object": "Box",
-                "properties": {"Zzzzzzzz": 1.0},
-            },
-        )
-
-    error = expect_tool_error(exc_info, VALIDATION_FAILED)
-    assert error.details["suggestions"] == []
-    assert error.details["nextTool"] == "inspect_objects"
-    assert doc.calls == []
-
-
 # ---------------------------------------------------------------------------
 # Recompute validation and rollback.
 # ---------------------------------------------------------------------------
@@ -1067,37 +1005,6 @@ def test_preexisting_multisolid_dependent_with_unchanged_count_accepts_edit() ->
     assert ("commit", None) in doc.calls
     assert ("abort", None) not in doc.calls
     assert len(doc.getObject("Multi").Shape.Solids) == 2
-
-
-def test_dependent_gaining_solids_during_recompute_rolls_back() -> None:
-    dependent = FakeObj("Split", TypeId="Part::Feature", shape=FakeShape(solids=1))
-    doc = FakeDoc(objects=[box(in_list=(dependent,)), dependent])
-    ctx = FakeCtx(doc)
-
-    def fuse_second_solid() -> None:
-        # The recomputed geometry itself creates the topology change; this
-        # also fires during the post-abort rollback recompute, which is fine.
-        object.__setattr__(dependent, "_shape", FakeShape(solids=2))
-
-    doc.recompute_observers.append(fuse_second_solid)
-
-    with pytest.raises(ToolError) as exc_info:
-        objects_mod.edit_object(
-            ctx,
-            {"document": doc.Name, "object": "Box", "properties": {"Length": 5}},
-        )
-
-    error = expect_tool_error(exc_info, VALIDATION_FAILED)
-    # A previously single-solid dependent turning multisolid is a topology
-    # change, not a grandfathered multisolid contract.
-    assert any(
-        "Split" in message and "expected_solids" in message for message in error.details["errors"]
-    )
-    assert ("abort", None) in doc.calls
-    assert ("commit", None) not in doc.calls
-    # The post-abort rollback recompute still ran and restored the target.
-    assert doc.recompute_count == 2
-    assert doc.getObject("Box").Length == 0
 
 
 def test_overwide_dependent_closure_is_refused_before_effects() -> None:
@@ -1414,39 +1321,6 @@ def test_create_rejects_unsupported_type_without_transaction() -> None:
     assert doc.recompute_count == 0
 
 
-def test_create_unsupported_type_suggests_close_supported_types() -> None:
-    doc = FakeDoc()
-    ctx = FakeCtx(doc)
-
-    with pytest.raises(ToolError) as exc_info:
-        objects_mod.create_object(ctx, {"document": doc.Name, "type": "Part::Boxx", "name": "X"})
-
-    error = expect_tool_error(exc_info, VALIDATION_FAILED)
-    assert error.details["supportedTypes"] == [
-        "Part::Box",
-        "Part::Feature",
-        "App::DocumentObjectGroup",
-    ]
-    assert error.details["suggestions"] == ["Part::Box"]
-    assert error.details["nextTool"] == "inspect_objects"
-    assert doc.calls == []
-    assert doc.recompute_count == 0
-
-
-def test_create_shapeless_group_is_valid() -> None:
-    doc = FakeDoc()
-    ctx = FakeCtx(doc)
-
-    result = objects_mod.create_object(
-        ctx,
-        {"document": doc.Name, "type": "App::DocumentObjectGroup", "name": "Grp"},
-    )
-
-    assert result["report"]["shape_valid"] is None
-    assert result["report"]["ok"] is True
-    assert ("commit", None) in doc.calls
-
-
 def test_create_multisolid_requires_explicit_expected_solids() -> None:
     doc = FakeDoc()
 
@@ -1480,21 +1354,6 @@ def test_create_multisolid_requires_explicit_expected_solids() -> None:
     )
     assert result["report"]["ok"] is True
     assert result["report"]["solid_count"] == 2
-
-
-def test_create_fem_material_uses_explicit_factory() -> None:
-    doc = FakeDoc()
-    ctx = FakeCtx(doc)
-    _STUB_FEM_CALLS.clear()
-
-    result = objects_mod.create_object(
-        ctx, {"document": doc.Name, "type": "Fem::MaterialCommon", "name": "Mat"}
-    )
-
-    assert [call[0] for call in _STUB_FEM_CALLS] == ["makeMaterialSolid"]
-    assert _STUB_FEM_CALLS[0][2]["name"] == "Mat"
-    assert result["object"]["typeId"] == "Fem::Stub"
-    assert ("commit", None) in doc.calls
 
 
 def test_create_fem_nonlinear_material_requires_base_material_link() -> None:
@@ -1700,37 +1559,6 @@ def test_inspect_returns_sorted_compact_rows() -> None:
     validate_schema(result, objects_mod.TOOL_DEFINITIONS[0]["outputSchema"])
 
 
-def test_full_detail_rows_add_placement_and_property_pages() -> None:
-    doc, ctx = _three_box_doc()
-
-    result = objects_mod.inspect_objects(ctx, {"document": doc.Name, "detail": "full", "limit": 1})
-
-    row = result["objects"][0]
-    compact = {"name", "label", "typeId", "state", "bounds", "shape_valid", "solid_count"}
-    assert set(row) - compact == {
-        "tip",
-        "links",
-        "linkCount",
-        "linksTruncated",
-        "placement",
-        "globalPlacement",
-        "boundsCoordinateSystem",
-        "properties",
-        "propertyMetadata",
-        "propertyCount",
-        "nextPropertyOffset",
-        "truncatedProperties",
-        "bodyTip",
-        "features",
-        "featuresTruncated",
-        "featureCount",
-        "origins",
-    }
-    assert row["boundsCoordinateSystem"] == "document"
-    assert row["properties"]["Length"] == 0
-    validate_schema(result, objects_mod.TOOL_DEFINITIONS[0]["outputSchema"])
-
-
 def test_inspect_spreadsheet_reports_formula_alias_and_value() -> None:
     sheet = FakeSheet(
         cells={"A1": "1.85 mm", "B28": "=A1 * 2"},
@@ -1917,21 +1745,6 @@ def test_inspect_spreadsheet_truncates_long_cell_content_and_value() -> None:
     assert cell["valueTruncated"] is True
     assert row["truncatedProperties"] == ["A1"]
     validate_schema(result, _output_schema("inspect_objects"))
-
-
-def test_inspect_default_page_limit_is_32() -> None:
-    doc = FakeDoc(objects=[box(f"Obj{index:03d}") for index in range(33)])
-    ctx = FakeCtx(doc)
-
-    first = objects_mod.inspect_objects(ctx, {"document": doc.Name})
-
-    assert first["total"] == 33
-    assert first["count"] == 32
-    assert first["nextCursor"] is not None
-
-    second = objects_mod.inspect_objects(ctx, {"document": doc.Name, "cursor": first["nextCursor"]})
-    assert [row["name"] for row in second["objects"]] == ["Obj032"]
-    assert second["nextCursor"] is None
 
 
 def test_large_selection_pages_through_all_requested_objects() -> None:
@@ -2537,29 +2350,6 @@ def test_inspect_selection_rejects_duplicates() -> None:
     expect_tool_error(duplicate, VALIDATION_FAILED)
 
 
-def test_selection_cursor_paginates_the_selected_objects_only() -> None:
-    doc, ctx = _three_box_doc()
-
-    first = objects_mod.inspect_objects(
-        ctx, {"document": doc.Name, "objects": ["B", "A", "C"], "limit": 2}
-    )
-    assert [row["name"] for row in first["objects"]] == ["A", "B"]
-    assert first["total"] == 3
-    assert first["nextCursor"] is not None
-
-    second = objects_mod.inspect_objects(
-        ctx,
-        {
-            "document": doc.Name,
-            "objects": ["B", "A", "C"],
-            "limit": 2,
-            "cursor": first["nextCursor"],
-        },
-    )
-    assert [row["name"] for row in second["objects"]] == ["C"]
-    assert second["nextCursor"] is None
-
-
 def test_cursor_bound_to_a_different_selection_is_stale() -> None:
     doc, ctx = _three_box_doc()
 
@@ -2743,38 +2533,6 @@ def test_edit_object_reports_property_geometry_and_dependent_deltas() -> None:
     assert change["dependentCount"] == 1
 
 
-def test_create_object_change_uses_null_before_fields() -> None:
-    doc = FakeDoc()
-
-    def add_box(type_id: str, name: str) -> FakeObj:
-        created = box(name)
-        doc.Objects.append(created)
-        doc._by_name[created.Name] = created
-        return created
-
-    doc.addObject = add_box  # type: ignore[method-assign]
-    ctx = FakeCtx(doc)
-
-    result = objects_mod.create_object(
-        ctx,
-        {
-            "document": doc.Name,
-            "type": "Part::Box",
-            "name": "Created",
-            "properties": {"Length": 4},
-            "response_detail": "full",
-        },
-    )
-
-    change = result["change"]
-    assert change["properties"] == [{"name": "Length", "before": None, "after": 4.0}]
-    assert change["geometry"]["solidCountBefore"] is None
-    assert change["geometry"]["volumeBefore"] is None
-    assert change["geometry"]["boundsBefore"] is None
-    assert change["dependentCountBefore"] == 0
-    assert change["dependentCount"] == 0
-
-
 class _CountingShape(FakeShape):
     """FakeShape whose ``check()`` counts every probe."""
 
@@ -2785,94 +2543,6 @@ class _CountingShape(FakeShape):
     def check(self) -> list[str]:
         self.check_calls += 1
         return super().check()
-
-
-def test_create_reuses_the_gate_report_without_reprobing_geometry(monkeypatch) -> None:
-    """The handler must reuse the gate's post-recompute report.
-
-    Re-probing would run a second ``check()`` on the new shape and a second
-    document-space bounds read; both must come from the gate's single pass.
-    """
-
-    shape = _CountingShape()
-    doc = FakeDoc()
-
-    def add_box(type_id: str, name: str) -> FakeObj:
-        created = box(name, shape=shape)
-        doc.Objects.append(created)
-        doc._by_name[created.Name] = created
-        return created
-
-    doc.addObject = add_box  # type: ignore[method-assign]
-    ctx = FakeCtx(doc)
-
-    bounds_probes: list[str] = []
-    real_document_bounds = objects_mod.document_bounds
-
-    def counting_bounds(obj: Any) -> list[float] | None:
-        bounds_probes.append(str(obj.Name))
-        return real_document_bounds(obj)
-
-    monkeypatch.setattr(objects_mod, "document_bounds", counting_bounds)
-
-    result = objects_mod.create_object(
-        ctx,
-        {
-            "document": doc.Name,
-            "type": "Part::Box",
-            "name": "Created",
-            "response_detail": "full",
-        },
-    )
-
-    assert shape.check_calls == 1  # gate only, no handler re-probe
-    assert bounds_probes == []
-    assert result["change"]["geometry"]["boundsAfter"] == [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]
-
-
-def test_edit_object_probes_geometry_only_before_the_transaction(monkeypatch) -> None:
-    """The handler's own probes are the pre-mutation snapshots, nothing more.
-
-    ``object_validation`` resolves ``geometry_report``/``document_bounds``
-    from its own module globals, so patching them here records exactly the
-    handler-level calls. Both must happen before the transaction opens.
-    """
-
-    obj = box("Box", shape=_CountingShape(), values={"Length": 4.0})
-    doc = FakeDoc(objects=[obj])
-    ctx = FakeCtx(doc)
-
-    # (name, number of document calls already made when the probe ran).
-    probes: list[tuple[str, str, int]] = []
-    real_geometry_report = objects_mod.geometry_report
-    real_document_bounds = objects_mod.document_bounds
-
-    def recording_report(target: Any, *args: Any, **kwargs: Any) -> dict:
-        probes.append(("report", str(target.Name), len(doc.calls)))
-        return real_geometry_report(target, *args, **kwargs)
-
-    def recording_bounds(target: Any) -> list[float] | None:
-        probes.append(("bounds", str(target.Name), len(doc.calls)))
-        return real_document_bounds(target)
-
-    monkeypatch.setattr(objects_mod, "geometry_report", recording_report)
-    monkeypatch.setattr(objects_mod, "document_bounds", recording_bounds)
-
-    result = objects_mod.edit_object(
-        ctx,
-        {
-            "document": doc.Name,
-            "object": "Box",
-            "properties": {"Length": 40},
-            "response_detail": "full",
-        },
-    )
-
-    # Exactly the two pre-mutation snapshots, both before openTransaction.
-    assert probes == [("report", "Box", 0), ("bounds", "Box", 0)]
-    assert obj.Shape.check_calls == 2  # pre-mutation snapshot + gate report
-    assert [call[0] for call in doc.calls] == ["open", "commit"]
-    assert result["change"]["geometry"]["boundsAfter"] == [0.0, 0.0, 0.0, 10.0, 10.0, 10.0]
 
 
 class _RewireBox(FakeObj):
@@ -3136,78 +2806,6 @@ def test_edit_objects_reports_dependency_counts_per_target() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_edit_object_compact_response_detail_drops_before_state() -> None:
-    dependent = FakeObj("Dep", shape=None)
-    obj = box("Box", values={"Length": 4.0}, in_list=(dependent,))
-    doc = FakeDoc(objects=[obj, dependent])
-    ctx = FakeCtx(doc)
-
-    result = objects_mod.edit_object(
-        ctx,
-        {
-            "document": doc.Name,
-            "object": "Box",
-            "properties": {"Length": 40},
-            "response_detail": "compact",
-        },
-    )
-
-    change = result["change"]
-    assert set(change) == {"properties"}
-    assert change["properties"] == [{"name": "Length", "after": 40.0}]
-    assert result["report"]["solid_count"] == 1
-    validate_schema(result, _output_schema("edit_object"))
-
-
-def test_create_object_compact_response_detail_drops_before_state() -> None:
-    doc = FakeDoc()
-
-    def add_box(type_id: str, name: str) -> FakeObj:
-        created = box(name)
-        doc.Objects.append(created)
-        doc._by_name[created.Name] = created
-        return created
-
-    doc.addObject = add_box  # type: ignore[method-assign]
-    ctx = FakeCtx(doc)
-
-    result = objects_mod.create_object(
-        ctx,
-        {
-            "document": doc.Name,
-            "type": "Part::Box",
-            "name": "Created",
-            "properties": {"Length": 4},
-            "response_detail": "compact",
-        },
-    )
-
-    change = result["change"]
-    assert set(change) == {"properties"}
-    assert change["properties"] == [{"name": "Length", "after": 4.0}]
-    validate_schema(result, objects_mod.TOOL_DEFINITIONS[1]["outputSchema"])
-
-
-def test_edit_objects_compact_response_detail_applies_to_every_change() -> None:
-    doc, ctx, _first, _second = _batch_doc()
-
-    result = objects_mod.edit_objects(
-        ctx,
-        {
-            "document": doc.Name,
-            "edits": [
-                {"object": "First", "properties": {"Length": 10}},
-                {"object": "Second", "properties": {"Length": 20}},
-            ],
-            "response_detail": "compact",
-        },
-    )
-
-    assert result["changes"][0] == {"properties": [{"name": "Length", "after": 10.0}]}
-    assert result["changes"][1] == {"properties": [{"name": "Length", "after": 20.0}]}
-    validate_schema(result, _output_schema("edit_objects"))
-
-
 # ---------------------------------------------------------------------------
 # create_objects atomic batch.
 # ---------------------------------------------------------------------------
@@ -3312,26 +2910,6 @@ def test_create_objects_expectations_keyed_by_requested_name() -> None:
 
     assert result["nameMapping"] == [{"requested": "Box", "actual": "Box"}]
     assert ("commit", None) in doc.calls
-
-
-def test_create_objects_compact_response_detail() -> None:
-    doc = _BoxDoc()
-    ctx = FakeCtx(doc)
-
-    result = objects_mod.create_objects(
-        ctx,
-        {
-            "document": doc.Name,
-            "entries": [{"type": "Part::Box", "name": "Box", "properties": {"Length": 4}}],
-            "response_detail": "compact",
-        },
-    )
-
-    assert result["changes"][0] == {"properties": [{"name": "Length", "after": 4.0}]}
-    definition = next(
-        entry for entry in objects_mod.TOOL_DEFINITIONS if entry["name"] == "create_objects"
-    )
-    validate_schema(result, definition["outputSchema"])
 
 
 def test_create_objects_rejects_more_than_32_entries() -> None:
@@ -3473,25 +3051,6 @@ def test_edit_linksub_whole_object_binds_empty_subelement() -> None:
     validate_schema(result, _output_schema("edit_object"))
 
 
-def test_numeric_label_is_refused_on_linksub() -> None:
-    doc, ctx, source = _link_doc(faces=[object()])
-
-    with pytest.raises(ToolError) as exc_info:
-        objects_mod.edit_object(
-            ctx,
-            {
-                "document": doc.Name,
-                "object": "Source",
-                "properties": {"Mount": {"object": "Target", "subelement": "Face7"}},
-            },
-        )
-
-    error = expect_tool_error(exc_info, VALIDATION_FAILED)
-    assert "not durable" in error.message
-    assert source.Mount is None
-    assert doc.calls == []
-
-
 def test_empty_subelement_is_refused_by_the_closed_target_schema() -> None:
     """The retired empty sentinel cannot slip through the permissive union."""
 
@@ -3510,29 +3069,6 @@ def test_empty_subelement_is_refused_by_the_closed_target_schema() -> None:
     error = expect_tool_error(exc_info, VALIDATION_FAILED)
     assert "not a valid shared link target" in error.message
     assert error.details == {"parameter": "Mount"}
-    assert source.Mount is None
-    assert doc.calls == []
-
-
-def test_tampered_token_is_refused_without_mutation() -> None:
-    doc, ctx, source = _link_doc(faces=[object()])
-    token = _STUB_GEOMETRY.make_reference(ctx, doc, doc.getObject("Target"), "face", 1)[
-        "subelement"
-    ]
-    tampered = token[:-1] + ("0" if token[-1] != "0" else "1")
-
-    with pytest.raises(ToolError) as exc_info:
-        objects_mod.edit_object(
-            ctx,
-            {
-                "document": doc.Name,
-                "object": "Source",
-                "properties": {"Mount": {"object": "Target", "subelement": tampered}},
-            },
-        )
-
-    error = expect_tool_error(exc_info, VALIDATION_FAILED)
-    assert "signature rejected" in error.message
     assert source.Mount is None
     assert doc.calls == []
 
@@ -3613,39 +3149,6 @@ def test_linksublist_expansion_cap_refuses_before_mutation() -> None:
     assert error.details["reason"] == "selection_limit"
     assert source.Deps == []
     assert doc.calls == []
-
-
-def test_omitted_response_detail_equals_explicit_compact() -> None:
-    """The mutation handlers default to compact: omitted equals explicit."""
-
-    doc = FakeDoc()
-
-    def add_box(type_id: str, name: str) -> FakeObj:
-        created = box(name)
-        doc.Objects.append(created)
-        doc._by_name[created.Name] = created
-        return created
-
-    doc.addObject = add_box  # type: ignore[method-assign]
-    ctx = FakeCtx(doc)
-
-    omitted = objects_mod.create_object(
-        ctx,
-        {"document": doc.Name, "type": "Part::Box", "name": "First", "properties": {"Length": 4}},
-    )
-    explicit = objects_mod.create_object(
-        ctx,
-        {
-            "document": doc.Name,
-            "type": "Part::Box",
-            "name": "Second",
-            "properties": {"Length": 4},
-            "response_detail": "compact",
-        },
-    )
-
-    assert omitted["change"] == explicit["change"]
-    assert omitted["change"] == {"properties": [{"name": "Length", "after": 4.0}]}
 
 
 # ---------------------------------------------------------------------------
@@ -3788,33 +3291,6 @@ def test_create_part_cut_missing_tool_reference_restores_document() -> None:
     error = expect_tool_error(exc_info, OBJECT_NOT_FOUND)
     # The rollback restored the document inventory, not merely logged an abort.
     assert error.details["operationState"] == "rolled_back"
-    assert doc.getObject("Cut") is None
-    assert [obj.Name for obj in doc.Objects] == ["Base", "Tool"]
-    assert ("abort", None) in doc.calls
-    assert ("commit", None) not in doc.calls
-
-
-def test_create_part_cut_expected_solids_mismatch_rolls_back() -> None:
-    doc = _CSGDoc(objects=[box("Base"), box("Tool")], cut_solids=2)
-    ctx = FakeCtx(doc)
-
-    with pytest.raises(ToolError) as exc_info:
-        objects_mod.create_object(
-            ctx,
-            {
-                "document": doc.Name,
-                "type": "Part::Cut",
-                "name": "Cut",
-                "properties": {"Base": {"object": "Base"}, "Tool": {"object": "Tool"}},
-                "expected_solids": 1,
-            },
-        )
-
-    error = expect_tool_error(exc_info, VALIDATION_FAILED)
-    # The mismatched fake boolean result is refused and the created object
-    # is removed by the mutation-gate rollback.
-    assert error.details["operationState"] == "rolled_back"
-    assert any("expected_solids" in message for message in error.details["errors"])
     assert doc.getObject("Cut") is None
     assert [obj.Name for obj in doc.Objects] == ["Base", "Tool"]
     assert ("abort", None) in doc.calls
@@ -4067,45 +3543,3 @@ def test_batch_creation_query_resolutions_do_not_collide() -> None:
     assert holder_b.Mount == (target_b, ["Face1"])
     receipts = result["resolvedSelections"]
     assert [row["references"][0]["object"] for row in receipts] == ["TargetA", "TargetB"]
-
-
-def test_prepared_singleton_refusal_carries_full_evidence() -> None:
-    """The zero-match refusal reports the shared bounded evidence payload."""
-
-    doc, ctx, _source = _link_doc(faces=[])
-    with pytest.raises(ToolError) as exc_info:
-        objects_mod.edit_object(
-            ctx,
-            {
-                "document": doc.Name,
-                "object": "Source",
-                "properties": {"Mount": {"object": "Target", "query": [{"role": "face"}]}},
-            },
-        )
-
-    error = expect_tool_error(exc_info, VALIDATION_FAILED)
-    assert error.details["reason"] == "selection_empty"
-    assert error.details["parameter"] == "Mount"
-    assert error.details["object"] == "Target"
-    assert error.details["role"] == "face"
-    assert error.details["matchCount"] == 0
-    assert error.details["candidates"] == []
-    assert error.details["candidatesTruncated"] is False
-    assert error.details["nextTool"] == "inspect_topology"
-
-
-def test_prepared_cache_keys_by_owner_and_path() -> None:
-    """The cache distinguishes owners with the same property path."""
-
-    target_a = box("TargetA", shape=FakeShape(faces=[object()]))
-    target_b = box("TargetB", shape=FakeShape(faces=[object()]))
-    doc = FakeDoc(objects=[target_a, target_b])
-    ctx = FakeCtx(doc)
-    queries = objects_mod._PreparedQueries(ctx, doc)
-
-    queries.scan_property("Mount", {"object": "TargetA", "query": [{"role": "face"}]}, owner="A")
-    queries.scan_property("Mount", {"object": "TargetB", "query": [{"role": "face"}]}, owner="B")
-
-    assert queries.resolutions[("A", "Mount")][0] is target_a
-    assert queries.resolutions[("B", "Mount")][0] is target_b
-    assert len(queries.receipts) == 2

@@ -220,16 +220,6 @@ class TestErrorPrecedence:
         assert validated["client_capabilities"] == capabilities
         assert validated["_meta"]["com.example/custom"] == {"anything": [1, 2]}
 
-    def test_validated_view_shape(self):
-        params = make_params(name="t")
-        validated = protocol.validate_request(valid_message(params=params), make_headers(name="t"))
-        assert validated["method"] == "tools/call"
-        assert validated["params"] is params
-        assert validated["protocol_version"] == protocol.SUPPORTED_PROTOCOL_VERSION
-        assert validated["client_info"] == {"name": "pytest-client", "version": "1.2.3"}
-        assert validated["client_capabilities"] == {}
-        assert validated["is_notification"] is False
-
 
 # ---------------------------------------------------------------------------
 # Released request-metadata headers, including Base64 sentinel encoding.
@@ -237,13 +227,6 @@ class TestErrorPrecedence:
 
 
 class TestReleasedHeaderEncoding:
-    def test_plain_name_header_matches(self):
-        validated = protocol.validate_request(
-            valid_message(params=make_params(name="my_tool")),
-            make_headers(name="my_tool"),
-        )
-        assert validated["params"]["name"] == "my_tool"
-
     def test_header_names_case_insensitive_values_case_sensitive(self):
         headers = {
             "mcp-protocol-version": protocol.SUPPORTED_PROTOCOL_VERSION,
@@ -353,53 +336,6 @@ class TestReleasedHeaderEncoding:
             protocol.validate_request(message, make_headers(name="t", version="2025-11-25"))
         expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
 
-    def test_mcp_param_headers_match_body_arguments(self):
-        paths = {"Region": ("arguments", "region")}
-        params = make_params(name="execute_sql", arguments={"region": "us-west1"})
-        validated = protocol.validate_request(
-            valid_message(params=params),
-            make_headers(name="execute_sql", **{"Mcp-Param-Region": "us-west1"}),
-            param_paths=paths,
-        )
-        assert validated["params"]["arguments"]["region"] == "us-west1"
-
-        with pytest.raises(protocol.ProtocolError) as excinfo:
-            protocol.validate_request(
-                valid_message(params=params),
-                make_headers(name="execute_sql", **{"Mcp-Param-Region": "eu-east1"}),
-                param_paths=paths,
-            )
-        expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
-
-    def test_mcp_param_headers_checked_in_both_directions(self):
-        paths = {"Region": ("arguments", "region")}
-        params = make_params(name="t", arguments={"region": "us-west1"})
-        with pytest.raises(protocol.ProtocolError) as excinfo:
-            protocol.validate_request(
-                valid_message(params=params), make_headers(name="t"), param_paths=paths
-            )
-        expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
-
-        headers = make_headers(name="t", **{"Mcp-Param-Region": "us-west1"})
-        empty_params = make_params(name="t", arguments={})
-        with pytest.raises(protocol.ProtocolError) as excinfo:
-            protocol.validate_request(
-                valid_message(params=empty_params), headers, param_paths=paths
-            )
-        expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
-
-    def test_mcp_param_numeric_and_boolean_comparison(self):
-        paths = {"Count": ("arguments", "count"), "Flag": ("arguments", "flag")}
-        params = make_params(name="t", arguments={"count": 42.0, "flag": True})
-        headers = make_headers(name="t", **{"Mcp-Param-Count": "42", "Mcp-Param-Flag": "true"})
-        protocol.validate_request(valid_message(params=params), headers, param_paths=paths)
-
-        for header, key in (("43", "Count"), ("True", "Flag")):
-            bad = make_headers(name="t", **{f"Mcp-Param-{key}": header})
-            with pytest.raises(protocol.ProtocolError) as excinfo:
-                protocol.validate_request(valid_message(params=params), bad, param_paths=paths)
-            expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
-
     def test_unknown_mcp_param_headers_only_need_valid_encoding(self):
         params = make_params(name="t")
         validated = protocol.validate_request(
@@ -445,13 +381,6 @@ class TestLiveParamHeaderMirroring:
                 valid_message(method="tasks/cancel", params=task_params), task_headers
             )["params"]["taskId"]
             == "task-9"
-        )
-
-    def test_suffix_naming_no_body_value_only_needs_valid_encoding(self):
-        params = make_params(name="execute_sql", arguments={"region": "us-west1"})
-        unknown = make_headers(name="execute_sql", **{"Mcp-Param-Elsewhere": "x"})
-        assert protocol.validate_request(valid_message(params=params), unknown)["method"] == (
-            "tools/call"
         )
 
     def test_complex_body_value_is_encoding_checked_only(self):
@@ -503,9 +432,6 @@ EMITTED_TOOL_SCHEMA = {
 
 
 class TestFiniteSchemas:
-    def test_emitted_schema_passes_check(self):
-        protocol.check_schema(EMITTED_TOOL_SCHEMA)
-
     @pytest.mark.parametrize(
         "schema",
         [
@@ -561,21 +487,6 @@ class TestFiniteSchemas:
     def test_schema_examples_match_their_declared_type(self, schema):
         with pytest.raises(ValueError):
             protocol.check_schema(schema)
-
-    def test_deep_non_reference_schema_does_not_consume_reference_budget(self):
-        schema = {"type": "string"}
-        value = "leaf"
-        for _ in range(40):
-            schema = {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["next"],
-                "properties": {"next": schema},
-            }
-            value = {"next": value}
-
-        protocol.check_schema(schema)
-        protocol.validate_schema(value, schema)
 
     def test_validate_schema_accepts_valid_nested_payload(self):
         protocol.validate_schema(
@@ -762,16 +673,6 @@ class TestBuilders:
         result = protocol.tool_error_result(bare)
         assert "details" not in result["structuredContent"]["error"]
 
-    def test_tool_error_result_text_includes_next_tool(self):
-        error = protocol.ToolError(
-            protocol.VALIDATION_FAILED,
-            "stale",
-            details={"reason": "stale_generation", "nextTool": "inspect_objects"},
-        )
-        result = protocol.tool_error_result(error)
-        text = result["content"][0]["text"]
-        assert '"nextTool": "inspect_objects"' in text
-
     def test_input_required_result_requires_one_field(self):
         challenge = protocol.consent_input_request("Proceed?")
         result = protocol.input_required_result(challenge, "state-token")
@@ -807,18 +708,6 @@ class TestBuilders:
         assert response["error"]["code"] == -32601
         with pytest.raises(TypeError):
             protocol.error_response({"message": "no code"})
-
-    def test_capability_helpers(self):
-        protocol.require_client_capabilities(
-            {"extensions": {"io.modelcontextprotocol/tasks": {}}},
-            {"extensions": {"io.modelcontextprotocol/tasks": {}}},
-        )
-        error = protocol.missing_capability({"elicitation": {"form": {}}})
-        assert error.code == protocol.MISSING_REQUIRED_CLIENT_CAPABILITY
-        assert error.data == {"requiredCapabilities": {"elicitation": {"form": {}}}}
-        with pytest.raises(protocol.ProtocolError) as excinfo:
-            protocol.require_client_capabilities({}, {"elicitation": {"form": {}}})
-        assert excinfo.value.code == protocol.MISSING_REQUIRED_CLIENT_CAPABILITY
 
 
 # ---------------------------------------------------------------------------

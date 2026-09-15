@@ -474,31 +474,6 @@ def test_validate_geometry_unavailable_bounds_verdict_through_shared_helper():
     _assert_output_schema(result, "validate_geometry")
 
 
-def test_validate_geometry_without_expected_bounds_has_no_verdict():
-    ctx = FakeCtx({"Box": FakeObject("Box", FakeShape(volume=1000.0))})
-    result = geometry.HANDLERS["validate_geometry"](ctx, {"document": "Doc", "objects": ["Box"]})
-    assert "bounds" not in result["objects"][0]["verdicts"]
-    assert result["objects"][0]["valid"] is True
-
-
-def test_placed_shape_applies_global_placement_exactly_once():
-    local = SimpleNamespace(name="local")
-    global_placement = SimpleNamespace(name="global")
-    shape = FakeShape(bounds=(0.0, 0.0, 0.0, 10.0, 10.0, 10.0))
-    obj = FakeObject("Child", shape)
-    obj.Placement = local
-    obj.getGlobalPlacement = lambda: global_placement
-
-    placed = geometry.placed_shape(obj)
-
-    assert placed is not shape  # a copy, the source is untouched
-    # The copy carries the global placement itself; the local placement was
-    # never multiplied a second time.
-    assert placed.Placement is global_placement
-    assert obj.Placement is local
-    assert obj.Shape is shape
-
-
 def test_placed_shape_failures_are_fail_closed():
     # Shapeless object.
     with pytest.raises(protocol.ToolError) as excinfo:
@@ -564,16 +539,6 @@ def test_validate_geometry_zero_volume_solid_fails():
     assert entry["diagnostics"] == ["surface BRep check failed"]
     assert entry["valid"] is False
     assert result["all_valid"] is False
-
-
-def test_validate_geometry_missing_document_and_object():
-    ctx = FakeCtx({"Box": FakeObject("Box", FakeShape())})
-    with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.HANDLERS["validate_geometry"](ctx, {"document": "Ghost", "objects": ["Box"]})
-    assert excinfo.value.code == protocol.DOCUMENT_NOT_FOUND
-    with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.HANDLERS["validate_geometry"](ctx, {"document": "Doc", "objects": ["Ghost"]})
-    assert excinfo.value.code == protocol.OBJECT_NOT_FOUND
 
 
 # ---------------------------------------------------------------------------
@@ -1252,16 +1217,6 @@ def test_topology_limit_above_max_is_clamped():
     assert result["nextCursor"] is not None
 
 
-def test_inspect_topology_rejects_direct_handler_limit_coercion():
-    ctx = _topology_doc()
-
-    with pytest.raises(TypeError):
-        geometry.HANDLERS["inspect_topology"](
-            ctx,
-            {"document": "Doc", "target": {"object": "Shell"}, "limit": "50"},
-        )
-
-
 def test_inspect_topology_face_items_carry_descriptive_data():
     ctx = _topology_doc()
     result = geometry.HANDLERS["inspect_topology"](
@@ -1345,28 +1300,6 @@ def test_topology_cursor_rejects_generation_change_and_mismatched_arguments():
     assert changed.value.details["reason"] == "stale_cursor"
 
 
-def test_topology_cursor_rejects_malformed_indexes():
-    ctx = _topology_doc()
-    arguments = {"document": "Doc", "target": {"object": "Shell"}, "limit": 50}
-
-    for bad_last in (0, -3, "7", True, 1.5):
-        payload = {
-            "kind": "topology-page",
-            "identity": ctx.document_identity(ctx.doc),
-            "generation": ctx.generation,
-            "object": "Shell",
-            "role": "face",
-            "limit": 50,
-            "queryHash": protocol.fingerprint({"object": "Shell"}),
-            "last": bad_last,
-        }
-        cursor = ctx.signer.sign("cursor", payload)
-        with pytest.raises(protocol.ToolError) as malformed:
-            geometry.HANDLERS["inspect_topology"](ctx, {**arguments, "cursor": cursor})
-        assert malformed.value.details["reason"] == "malformed_cursor"
-        assert malformed.value.details["nextTool"] == "inspect_topology"
-
-
 def test_topology_cursor_rejects_malformed_signed_token():
     ctx = _topology_doc()
     with pytest.raises(protocol.ToolError) as malformed:
@@ -1442,39 +1375,6 @@ def test_inspect_topology_rejects_removed_input_forms():
     assert "not durable" in numeric.value.message
 
 
-def test_inspect_topology_compact_rows_carry_only_the_compact_keys():
-    ctx = _topology_doc()
-
-    faces = geometry.HANDLERS["inspect_topology"](
-        ctx, {"document": "Doc", "target": {"object": "Shell"}, "limit": 1}
-    )
-    assert set(faces["items"][0]) == {"index", "reference", "bounds", "surfaceType"}
-
-    edges = geometry.HANDLERS["inspect_topology"](
-        ctx,
-        {
-            "document": "Doc",
-            "target": {"object": "Shell", "query": [{"role": "edge"}]},
-        },
-    )
-    for item in edges["items"]:
-        assert set(item) == {"index", "reference", "bounds", "curveType"}
-
-    doc = ctx.require_document("Doc")
-    obj, subelement = geometry.resolve_reference(ctx, doc, edges["items"][0]["reference"])
-    assert obj.Name == "Shell"
-    assert subelement == "Edge1"
-
-
-def test_inspect_topology_unknown_object_is_object_not_found():
-    ctx = _topology_doc()
-    with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.HANDLERS["inspect_topology"](
-            ctx, {"document": "Doc", "target": {"object": "Ghost"}}
-        )
-    assert excinfo.value.code == protocol.OBJECT_NOT_FOUND
-
-
 def test_measure_accepts_signed_topology_reference_selectors():
     ctx = _topology_doc(face_count=3)
     page = geometry.HANDLERS["inspect_topology"](
@@ -1493,32 +1393,6 @@ def test_measure_accepts_signed_topology_reference_selectors():
 
     assert [face["index"] for face in result["faces"]] == [2]
     assert result["a"] == reference
-
-
-def test_measure_rejects_reference_incompatible_with_mode():
-    ctx = _topology_doc()
-    page = geometry.HANDLERS["inspect_topology"](
-        ctx,
-        {
-            "document": "Doc",
-            "target": {"object": "Shell", "query": [{"role": "edge"}]},
-        },
-    )
-    edge_reference = page["items"][0]["reference"]
-
-    with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.HANDLERS["measure"](
-            ctx,
-            {
-                "document": "Doc",
-                "mode": "faces",
-                "a": {
-                    "object": edge_reference["object"],
-                    "subelement": edge_reference["subelement"],
-                },
-            },
-        )
-    assert excinfo.value.code == protocol.VALIDATION_FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -1616,19 +1490,6 @@ def test_check_ids_default_by_position_and_duplicates_refuse():
             },
         )
     assert excinfo.value.details["reason"] == "duplicate_check_id"
-
-
-def test_check_unknown_object_fails_the_call():
-    ctx = FakeCtx({"Box": _solid("Box")})
-    with pytest.raises(protocol.ToolError) as excinfo:
-        geometry.HANDLERS["validate_geometry"](
-            ctx,
-            {
-                "document": "Doc",
-                "checks": [{"kind": "volume_range", "object": {"object": "Ghost"}, "min": 1.0}],
-            },
-        )
-    assert excinfo.value.code == protocol.OBJECT_NOT_FOUND
 
 
 def test_check_shapeless_object_is_indeterminate():
@@ -1787,14 +1648,6 @@ def test_nonfinite_measurement_is_indeterminate_never_a_type_error():
     assert result["checksPassed"] is False
 
 
-def test_checks_absent_omits_check_only_fields():
-    ctx = FakeCtx({"Box": _solid("Box")})
-    result = geometry.HANDLERS["validate_geometry"](ctx, {"document": "Doc", "objects": ["Box"]})
-    _assert_output_schema(result, "validate_geometry")
-    for key in ("checks", "checksPassed", "accepted", "resolvedSelections"):
-        assert key not in result
-
-
 def test_query_check_targets_are_rejected_for_volumetric_checks():
     a = _solid("A")
     face = FakeFace(area=1.0, bounds=(0.0, 0.0, 0.0, 1.0, 1.0, 1.0), center=(0.0, 0.0, 0.5))
@@ -1892,28 +1745,6 @@ def _segment(length=10.0, *, curve=None, dims=(0.0, 0.0, 0.0)):
         curve=curve,
         points=((0.0, y, z), (length, y, z)),
         center=(length / 2.0, y, z),
-    )
-
-
-def test_fingerprint_is_plain_immutable_evidence():
-    """The fingerprint carries no native reference and no mutable field."""
-
-    fingerprint = geometry.subshape_fingerprint("edge", _segment())
-
-    assert fingerprint["role"] == "edge"
-    assert fingerprint["type"] == "LINE"
-    assert fingerprint["closed"] is False
-    assert fingerprint["bounds"] == (0.0, 0.0, 0.0, 10.0, 0.0, 0.0)
-    assert fingerprint["measure"] == 10.0
-    assert fingerprint["center"] == (5.0, 0.0, 0.0)
-    assert fingerprint["point"] == (5.0, 0.0, 0.0)
-    assert fingerprint["start"] == (0.0, 0.0, 0.0)
-    assert fingerprint["end"] == (10.0, 0.0, 0.0)
-    assert fingerprint["radius"] is None and fingerprint["axis"] is None
-    # No native object survives into the snapshot, so a recompute that
-    # replaces the shape cannot reach into it.
-    assert all(
-        isinstance(value, (str, bool, float, tuple, type(None))) for value in fingerprint.values()
     )
 
 

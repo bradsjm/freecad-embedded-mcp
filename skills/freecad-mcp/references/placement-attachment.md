@@ -52,7 +52,7 @@ Always inspect the global `Shape.BoundBox` after rotating or placing an object. 
 
 Attachment maps an object to support geometry using an attachment engine/mode and an attachment offset. For attached sketches/features, the derived Placement is not the primary control. Edit support, `MapMode`, and `AttachmentOffset` rather than trying to force a global Placement that the attachment system will recompute away.
 
-- `MapMode` names how the support geometry defines the attachment frame. It takes the exact enumeration string, never an index.
+- `MapMode` names how the support geometry defines the attachment frame. Send the exact enumeration string, such as `FlatFace`; the support mapper passes this value directly to the native property, so integer positions are not the documented form.
 - Attach critical sketches to Body Origin planes or stable datum geometry.
 - Avoid generated faces for long-lived supports when upstream edits can renumber faces.
 - Recompute and check the resulting feature state before adding dependents.
@@ -66,7 +66,7 @@ An explicit attachment payload names the support and its mode. Verified on FreeC
 }
 ```
 
-`support` accepts the shared targets and must resolve to exactly one compatible plane or planar face: a whole object, a signed face reference, or a one-result query.
+`support` accepts the shared targets: a whole object, a signed face reference, or a query. Only a query is enforced to resolve to exactly one result. The server does not pre-check plane or planarity compatibility; an incompatible support surfaces after the recompute through the mutation gate's invalid-state rollback.
 
 The [Part Attachment](https://wiki.freecad.org/Part_EditAttachment) page documents attachment to faces, edges, vertices, and datum geometry. The typed `parameters` route that names a plane without `support` or `properties` is in [Common recipes](recipes.md); a `support` reference and that typed route are mutually exclusive attachment targets. [mcp-tools.md](mcp-tools.md) carries the exact `create_feature` attachment routing and its error.
 

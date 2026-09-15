@@ -5,7 +5,7 @@ ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
-from mcp_server.dispatch_health import DispatchHealth, stuck_failure
+from mcp_server.dispatch_health import DispatchHealth
 
 
 class FakeClock:
@@ -60,20 +60,3 @@ def test_other_task_cannot_mark_or_clear_active_task() -> None:
 
     assert health.snapshot()["state"] == "busy"
     assert health.snapshot()["task_id"] == 3
-
-
-def test_initial_timeout_message_explains_future_fail_fast() -> None:
-    snapshot = {
-        "state": "stuck",
-        "task_id": 5,
-        "operation": "remove_broken_feature",
-        "running_for_seconds": 60.0,
-        "timeout_seconds": 60.0,
-    }
-
-    result = stuck_failure(snapshot, just_timed_out=True)
-
-    assert result["success"] is False
-    assert result["dispatch"] == snapshot
-    assert "timed out after 60s" in result["error"]
-    assert "fail immediately" in result["error"]

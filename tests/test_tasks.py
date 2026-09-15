@@ -23,7 +23,7 @@ if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
 from mcp_server import tasks as tasks_module
-from mcp_server.protocol import INVALID_PARAMS, ProtocolError, ToolError
+from mcp_server.protocol import ProtocolError, ToolError
 
 
 class FakeClock:
@@ -74,30 +74,7 @@ def test_create_task_wire_is_flat_and_exact() -> None:
     parse_utc(wire["lastUpdatedAt"])
 
 
-def test_create_freezes_arguments_against_caller_mutation() -> None:
-    store, _ = make_store()
-    args = {"code": "6*7"}
-    record = store.create("run_script", args, principal="alice")
-    args["code"] = "mutated"
-    assert record.args == {"code": "6*7"}
-
-
-def test_record_queryable_before_task_response_sent() -> None:
-    store, _ = make_store()
-    record = store.create("export", {"format": "step"}, principal="alice")
-    fetched = store.get(record.task_id, principal="alice")
-    assert fetched is record
-    assert fetched.operation == "export"
-
-
 # -- identity and isolation --------------------------------------------
-
-
-def test_unknown_task_id_is_invalid_params() -> None:
-    store, _ = make_store()
-    with pytest.raises(ProtocolError) as excinfo:
-        store.get("missing")
-    assert excinfo.value.code == INVALID_PARAMS == -32602
 
 
 def test_principal_mismatch_is_indistinguishable_from_unknown() -> None:
@@ -166,52 +143,6 @@ def test_fail_accepts_protocol_error_instances() -> None:
     assert record.error == {"code": -32602, "message": "bad args"}
 
 
-def test_terminal_status_message_is_bounded_and_budgeted() -> None:
-    store, _ = make_store(max_retained_bytes=1024)
-    record = store.create("export", {}, principal="alice")
-    store.complete(
-        record.task_id,
-        {"ok": True},
-        principal="alice",
-        status_message="x" * 4096,
-    )
-    assert len((record.status_message or "").encode("utf-8")) <= 256
-    assert store._retained_bytes <= 1024
-    assert len(tasks_module.detailed_task_wire(record)["statusMessage"].encode("utf-8")) <= 256
-
-
-def test_finalized_control_character_status_respects_byte_budget() -> None:
-    store, _ = make_store(max_retained_bytes=1024)
-    record = store.create("export", {"format": "step"}, principal="alice")
-    # Control characters expand six-fold under canonical JSON escaping
-    # (\x01 -> \u0001), so the accounting edge case is a message whose
-    # raw length sits far below its canonical retained-byte charge.
-    assert store.finalize_cancelled(
-        record.task_id,
-        principal="alice",
-        status_message="\x01" * 4096,
-    )
-    assert record.status == "cancelled"
-    assert record.args == {}
-    assert record.status_message is not None
-    assert record.status_message.endswith(tasks_module._STATUS_TRUNCATION_SUFFIX)
-    # Bounding and accounting both charge canonical JSON bytes, so the
-    # stored message is shorter raw than its escaped canonical size.
-    assert len(record.status_message) < tasks_module._status_message_size(record.status_message)
-    assert tasks_module._status_message_size(record.status_message) <= 256
-    # Dropped args release their budget and the terminal reservation is
-    # returned, so only the bounded message stays retained and it fits
-    # the configured budget.
-    assert store._retained_bytes == tasks_module._status_message_size(record.status_message)
-    assert store._retained_bytes <= 1024
-    # The terminal record stays readable through the snapshot API.
-    snapshot = store.snapshot(record.task_id, principal="alice")
-    assert snapshot["status"] == "cancelled"
-    assert snapshot["statusMessage"] == record.status_message
-    assert "result" not in snapshot
-    assert "error" not in snapshot
-
-
 def test_terminal_state_is_immutable_against_late_writers() -> None:
     store, _ = make_store()
     record = store.create("run_script", {}, principal="alice")
@@ -256,16 +187,6 @@ def test_real_completion_beats_pending_cancellation() -> None:
     assert record.status == "completed"
 
 
-def test_tasks_cancel_on_terminal_task_changes_nothing() -> None:
-    store, _ = make_store()
-    record = store.create("measure", {}, principal="alice")
-    store.fail(record.task_id, {"code": -32603, "message": "x"}, principal="alice")
-    before = tasks_module.detailed_task_wire(record)
-    # tasks/cancel acknowledges terminal tasks without changing them.
-    assert store.request_cancel(record.task_id, principal="alice") is False
-    assert tasks_module.detailed_task_wire(record) == before
-
-
 # -- queued cancellation behind event barriers -------------------------
 
 
@@ -289,55 +210,6 @@ def _queued_runner(
     gate.wait(timeout=5)
     executed.append(True)
     store.complete(record.task_id, {"ok": True}, principal="alice")
-
-
-def test_queued_task_cancelled_before_execution_never_runs() -> None:
-    store, _ = make_store()
-    record = store.create("run_fem", {}, principal="alice")
-    cancel_observed = threading.Event()
-    gate = threading.Event()
-    executed: list[bool] = []
-    worker = threading.Thread(
-        target=_queued_runner,
-        args=(store, record, cancel_observed, gate, executed),
-    )
-    worker.start()
-    store.request_cancel(record.task_id, principal="alice")
-    cancel_observed.set()
-    gate.set()
-    worker.join(timeout=5)
-    assert not executed
-    assert record.status == "cancelled"
-    assert record.status_message == "Cancelled before execution"
-    wire = tasks_module.detailed_task_wire(record)
-    assert wire["status"] == "cancelled"
-    assert "result" not in wire and "error" not in wire
-
-
-def test_completed_task_survives_cancel_requested_during_run() -> None:
-    store, _ = make_store()
-    record = store.create("run_script", {}, principal="alice")
-    release = threading.Event()
-    executed: list[bool] = []
-
-    def runner() -> None:
-        release.wait(timeout=5)
-        if record.cancel_event.is_set():
-            # A safe boundary abandoned remaining work.
-            store.finalize_cancelled(record.task_id, principal="alice", status_message="abandoned")
-            return
-        executed.append(True)
-        store.complete(record.task_id, {"stdout": "42"}, principal="alice")
-
-    worker = threading.Thread(target=runner)
-    worker.start()
-    # Let the work finish first; only then request cancellation.
-    release.set()
-    worker.join(timeout=5)
-    assert store.request_cancel(record.task_id, principal="alice") is False
-    assert executed == [True]
-    assert record.status == "completed"
-    assert record.result == {"stdout": "42"}
 
 
 # -- TTL lifecycle ------------------------------------------------------

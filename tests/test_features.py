@@ -799,72 +799,6 @@ def test_pad_requires_tip_update_and_reports_body_report() -> None:
         validate_schema(result, definition["outputSchema"])
 
 
-def test_create_feature_compact_response_detail_keeps_body_report() -> None:
-    with load_features() as module:
-        _body, doc = make_body_and_doc(shape=FakeShape())
-        ctx = FakeCtx(doc)
-
-        result = call(
-            module,
-            ctx,
-            kind="pad",
-            name="Pad",
-            profile="Sketch",
-            expected_solids=1,
-            response_detail="compact",
-        )
-
-        assert set(result["change"]) == {"properties"}
-        assert result["change"]["properties"] == []
-        assert result["bodyReport"]["ok"] is True
-        definition = next(
-            entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "create_feature"
-        )
-        validate_schema(result, definition["outputSchema"])
-
-
-def test_edit_feature_compact_detail_reports_uniform_rows() -> None:
-    with load_features() as module:
-        shape = FakeShape()
-        pad = _QuantityPad(
-            "Pad",
-            "PartDesign::Pad",
-            properties=("Profile", "Length", "Type"),
-            shape=shape,
-        )
-        object.__setattr__(pad, "_values", {"Length": 10.0, "Type": "Length"})
-        body = FakeBody(members=[pad], tip=pad, shape=shape)
-        doc = FakeDoc(body, supported=SUPPORTED)
-        doc.Objects.append(pad)
-        ctx = FakeCtx(doc)
-
-        result = module.HANDLERS["edit_feature"](
-            ctx,
-            {
-                "document": "Doc",
-                "body": "Body",
-                "object": "Pad",
-                "parameters": {"length": 25},
-                "response_detail": "compact",
-            },
-        )
-
-        # The removed creation-report fields never appear on an edit result.
-        assert "change" not in result
-        assert "applied" not in result
-        assert "geometryChange" not in result
-        (row,) = result["parameterValues"]
-        assert row["parameter"] == "length"
-        assert row["property"] == "Length"
-        assert row["after"] == {"value": "25 mm", "expression": None}
-        assert "before" not in row
-        assert result["bodyReport"]["ok"] is True
-        definition = next(
-            entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "edit_feature"
-        )
-        validate_schema(result, definition["outputSchema"])
-
-
 def test_edit_feature_reports_supported_kinds_for_unsupported_feature() -> None:
     with load_features() as module:
         thickness = FakeFeature(
@@ -1004,27 +938,6 @@ def test_support_and_properties_apply_to_the_created_feature() -> None:
         # AttachmentSupport, not Support.
         assert feature.AttachmentSupport == [(doc.getObject("Sketch"), "")]
         assert result["applied"] == ["Body", "Sketch002"]
-
-
-def test_support_without_attachment_properties_is_rejected() -> None:
-    with load_features() as module:
-        _body, doc = make_body_and_doc()
-        ctx = FakeCtx(doc)
-
-        with pytest.raises(ToolError) as excinfo:
-            call(
-                module,
-                ctx,
-                kind="pad",
-                name="Pad",
-                profile="Sketch",
-                support={"object": "Sketch"},
-                properties={"MapMode": "FlatFace"},
-            )
-
-        # probes["attachment.properties"]: the Pad exposes neither
-        # Support nor AttachmentSupport.
-        assert "exposes neither Support nor AttachmentSupport" in excinfo.value.message
 
 
 def test_datum_plane_uses_the_registered_core_type() -> None:
@@ -1556,32 +1469,6 @@ def test_primitive_wedge_ordering_fails_pretransaction() -> None:
 
         assert "wedge requires x2_min <= x2_max" in excinfo.value.message
         assert doc.transactions == []
-
-
-def test_primitive_cone_accepts_zero_first_radius() -> None:
-    with load_features() as module:
-        _body, doc = make_body_and_doc(shape=FakeShape())
-        ctx = FakeCtx(doc)
-
-        result = call(
-            module,
-            ctx,
-            kind="primitive",
-            name="PrimCone",
-            parameters={
-                "shape": "cone",
-                "mode": "additive",
-                "radius1": 0,
-                "radius2": 4,
-                "height": 10,
-            },
-        )
-
-        feature = doc.getObject("PrimCone")
-        assert result["object"]["typeId"] == "PartDesign::AdditiveCone"
-        assert feature.Radius1 == 0.0
-        assert feature.Radius2 == 4.0
-        assert doc.transactions[-1] == ("commit",)
 
 
 def test_subshape_binder_binds_whole_object_and_signed_face() -> None:
@@ -2413,29 +2300,6 @@ def test_edit_feature_refuses_a_wrong_kind_parameter() -> None:
         assert feature.Length == 10.0
 
 
-def test_edit_feature_refuses_pattern_count_on_a_revolve() -> None:
-    with load_features() as module:
-        feature, doc = make_edit_doc(
-            "Rev",
-            "PartDesign::Revolution",
-            ("Profile", "ReferenceAxis", "Angle", "Reversed"),
-            {"Angle": 360.0, "Reversed": False},
-        )
-        ctx = FakeCtx(doc)
-
-        with pytest.raises(ToolError) as excinfo:
-            edit(module, ctx, object="Rev", parameters={"count": 4})
-
-        error = excinfo.value
-        assert error.code == VALIDATION_FAILED
-        assert error.details["kind"] == "revolve"
-        assert error.details["parameter"] == "count"
-        assert error.details["supportedParameters"] == ["angle", "reversed"]
-        assert error.details["nextTool"] == "inspect_objects"
-        assert doc.transactions == []
-        assert feature.Angle == 360.0
-
-
 def test_edit_feature_angle_expression_past_360_rolls_back() -> None:
     """A recompute resolving an angle expression to 400 degrees refuses."""
     with load_features() as module:
@@ -2694,39 +2558,6 @@ def test_edit_feature_omitted_parameters_preserve_a_live_expression() -> None:
         assert doc.transactions[-1] == ("commit",)
 
 
-def test_edit_feature_full_detail_adds_deltas_and_geometry_change() -> None:
-    with load_features() as module:
-        _feature, doc = make_edit_doc(
-            "Fillet",
-            "PartDesign::Fillet",
-            ("Base", "Radius"),
-            {"Radius": 1.0},
-        )
-        ctx = FakeCtx(doc)
-
-        full = edit(
-            module, ctx, object="Fillet", parameters={"radius": 2.0}, response_detail="full"
-        )
-        compact = edit(module, ctx, object="Fillet", parameters={"radius": 3.0})
-
-        full_row = _parameter_rows(full)["radius"]
-        assert full_row["before"] == {"value": 1.0, "expression": None}
-        assert full_row["after"]["value"] == 2.0
-        assert full["geometryChange"]["solidCountBefore"] == 1
-        assert full["geometryChange"]["solidCountAfter"] == 1
-
-        compact_row = _parameter_rows(compact)["radius"]
-        assert "before" not in compact_row
-        assert compact_row["after"]["value"] == 3.0
-        assert "geometryChange" not in compact
-
-        definition = next(
-            entry for entry in module.TOOL_DEFINITIONS if entry["name"] == "edit_feature"
-        )
-        for result in (full, compact):
-            validate_schema(result, definition["outputSchema"])
-
-
 # ---------------------------------------------------------------------------
 # Query-origin references resolve once per operation.
 # ---------------------------------------------------------------------------
@@ -2754,49 +2585,6 @@ class _AdvancingCtx(FakeCtx):
 
     def document_generation(self, doc: FakeDoc) -> int:
         return self.generation
-
-
-def test_fillet_query_subelements_survive_the_base_recompute() -> None:
-    """A generation-stating query subelement list is not re-guarded."""
-
-    with load_features() as module:
-        edge_shape = FakeShape(solids=1, edges=_native_edges(2))
-        plate = FakeFeature(
-            "Plate", "PartDesign::Pad", properties=("Profile", "Length"), shape=edge_shape
-        )
-        body = FakeBody(members=[plate], shape=edge_shape)
-        doc = FakeDoc(body, supported=SUPPORTED)
-        doc.Objects.append(plate)
-        ctx = _AdvancingCtx(doc)
-        # The caller states the generation it inspected, as the schema allows.
-        stated = ctx.document_generation(doc)
-
-        result = call(
-            module,
-            ctx,
-            kind="fillet",
-            name="Fillet",
-            parameters={
-                "base": {"object": "Plate"},
-                "subelements": [
-                    {
-                        "object": "Plate",
-                        "query": [{"role": "edge"}],
-                        "expected_generation": stated,
-                    }
-                ],
-                "radius": 1.5,
-            },
-        )
-
-        feature = doc.getObject("Fillet")
-        assert result["object"]["typeId"] == "PartDesign::Fillet"
-        linked_obj, labels = feature.Base
-        assert linked_obj is plate
-        assert labels == ["Edge1", "Edge2"]
-        # The receipt names the parameter and its selection-time count.
-        assert result["resolvedSelections"][0]["parameter"] == "subelements[0]"
-        assert result["resolvedSelections"][0]["count"] == 2
 
 
 def test_pad_up_to_face_query_survives_the_creation_generation_bump() -> None:

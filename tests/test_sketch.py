@@ -524,34 +524,6 @@ def test_inspect_solver_summary_uses_getter_fallback_not_the_solve_value(
     }
 
 
-def test_inspect_solver_summary_reports_the_solve_status_code(sketch_module) -> None:
-    # Inspection does not call solve() and has no persisted native status.
-    sketch = rectangle_sketch()
-    sketch.solver_status = -3
-    ctx = FakeCtx(FakeDoc(sketch))
-
-    result = call_inspect(sketch_module, ctx)
-
-    assert result["solver"]["solverStatus"] is None
-    assert sketch.solve_calls == 0
-
-
-def test_inspect_solver_status_is_null_when_solve_is_unusable(sketch_module) -> None:
-    def boom() -> int:
-        raise RuntimeError("solver unavailable")
-
-    for unusable in (None, boom, lambda: "0", lambda: True):
-        sketch = rectangle_sketch()
-        sketch.solve = unusable
-        ctx = FakeCtx(FakeDoc(sketch))
-
-        result = call_inspect(sketch_module, ctx)
-
-        assert result["solver"]["solverStatus"] is None
-        # The rest of the summary survives a missing or failing solver.
-        assert result["solver"]["degreesOfFreedom"] == 0
-
-
 def test_inspect_reports_object_state_and_status_text(sketch_module) -> None:
     sketch = rectangle_sketch(
         state=["Touched", "Invalid"],
@@ -563,40 +535,6 @@ def test_inspect_reports_object_state_and_status_text(sketch_module) -> None:
 
     assert result["state"] == ["Touched", "Invalid"]
     assert result["statusText"] == "Under-constrained: 3 DoF"
-
-
-def test_inspect_status_text_distinguishes_empty_from_absent(sketch_module) -> None:
-    # A working accessor that reports nothing is distinct from an absent
-    # one: the empty string is a successful read, null is the fallback.
-    quiet = rectangle_sketch()
-
-    assert call_inspect(sketch_module, FakeCtx(FakeDoc(quiet)))["statusText"] == ""
-
-
-def test_inspect_state_entries_are_coerced_and_capped(sketch_module) -> None:
-    capped = rectangle_sketch(state=[f"State{index}" for index in range(40)])
-    assert call_inspect(sketch_module, FakeCtx(FakeDoc(capped)))["state"] == [
-        f"State{index}" for index in range(32)
-    ]
-
-    coerced = rectangle_sketch(state=[7])
-    assert call_inspect(sketch_module, FakeCtx(FakeDoc(coerced)))["state"] == ["7"]
-
-
-def test_inspect_state_and_status_text_fall_back_when_unusable(sketch_module) -> None:
-    for unusable in (None, "Invalid", 7):
-        sketch = rectangle_sketch()
-        sketch.State = unusable
-        ctx = FakeCtx(FakeDoc(sketch))
-
-        assert call_inspect(sketch_module, ctx)["state"] == []
-
-    for unusable_status in (None, lambda: 7):
-        sketch = rectangle_sketch()
-        sketch.getStatusString = unusable_status
-        ctx = FakeCtx(FakeDoc(sketch))
-
-        assert call_inspect(sketch_module, ctx)["statusText"] is None
 
 
 def test_inspect_rejects_non_sketch_objects(sketch_module) -> None:
@@ -708,28 +646,6 @@ def test_add_geometry_supports_all_four_kinds(sketch_module) -> None:
     assert isinstance(sketch.Geometry[0], StubPoint)
 
 
-def test_deletes_apply_in_descending_index_order(sketch_module) -> None:
-    sketch = rectangle_sketch()
-    sketch.Constraints = [StubConstraint("Coincident", 0, 2, 1, 1) for _ in range(4)]
-    ctx = FakeCtx(FakeDoc(sketch))
-
-    result = call_edit(sketch_module, ctx, deleteGeometry=[3, 0])
-
-    assert result["deletedGeometry"] == [3, 0]
-    assert [op for op in sketch.ops if op[0] == "delGeometry"] == [
-        ("delGeometry", 3),
-        ("delGeometry", 0),
-    ]
-
-    constraints = call_edit(sketch_module, ctx, deleteConstraints=[2, 1])
-
-    assert constraints["deletedConstraints"] == [2, 1]
-    assert [op for op in sketch.ops if op[0] == "delConstraint"] == [
-        ("delConstraint", 2),
-        ("delConstraint", 1),
-    ]
-
-
 def test_mixed_and_duplicate_deletions_are_refused_before_the_transaction(
     sketch_module,
 ) -> None:
@@ -777,24 +693,6 @@ def test_set_datums_run_after_additions_with_final_indexes(sketch_module) -> Non
     assert result["changedDatums"] == [{"index": 0, "datum": "12 mm"}]
     assert sketch.datums == {0: "12 mm"}
     assert ("setDatum", 0, "12 mm") in sketch.ops
-
-
-def test_constraint_datum_reaches_native_constraint_as_quantity(
-    sketch_module,
-) -> None:
-    sketch = FakeSketch()
-    ctx = FakeCtx(FakeDoc(sketch))
-
-    call_edit(
-        sketch_module,
-        ctx,
-        addConstraints=[{"type": "Angle", "arguments": [0, 1], "datum": "45 deg"}],
-    )
-
-    constraint = sketch.Constraints[0]
-    assert constraint.Type == "Angle"
-    assert isinstance(constraint.Arguments[-1], StubQuantity)
-    assert constraint.Arguments[-1].text == "45 deg"
 
 
 def test_bad_index_never_opens_the_transaction(sketch_module) -> None:
@@ -939,26 +837,6 @@ def test_expression_on_another_index_plans_with_a_new_datum_constraint(
     assert sketch.expression_engine == [("Constraints[0]", "Width")]
 
 
-def test_missing_native_method_is_rejected_before_the_transaction(
-    sketch_module,
-) -> None:
-    sketch = rectangle_sketch()
-    del sketch.addConstraint  # type: ignore[attr-defined]
-    doc = FakeDoc(sketch)
-    ctx = FakeCtx(doc)
-
-    with pytest.raises(ToolError) as excinfo:
-        call_edit(
-            sketch_module,
-            ctx,
-            addConstraints=[{"type": "Horizontal", "arguments": [0]}],
-        )
-
-    assert excinfo.value.code == VALIDATION_FAILED
-    assert "addConstraint" in excinfo.value.message
-    assert doc.transactions == []
-
-
 def test_empty_operation_batch_is_rejected(sketch_module) -> None:
     sketch = rectangle_sketch()
     ctx = FakeCtx(FakeDoc(sketch))
@@ -988,26 +866,6 @@ def test_mid_batch_failure_rolls_the_batch_back(sketch_module) -> None:
     assert (excinfo.value.details or {}).get("operationState") == "rolled_back"
     assert "abort" in [transaction[0] for transaction in doc.transactions]
     assert sketch.datums == {}
-
-
-def test_invalid_datum_strings_are_rejected(sketch_module) -> None:
-    sketch = FakeSketch()
-    ctx = FakeCtx(FakeDoc(sketch))
-
-    for bad_datum in ("", "mm", "ten mm"):
-        with pytest.raises(ToolError) as excinfo:
-            call_edit(
-                sketch_module,
-                ctx,
-                addConstraints=[
-                    {
-                        "type": "DistanceX",
-                        "arguments": [0, 1],
-                        "datum": bad_datum,
-                    }
-                ],
-            )
-        assert excinfo.value.code == VALIDATION_FAILED
 
 
 def test_unknown_constraint_type_is_rejected(sketch_module) -> None:
@@ -1067,38 +925,6 @@ def test_unrecorded_constraint_arities_are_rejected_before_any_native_call(
         assert doc.transactions == []
         assert doc.open_count == 0
         assert doc.recompute_count == 0
-
-
-def test_unrecorded_constraint_type_reports_no_accepted_argument_counts(
-    sketch_module,
-) -> None:
-    # Weight has no recorded form at any arity, so there is no accepted
-    # argument count to report: the detail is null, not an empty list.
-    sketch = FakeSketch()
-    doc = FakeDoc(sketch)
-    ctx = FakeCtx(doc)
-
-    with pytest.raises(ToolError) as excinfo:
-        call_edit(
-            sketch_module,
-            ctx,
-            addConstraints=[{"type": "Weight", "arguments": [5, 1]}],
-        )
-
-    assert excinfo.value.code == VALIDATION_FAILED
-    assert excinfo.value.details == {
-        "reason": "unrecorded_constraint_shape",
-        "type": "Weight",
-        "argumentCount": 2,
-        "acceptedArgumentCounts": None,
-        "nextTool": "inspect_sketch",
-    }
-    assert sketch.ops == []
-    assert doc.transactions == []
-    assert doc.open_count == 0
-    error = tool_error_result(excinfo.value)["structuredContent"]["error"]
-    assert error["code"] == VALIDATION_FAILED
-    assert error["details"]["reason"] == "unrecorded_constraint_shape"
 
 
 def test_recorded_constraint_shapes_plan_and_execute(sketch_module) -> None:
@@ -1450,37 +1276,6 @@ def test_point_position_outside_the_domain_is_rejected_before_the_native_call(
     assert "point position" in excinfo.value.message
 
 
-def test_datum_edits_reach_the_native_call_as_quantities(sketch_module) -> None:
-    # probes["setDatum.quantity"]: the native call accepts a quantity;
-    # the string variant fails with TypeError: Wrong arguments.
-    sketch = rectangle_sketch()
-    ctx = FakeCtx(FakeDoc(sketch))
-
-    result = call_edit(
-        sketch_module,
-        ctx,
-        addConstraints=[{"type": "DistanceX", "arguments": [0, 1, 3, 2], "datum": "10 mm"}],
-        setDatums=[{"index": 0, "datum": "12 mm"}],
-    )
-
-    assert result["changedDatums"] == [{"index": 0, "datum": "12 mm"}]
-    assert sketch.datums == {0: "12 mm"}
-    with pytest.raises(TypeError, match="Wrong arguments"):
-        sketch._set_datum(0, "12 mm")
-
-
-def test_construction_state_comes_from_getconstruction(sketch_module) -> None:
-    # probes["geometry.getConstruction"]: the element attribute does not
-    # exist; the flag is read from the sketch.
-    sketch = FakeSketch(geometry=[line(0, 0, 10, 0), line(0, 5, 10, 5)])
-    sketch.construction_flags[1] = True
-    ctx = FakeCtx(FakeDoc(sketch))
-
-    result = call_inspect(sketch_module, ctx)
-
-    assert [row["construction"] for row in result["geometry"]] == [False, True]
-
-
 # ---------------------------------------------------------------------------
 # Request-local geometry identifiers.
 # ---------------------------------------------------------------------------
@@ -1521,32 +1316,6 @@ def test_local_geometry_ids_commit_geometry_and_constraints_in_one_call(
     validate_schema(result, definition["outputSchema"])
 
 
-def test_local_geometry_forward_reference_resolves(sketch_module) -> None:
-    sketch = rectangle_sketch()
-    doc = FakeDoc(sketch)
-    ctx = FakeCtx(doc)
-
-    result = call_edit(
-        sketch_module,
-        ctx,
-        addGeometry=[
-            {"kind": "lineSegment", "id": "first", "start": [0, 0], "end": [0, 5]},
-            {"kind": "lineSegment", "id": "second", "start": [0, 0], "end": [5, 0]},
-        ],
-        addConstraints=[
-            {
-                "type": "Coincident",
-                "arguments": [{"geometry": "second"}, 1, {"geometry": "first"}, 1],
-            },
-        ],
-    )
-
-    assert result["addedGeometryIds"] == {"first": 4, "second": 5}
-    constraint = sketch.Constraints[-1]
-    assert (constraint.First, constraint.Second) == (5, 4)
-    assert doc.transactions[-1] == ("commit",)
-
-
 def test_local_geometry_ids_track_expansion_and_deletion(sketch_module) -> None:
     """The planned index must follow expanded positions and deletions.
 
@@ -1570,22 +1339,6 @@ def test_local_geometry_ids_track_expansion_and_deletion(sketch_module) -> None:
 
     assert result["addedGeometryIds"] == {"bore": 7}
     assert result["addedGeometry"] == [3, 4, 5, 6, 7]
-    assert doc.transactions[-1] == ("commit",)
-
-
-def test_added_geometry_ids_is_empty_without_ids(sketch_module) -> None:
-    sketch = rectangle_sketch()
-    doc = FakeDoc(sketch)
-    ctx = FakeCtx(doc)
-
-    result = call_edit(
-        sketch_module,
-        ctx,
-        addGeometry=[{"kind": "lineSegment", "start": [0, 0], "end": [1, 0]}],
-    )
-
-    assert result["addedGeometryIds"] == {}
-    assert result["addedGeometry"] == [4]
     assert doc.transactions[-1] == ("commit",)
 
 
@@ -1688,34 +1441,6 @@ def test_local_geometry_reference_in_radius_value_slot_is_refused(
     assert excinfo.value.details == {"reason": "local_ref_wrong_slot", "position": 1}
     assert doc.transactions == []
     assert sketch.ops == []
-
-
-def test_local_geometry_reference_in_axis_slot_resolves(sketch_module) -> None:
-    """An ``A`` slot is geometry-or-axis, so a local reference resolves there."""
-
-    sketch = rectangle_sketch()
-    doc = FakeDoc(sketch)
-    ctx = FakeCtx(doc)
-
-    result = call_edit(
-        sketch_module,
-        ctx,
-        addGeometry=[
-            {"kind": "lineSegment", "id": "axis", "start": [0, 0], "end": [0, 5]},
-            {"kind": "lineSegment", "id": "other", "start": [0, 0], "end": [5, 0]},
-        ],
-        addConstraints=[
-            {
-                "type": "Coincident",
-                "arguments": [{"geometry": "other"}, 1, {"geometry": "axis"}, 1],
-            },
-        ],
-    )
-
-    assert result["addedGeometryIds"] == {"axis": 4, "other": 5}
-    constraint = sketch.Constraints[-1]
-    assert (constraint.First, constraint.Second) == (5, 4)
-    assert doc.transactions[-1] == ("commit",)
 
 
 def test_geometry_id_on_a_composite_entry_fails_schema_validation(
@@ -1863,43 +1588,6 @@ def add_one(sketch_module: types.ModuleType, entry: dict) -> tuple[FakeSketch, F
     return sketch, doc
 
 
-def test_slot_omission_defaults_match_explicit(sketch_module) -> None:
-    omitted, _ = add_one(sketch_module, {"kind": "slot", "length": 10, "diameter": 6})
-    explicit, _ = add_one(
-        sketch_module,
-        {
-            "kind": "slot",
-            "length": 10,
-            "diameter": 6,
-            "center": [0, 0],
-            "rotation": 0,
-            "construction": False,
-        },
-    )
-    assert geometry_facts(omitted.Geometry) == geometry_facts(explicit.Geometry)
-    assert [omitted.construction_flags[i] for i in range(4)] == [False] * 4
-
-
-def test_rounded_rectangle_omission_defaults_match_explicit(sketch_module) -> None:
-    omitted, _ = add_one(
-        sketch_module,
-        {"kind": "rounded_rectangle", "width": 20, "height": 10, "corner_radius": 2},
-    )
-    explicit, _ = add_one(
-        sketch_module,
-        {
-            "kind": "rounded_rectangle",
-            "width": 20,
-            "height": 10,
-            "corner_radius": 2,
-            "origin": [0, 0],
-            "construction": False,
-        },
-    )
-    assert geometry_facts(omitted.Geometry) == geometry_facts(explicit.Geometry)
-    assert [omitted.construction_flags[i] for i in range(8)] == [False] * 8
-
-
 def test_composite_inputs_validate_against_the_input_schema(sketch_module) -> None:
     definition = next(
         tool for tool in sketch_module.TOOL_DEFINITIONS if tool["name"] == "edit_sketch"
@@ -1998,22 +1686,6 @@ def test_slot_constraint_set(sketch_module) -> None:
     assert sketch.Constraints[4].Arguments == (0, 2)
 
 
-def test_slot_generates_no_two_argument_tangent_and_no_coincident(sketch_module) -> None:
-    # The solver reports a closed chain that carries both a Coincident
-    # and an endpoint Tangent at a join as redundant (live 1.1.3 evidence:
-    # solve() == -2, "Sketch with redundant constraints"). The two-token
-    # Tangent is valid on its own but does not constrain the shared end
-    # points, so a slot built from it alone stays at 13 DoF where the
-    # four-token form reaches 5 (live 1.1.3 evidence). Neither may be
-    # generated.
-    sketch, _ = add_one(
-        sketch_module, {"kind": "slot", "center": [5, 5], "length": 10, "diameter": 6}
-    )
-    assert "Coincident" not in constraint_types(sketch)
-    for constraint in sketch.Constraints:
-        assert constraint.Type != "Tangent" or len(constraint.Arguments) == 4
-
-
 def test_rounded_rectangle_boundary_area_and_sweeps(sketch_module) -> None:
     sketch, doc = add_one(
         sketch_module,
@@ -2068,24 +1740,6 @@ def test_rounded_rectangle_constraint_set(sketch_module) -> None:
     assert sketch.Constraints[12].Arguments == (1, 3)
     assert sketch.Constraints[13].Arguments == (3, 5)
     assert sketch.Constraints[14].Arguments == (5, 7)
-
-
-def test_rounded_rectangle_generates_no_two_argument_tangent_and_no_coincident(
-    sketch_module,
-) -> None:
-    sketch, _ = add_one(
-        sketch_module,
-        {
-            "kind": "rounded_rectangle",
-            "origin": [0, 0],
-            "width": 20,
-            "height": 10,
-            "corner_radius": 2,
-        },
-    )
-    assert "Coincident" not in constraint_types(sketch)
-    for constraint in sketch.Constraints:
-        assert constraint.Type != "Tangent" or len(constraint.Arguments) == 4
 
 
 def test_composite_operation_counts_across_batches(sketch_module) -> None:

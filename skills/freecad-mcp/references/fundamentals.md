@@ -62,7 +62,7 @@ The value shape must match the property type. `create_object`, `create_objects`,
 
 | Property type | Send |
 |---|---|
-| `App::PropertyBool`, `Integer`, `Float` | JSON boolean, integer, or number. |
+| `App::PropertyBool`, `Integer`, `Float` | The exact matching JSON kind: `PropertyBool` takes a boolean, `PropertyInteger` and `IntegerConstraint` take an integer (booleans excluded), `PropertyFloat` and `FloatConstraint` take a number. A value of the wrong kind is refused with `VALIDATION_FAILED`. |
 | `App::PropertyString` | String. |
 | `App::PropertyLength`, `Distance`, `Angle`, `Quantity`, `Area`, `Volume`, `Speed`, `Percent` | A finite JSON number in the property's internal unit. A unit string such as `"5 mm"` is rejected. Strip the unit, or use `run_script`. |
 | `App::PropertyVector`, `VectorDistance`, `Direction` | `[x, y, z]` or `{"x": n, "y": n, "z": n}`. |
@@ -73,7 +73,7 @@ The value shape must match the property type. `create_object`, `create_objects`,
 | `App::PropertyLinkSubList`, `XLinkSubList` | Array of shared targets; query entries expand in order and all entries are validated before assignment (expanded pairs cap at 64 per operation). |
 | `App::PropertyColor` | `[r, g, b]` or `[r, g, b, a]`. |
 | `App::PropertyEnumeration` | The exact allowed string. |
-| `Part::PropertyPartShape` and other unmapped types | The raw JSON value passes through and FreeCAD rejects most of them. Assign a shape through `run_script`. |
+| `Part::PropertyPartShape` and other unmapped types | A non-object JSON value passes through, and FreeCAD rejects a mismatch (the mutation gate rolls the assignment back). A JSON object is refused with `VALIDATION_FAILED` before assignment. Assign a shape through `run_script`. |
 
 Every mapped number must be a JSON number, not a numeric string, and must be finite.
 

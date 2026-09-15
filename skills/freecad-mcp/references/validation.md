@@ -97,7 +97,7 @@ After a change, attribute each interference delta to named geometry before you a
 
 ### Named acceptance checks
 
-When a fit decision must be recorded as evidence in one call, pass `checks` (1–16) to `validate_geometry`. Each check is one of three closed kinds; an optional `id` (1–64 characters) defaults to `check-<one-based input position>`, and duplicate effective ids refuse with `duplicate_check_id`. Targets use the shared whole/signed/query union, so a query target resolves to exactly one shape and adds a `resolvedSelections` receipt.
+When a fit decision must be recorded as evidence in one call, pass `checks` (1–16) to `validate_geometry`. Each check is one of three closed kinds; an optional `id` (1–64 characters) defaults to `check-<one-based input position>`, and duplicate effective ids refuse with `duplicate_check_id`. Each check target must be a whole object: signed, query, and subshape targets are refused at schema validation, because a check against a subshape can never prove the acceptance condition.
 
 ```json
 {

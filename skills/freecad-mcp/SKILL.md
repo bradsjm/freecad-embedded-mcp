@@ -77,7 +77,7 @@ Prefer origin planes, datum geometry, named parameters, and master sketches. Avo
 
 ## Use the tools in canonical order
 
-The server registers these 26 tools in this order. Use the phases below as the default call order.
+Use the phases below as the default call order. Use `tools/list` for the live enabled tool surface and schemas.
 
 1. **Discover:** `discover_capabilities`.
 2. **Resolve documents:** `inspect_documents`, `new_document`, `open_document`, `import_model`, `save_document`, `close_document`, `reload_document`.
