@@ -24,6 +24,8 @@ After each meaningful modeling stage:
 3. Reject `Shape.error`, missing shape data, zero volume when a solid is expected, or an unexpected compound/multiple-solid result.
 4. Check the final Body `Tip` if using PartDesign.
 
+Bounds are document-space millimetre coordinates that describe the object's resulting `Shape`. For an additive or subtractive PartDesign feature they report the cumulative Body result, not the material that feature alone added or removed. Quantify isolated material with `measure(mode="difference")` against the expected bounds. Prove a wall thickness with `measure` faces or a section; a parameter value or a profile elevation alone is not thickness evidence, and view panels are qualitative only.
+
 Pass explicit `objects`. Default to compact detail. Use full detail only for selected objects and targeted property pages.
 
 After a spreadsheet edit, inspect the sheet with full detail. Confirm the target cell's content, formula, alias, value, and error state.

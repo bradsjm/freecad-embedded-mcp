@@ -106,7 +106,7 @@ Operations that consumed a query-origin link or reference report `resolvedSelect
 3. Call `inspect_objects(document)` and read the compact rows before editing. Use `detail: "full"` for a `Spreadsheet::Sheet` when cell contents, formulas, aliases, or evaluated values matter.
 4. Create or edit one dependency stage at a time; use `create_objects` only for independent entries, then inspect after each recompute.
 5. Run `validate_geometry` and `measure` on the final solid.
-6. Call `export`, then `capture_view` with the `mode` that matches the question: `overview` after opens and large modifications, `interior` for internal features, `fit` for mating, `detail` for one enlarged feature.
+6. Call `export`, then `capture_view` with the `mode` that matches the question: `overview` after opens and large modifications, `interior` for internal features, `fit` for mating, `detail` for one enlarged feature. When inspecting an existing model, call `capture_view` `overview` as soon as you locate the relevant objects, then keep later reads targeted: an `objects` selection with `detail: "full"` and `property_filter`. Read bounds as cumulative PartDesign results, establish orientation from geometry and axes rather than object labels, and verify thickness with `measure` faces or sections before attributing a parameter to a wall.
 
 ## Property mapping
 
@@ -118,7 +118,7 @@ For `Spreadsheet::Sheet`, use `properties.cells` with address or alias keys. Bar
 
 Compact rows carry identity, state, bounds, validity, solid count, Tip, and links. Use an explicit `objects` selection for targeted reads.
 
-Use `detail: "full"` only for selected objects. Limit properties with `property_filter`, `property_offset`, and `property_limit`. Continue object pages with `cursor`.
+Use `detail: "full"` only for selected objects. Limit properties with `property_filter`, `property_offset`, and `property_limit`. Continue object pages with `cursor`. Compact rows always carry bounds; they describe the object's resulting `Shape` in document space, so a PartDesign feature reports the cumulative Body result rather than its own added or removed material.
 
 A full spreadsheet row adds bounded cells, aliases, raw contents, formulas, evaluated values, and errors.
 

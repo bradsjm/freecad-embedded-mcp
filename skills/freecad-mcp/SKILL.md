@@ -49,7 +49,7 @@ Read `references/mcp-tools.md` only when the active tool schema or a server edge
 10. Re-read each changed property, cell, link, or file effect.
 11. Validate the stage before you add dependent features.
 12. Save the editable source before expensive or destructive work.
-13. Validate geometry, fit, placement, and visual form; run the `overview` review after large modifications and document opens.
+13. Validate geometry, fit, placement, and visual form; run the `overview` review after large modifications and document opens, and early in existing-model inspection after you locate the relevant objects.
 14. Export only the intended final objects.
 15. Report tool results as evidence, not as inferred success.
 
@@ -107,6 +107,7 @@ The protocol also provides `server/discover`, `tools/list`, `tasks/get`, `tasks/
 - Require `cellContentsPersisted: true` after a spreadsheet write.
 - Pass `expected_generation` on object, sketch, or feature edits after an earlier inspection.
 - Pass `expected_solids` and `expected_bounds` when the design determines them.
+- Read bounds as feature results: a PartDesign pad or pocket reports the cumulative Body result, not only the material it added or removed. Establish orientation from geometry and explicit axes, never from object labels. Verify wall thickness with `measure` (faces or section) or `inspect_topology` before attributing a parameter value to a specific wall. After locating the relevant objects in an existing model, capture one `capture_view` overview before reasoning about placement, and narrow further reads to those objects with `objects` plus `detail: "full"` and `property_filter`.
 - Address topology with the shared targets: whole object `{"object":"Name"}`, signed reference `{"object":"Name","subelement":"<token>"}` taken from `inspect_topology`, or declarative query `{"object":"Name","query":[{"role":"face","selector":">Z"}]}`.
 - Reuse one query descriptor across `measure` targets, `create_feature` subelement lists, link properties such as FEM `References`, and `capture_view` focus. A consumer that needs exactly one shape refuses `selection_empty` or `selection_ambiguous`; a set consumer expands the matches and reports `resolvedSelections` receipts carrying the selection-time generation.
 - Selectors use the bounded CadQuery grammar. Named views keep CadQuery meanings, not FreeCAD camera names: front=>Z, back=<Z, left=<X, right=>X, top=>Y, bottom=<Y. Never send a raw `FaceN`/`EdgeN` label as durable input; sign it through `inspect_topology` first.

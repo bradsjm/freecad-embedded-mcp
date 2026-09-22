@@ -453,6 +453,15 @@ _OBJECT_ROW = {
         "geometryUnavailable": {"type": "string"},
         "bounds": {
             "type": ["array", "null"],
+            "description": (
+                "Document-space millimetre coordinates in xmin, ymin, zmin, "
+                "xmax, ymax, zmax order. Bounds describe the object's "
+                "resulting Shape after placement. For additive and "
+                "subtractive PartDesign features this includes the "
+                "preceding Body history, so bounds describe the cumulative "
+                "result, not only the material the feature added or "
+                "removed. Compact and full detail report the same bounds."
+            ),
             "items": {"type": "number"},
             "minItems": 6,
             "maxItems": 6,
@@ -989,6 +998,10 @@ TOOL_DEFINITIONS = [
             "solid count, Body tip and link identities; full detail adds "
             "local and global placements, property pages and property "
             "metadata with typed unavailable markers and expressions. "
+            "Bounds are document-space millimetre coordinates and describe "
+            "the object's resulting Shape; a PartDesign pad or pocket "
+            "reports the cumulative Body result, not only the material it "
+            "added or removed. "
             "Spreadsheet sheets also expose a bounded cell inventory with "
             "raw contents, formulas, aliases, evaluated values and errors. "
             "Cell rows mark truncated content and values explicitly. "
