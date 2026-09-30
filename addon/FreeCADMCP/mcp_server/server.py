@@ -164,6 +164,7 @@ _READ_ONLY_TOOLS = frozenset(
     {
         "discover_capabilities",
         "inspect_documents",
+        "inspect_user_context",
         "inspect_objects",
         "inspect_topology",
         "validate_geometry",
@@ -816,8 +817,9 @@ class Server:
     def _add_definition(self, definition: Any, handlers: Any, preflight: Any) -> None:
         """Register one checked tool definition, its handler and optional preflight.
 
-        The public ``capture_view`` schema is rewritten to metadata only while
-        the raw schema is kept to validate payloads before image conversion.
+        The public ``capture_view`` and ``inspect_user_context`` schemas are
+        rewritten to metadata only (image bytes removed) while the raw
+        schemas are kept to validate payloads before image conversion.
         """
         name, description, input_schema, output_schema = _unpack_definition(definition)
         # A liberal-input normalizer rewrites unambiguous synonyms, case,
@@ -832,7 +834,7 @@ class Server:
         if not isinstance(input_schema, Mapping) or not isinstance(output_schema, Mapping):
             raise RuntimeError(f"tool {name} must declare finite input/output schemas")
         raw_output_schema: Mapping[str, Any] | None = None
-        if name == "capture_view":
+        if name in ("capture_view", "inspect_user_context"):
             raw_output_schema = output_schema
             output_schema = _metadata_only_capture_schema(output_schema)
             self._raw_output_schemas[name] = dict(raw_output_schema)
@@ -2885,12 +2887,14 @@ _CAPTURE_IMAGE_DATA_KEY = "data"
 
 
 def _metadata_only_capture_schema(schema: Mapping[str, Any]) -> dict:
-    """Return the public ``capture_view`` schema without the image bytes.
+    """Return the public image-tool schema without the image bytes.
 
     ``data`` is removed from ``properties`` and ``required`` so the
     advertised contract describes exactly the metadata that survives in
-    ``structuredContent``: mime type, dimensions, document, generation,
-    mode, focus, view name and views.
+    ``structuredContent``. Serves both image tools: ``capture_view``
+    (mime type, dimensions, document, generation, mode, focus, view name
+    and views) and ``inspect_user_context`` (mime type and dimensions as
+    optional metadata beside the structured observations).
     """
 
     public = {

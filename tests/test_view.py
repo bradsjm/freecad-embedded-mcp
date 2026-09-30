@@ -14,8 +14,10 @@ itself fails.
 import base64
 import importlib.util
 import os
+import struct
 import sys
 import types
+import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -84,15 +86,36 @@ class FakeApplication:
 
 
 class FakeSelectionObject:
-    def __init__(self, obj: Any, subelements: list[str]) -> None:
+    def __init__(
+        self,
+        obj: Any,
+        subelements: list[str],
+        document_name: str | None = None,
+        object_name: str | None = None,
+    ) -> None:
         self.Object = obj
         self.SubElementNames = list(subelements)
+        self._document_name = (
+            document_name if document_name is not None else getattr(obj, "_doc", None)
+        )
+        self._object_name = object_name if object_name is not None else getattr(obj, "Name", None)
+
+    @property
+    def DocumentName(self) -> str | None:
+        return self._document_name
+
+    @property
+    def ObjectName(self) -> str | None:
+        return self._object_name
 
 
 class FakeSelection:
     def __init__(self) -> None:
         self.complete: list[dict[str, Any]] = []
         self.clear_count = 0
+        self.ex_calls: list[tuple[str | None, int]] = []
+        self.ex_items: list[Any] | None = None
+        self.ex_error: Exception | None = None
 
     def clearSelection(self) -> None:
         self.complete = []
@@ -121,12 +144,31 @@ class FakeSelection:
     def getCompleteSelection(self) -> list[Any]:
         return [entry["object"] for entry in self.complete]
 
-    def getSelectionEx(self, docname: str | None = None) -> list[FakeSelectionObject]:
+    def getSelectionEx(
+        self, docname: str | None = None, resolve: int = 0
+    ) -> list[FakeSelectionObject]:
+        self.ex_calls.append((docname, resolve))
+        if self.ex_error is not None:
+            raise self.ex_error
+        if self.ex_items is not None:
+            return list(self.ex_items)
         return [
             FakeSelectionObject(entry["object"], entry["subelements"])
             for entry in self.complete
             if docname is None or entry["doc"] == docname
         ]
+
+
+class UnreadableSelectionObject:
+    """Context double whose native subelement list explodes on read."""
+
+    DocumentName = "Smoke"
+    ObjectName = "Box"
+    Object = None
+
+    @property
+    def SubElementNames(self) -> list[str]:
+        raise RuntimeError("native subelement list exploded")
 
 
 class FakeView:
@@ -198,11 +240,31 @@ class FakeView:
 class FakeAppDocument:
     def __init__(self, name: str) -> None:
         self.Name = name
+        self.Label = name
+        self.Objects: list[Any] = []
 
 
 class FakeGuiDocument:
-    def __init__(self, view: Any) -> None:
+    def __init__(self, view: Any, active_object: Any = None, edit_holder: Any = None) -> None:
         self.ActiveView = view
+        self.ActiveObject = active_object
+        self._edit_holder = edit_holder
+
+    def getInEdit(self) -> Any:
+        return self._edit_holder
+
+
+class FakeMainWindow:
+    """Context double of the native main window proxy."""
+
+    def __init__(self, gui: "FakeGui") -> None:
+        self.gui = gui
+
+    def getActiveWindow(self) -> Any:
+        self.gui.active_window_calls += 1
+        if self.gui.active_window_error is not None:
+            raise self.gui.active_window_error
+        return self.gui.context_window
 
 
 class FakeApp:
@@ -232,6 +294,10 @@ class FakeGui:
         self.messages: list[str] = []
         self.set_active_calls: list[str] = []
         self.active_name: str | None = None
+        self.context_window: Any = None
+        self.active_window_calls = 0
+        self.active_window_error: Exception | None = None
+        self.active_workbench_error: Exception | None = None
 
     def getDocument(self, name: str) -> FakeGuiDocument:
         if name not in self.views:
@@ -251,6 +317,19 @@ class FakeGui:
     def SendMsgToActiveView(self, message: str) -> None:
         self.messages.append(message)
 
+    def activeWorkbench(self) -> Any:
+        if self.active_workbench_error is not None:
+            raise self.active_workbench_error
+        return types.SimpleNamespace(name=lambda: "PartDesign")
+
+    def getMainWindow(self) -> FakeMainWindow:
+        return FakeMainWindow(self)
+
+    def activateActiveWindow(self) -> None:
+        # A setter/activation path must never be reached by the context
+        # tool; tripping here fails the test that caused it.
+        raise AssertionError("activateActiveWindow must not be called")
+
     @property
     def Selection(self) -> FakeSelection:
         return self.selection
@@ -268,6 +347,7 @@ class FakeCtx:
         self.objects = objects
         self.signer = protocol.ConsentSigner(ttl_s=3600)
         self._identities: dict[Any, str] = {}
+        self._generations: dict[str, int] = {}
 
     def require_document(self, name: str) -> FakeAppDocument:
         doc = self.App.documents.get(name)
@@ -276,7 +356,7 @@ class FakeCtx:
         return doc
 
     def document_generation(self, doc: Any) -> int:
-        return 7
+        return self._generations.get(doc.Name, 7)
 
     def require_object(self, doc: Any, name: str) -> Any:
         obj = self.objects.get(doc.Name, {}).get(name)
@@ -1235,7 +1315,9 @@ def test_restoration_failure_raises_with_failed_list(view_module) -> None:
 
 
 def test_mode_schemas_are_finite(view_module) -> None:
-    (definition,) = view_module.TOOL_DEFINITIONS
+    (definition,) = [
+        item for item in view_module.TOOL_DEFINITIONS if item["name"] == "capture_view"
+    ]
     protocol.check_schema(definition["inputSchema"])
     protocol.check_schema(definition["outputSchema"])
     protocol.validate_schema({"document": "Smoke", "mode": "overview"}, definition["inputSchema"])
@@ -1341,7 +1423,9 @@ def test_mode_schemas_are_finite(view_module) -> None:
 
 
 def test_removed_focus_fields_are_refused_at_the_schema(view_module) -> None:
-    (definition,) = view_module.TOOL_DEFINITIONS
+    (definition,) = [
+        item for item in view_module.TOOL_DEFINITIONS if item["name"] == "capture_view"
+    ]
     sample_output = {
         "mimeType": "image/png",
         "data": "cG5n",
@@ -1374,3 +1458,516 @@ def test_removed_focus_fields_are_refused_at_the_schema(view_module) -> None:
                 {**sample_output, removed: "Box"},
                 definition["outputSchema"],
             )
+
+
+# ---------------------------------------------------------------------------
+# inspect_user_context: bounded user-context snapshot.
+# ---------------------------------------------------------------------------
+
+
+def _minimal_png(width: int = 4, height: int = 3) -> bytes:
+    """Build a structurally valid grayscale PNG with stdlib only."""
+
+    def _chunk(ctype: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + ctype
+            + payload
+            + struct.pack(">I", zlib.crc32(ctype + payload) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    scanlines = b"".join(b"\x00" + b"\xff" * width for _ in range(height))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", zlib.compress(scanlines))
+        + _chunk(b"IEND", b"")
+    )
+
+
+class FakeContextView:
+    """3D foreground view double for the context snapshot."""
+
+    def __init__(
+        self,
+        size: tuple[int, int] = (2000, 1500),
+        camera: str | None = None,
+        camera_type: str | None = "Perspective",
+    ) -> None:
+        self.size = size
+        self.camera = (
+            camera
+            if camera is not None
+            else "#Inventor V2.1 ascii\nposition 1 2 3\norientation 0 0 1 0\nfocalDistance 10"
+        )
+        self.camera_type = camera_type
+        self.save_calls: list[tuple[str, int, int, str]] = []
+        self.save_error: Exception | None = None
+        self.payload = _minimal_png()
+        self.get_camera_error: Exception | None = None
+        # State the tool must never touch during a capture.
+        self.clipping = False
+        self.transparency = 0
+
+    def getCamera(self) -> str:
+        if self.get_camera_error is not None:
+            raise self.get_camera_error
+        return self.camera
+
+    def getSize(self) -> tuple[int, int]:
+        return self.size
+
+    def getCameraType(self) -> str:
+        if self.camera_type is None:
+            raise RuntimeError("no camera type")
+        return self.camera_type
+
+    def saveImage(self, path: str, width: int, height: int, style: str) -> None:
+        self.save_calls.append((str(path), width, height, style))
+        if self.save_error is not None:
+            raise self.save_error
+        with open(path, "wb") as handle:
+            handle.write(self.payload)
+
+
+class FakeContextQImage:
+    """QtGui.QImage double with controllable decode outcome and dimensions."""
+
+    ok = True
+    dims = (768, 576)
+
+    def __init__(self, path: str) -> None:
+        self.path = str(path)
+
+    def isNull(self) -> bool:
+        return not FakeContextQImage.ok
+
+    def width(self) -> int:
+        return FakeContextQImage.dims[0]
+
+    def height(self) -> int:
+        return FakeContextQImage.dims[1]
+
+
+def install_context_qimage(ok: bool = True, dims: tuple[int, int] = (768, 576)) -> None:
+    """Point the stubbed PySide QtGui at the controllable QImage double."""
+
+    FakeContextQImage.ok = ok
+    FakeContextQImage.dims = dims
+    sys.modules["PySide"].QtGui = types.SimpleNamespace(QImage=FakeContextQImage)
+
+
+def make_context_object(
+    name: str,
+    doc_name: str,
+    type_id: str = "Part::Feature",
+    faces: int = 6,
+    edges: int = 12,
+    derived: Any = None,
+) -> Any:
+    """Context document object with a real document/name identity.
+
+    The shape resolves through ``geometry.placed_shape`` exactly like a
+    capture target, so minted tokens feed the real resolver unchanged.
+    """
+
+    shape = FakeShape(
+        (0.0, 0.0, 0.0, 10.0, 10.0, 10.0),
+        faces=[None] * faces,
+        edges=[None] * edges,
+    )
+    obj = FakeShapeObject(name, doc_name, shape)
+    obj.TypeId = type_id
+    obj.Label = f"{name}Label"
+    obj.Document = types.SimpleNamespace(Name=doc_name)
+    if derived is not None:
+        obj.isDerivedFrom = derived
+    return obj
+
+
+def make_context_ctx(
+    view: Any = None,
+    selection_items: list[Any] | None = None,
+    active_name: str | None = "Smoke",
+) -> FakeCtx:
+    """A context-shaped FakeCtx: two documents, distinct live objects."""
+
+    documents = {
+        "Smoke": FakeAppDocument("Smoke"),
+        "Other": FakeAppDocument("Other"),
+    }
+    box = make_context_object("Box", "Smoke")
+    lid = make_context_object("Lid", "Other")
+    link = make_context_object("Rod", "Smoke", type_id="App::Link", faces=0, edges=0)
+    sketch = make_context_object(
+        "Sketch",
+        "Smoke",
+        type_id="Sketcher::SketchObject",
+        faces=0,
+        edges=0,
+        derived=lambda type_name: type_name == "Sketcher::SketchObject",
+    )
+    sketch_plain = make_context_object(
+        "SketchPlain", "Smoke", type_id="Sketcher::SketchObject", faces=0, edges=0
+    )
+    documents["Smoke"].Objects = [box, link, sketch, sketch_plain]
+    documents["Other"].Objects = [lid]
+    ctx = FakeCtx(
+        documents,
+        {"Smoke": FakeView(), "Other": FakeView()},
+        {
+            "Smoke": {"Box": box, "Rod": link, "Sketch": sketch, "SketchPlain": sketch_plain},
+            "Other": {"Lid": lid},
+        },
+    )
+    ctx._context_objects = {
+        "Smoke": {"Box": box, "Rod": link, "Sketch": sketch, "SketchPlain": sketch_plain},
+        "Other": {"Lid": lid},
+    }
+    ctx.App.active_name = active_name
+    ctx._generations = {"Smoke": 7, "Other": 2}
+    if view is None:
+        view = FakeContextView()
+    ctx._context_view = view
+    gui_doc = FakeGuiDocument(
+        FakeView(),
+        active_object=types.SimpleNamespace(Object=box),
+        edit_holder=None,
+    )
+    ctx._context_gui_doc = gui_doc
+    ctx.Gui.getDocument = lambda name: gui_doc  # type: ignore[method-assign]
+    ctx.Gui.context_window = view
+    ctx.Gui.selection.ex_items = list(selection_items or [])
+    return ctx
+
+
+def assert_context_valid(view_module: Any, result: dict[str, Any]) -> None:
+    """Validate one handler result against the registered raw schema."""
+
+    protocol.validate_schema(result, view_module._CONTEXT_OUTPUT_SCHEMA)
+
+
+def test_context_selection_rows_carry_generations_and_targets(view_module) -> None:
+    ctx = make_context_ctx()
+    box = ctx._context_objects["Smoke"]["Box"]
+    lid = ctx._context_objects["Other"]["Lid"]
+    ctx.Gui.selection.ex_items = [
+        FakeSelectionObject(box, [], "Smoke", "Box"),
+        FakeSelectionObject(box, ["Edge1", "Edge3"], "Smoke", "Box"),
+        FakeSelectionObject(lid, ["Face2"], "Other", "Lid"),
+    ]
+
+    result = view_module.inspect_user_context(ctx, {})
+
+    selection = result["selection"]
+    assert selection["status"] == "available"
+    assert selection["count"] == 4
+    assert selection["truncated"] is False
+    rows = selection["entries"]
+    assert [(row["object"], row["subelement"]) for row in rows] == [
+        ("Box", None),
+        ("Box", "Edge1"),
+        ("Box", "Edge3"),
+        ("Lid", "Face2"),
+    ]
+    assert [row["generation"] for row in rows] == [7, 7, 7, 2]
+    assert rows[0]["target"] == {"object": "Box"}
+    assert all(row["target"] is not None for row in rows)
+    assert all(row["reason"] is None for row in rows)
+    # The explicit resolve-disabling native call shape, exactly once.
+    assert ctx.Gui.selection.ex_calls == [("*", 0)]
+    # No activation, selection change, or preference write happened.
+    assert ctx.App.set_active_calls == []
+    assert ctx.Gui.set_active_calls == []
+    assert ctx.Gui.messages == []
+    assert FakeParamGet.set_calls == []
+    assert_context_valid(view_module, result)
+
+
+def test_context_targets_resolve_and_go_stale(view_module) -> None:
+    ctx = make_context_ctx()
+    box = ctx._context_objects["Smoke"]["Box"]
+    lid = ctx._context_objects["Other"]["Lid"]
+    ctx.Gui.selection.ex_items = [
+        FakeSelectionObject(box, ["Edge1"], "Smoke", "Box"),
+        FakeSelectionObject(lid, ["Face2"], "Other", "Lid"),
+    ]
+    result = view_module.inspect_user_context(ctx, {})
+    edge_row = result["selection"]["entries"][0]
+    face_row = result["selection"]["entries"][1]
+
+    edge_obj, edge_selection = geometry._resolve_target(
+        ctx, ctx.require_document("Smoke"), edge_row["target"], "focus"
+    )
+    face_obj, face_selection = geometry._resolve_target(
+        ctx, ctx.require_document("Other"), face_row["target"], "focus"
+    )
+    assert edge_obj is box and edge_selection["role"] == "edge"
+    assert edge_selection["index"] == 1
+    assert face_obj is lid and face_selection["role"] == "face"
+    assert face_selection["index"] == 2
+
+    # A generation bump makes the same token stale for the real resolver.
+    ctx._generations["Smoke"] = 8
+    with pytest.raises(ToolError) as excinfo:
+        geometry._resolve_target(ctx, ctx.require_document("Smoke"), edge_row["target"], "focus")
+    assert excinfo.value.details["reason"] == "stale_generation"
+
+    # A same-name replacement document fails identity matching.
+    ctx._generations["Smoke"] = 7
+    ctx.App.documents["Smoke"] = FakeAppDocument("Smoke")
+    with pytest.raises(ToolError) as excinfo:
+        geometry._resolve_target(ctx, ctx.require_document("Smoke"), edge_row["target"], "focus")
+    assert excinfo.value.details["reason"] == "document_mismatch"
+
+
+def test_context_unsupported_rows_stay_descriptive(view_module) -> None:
+    ctx = make_context_ctx()
+    box = ctx._context_objects["Smoke"]["Box"]
+    link = ctx._context_objects["Smoke"]["Rod"]
+    sketch = ctx._context_objects["Smoke"]["Sketch"]
+    sketch_plain = ctx._context_objects["Smoke"]["SketchPlain"]
+    ctx.Gui.selection.ex_items = [
+        FakeSelectionObject(link, ["Face1"], "Smoke", "Rod"),
+        FakeSelectionObject(link, [], "Smoke", "Rod"),
+        FakeSelectionObject(sketch, ["Edge1"], "Smoke", "Sketch"),
+        FakeSelectionObject(sketch_plain, ["Edge1"], "Smoke", "SketchPlain"),
+        FakeSelectionObject(box, ["Face1.Edge2"], "Smoke", "Box"),
+        FakeSelectionObject(box, ["Vertex1"], "Smoke", "Box"),
+        FakeSelectionObject(box, ["Face0"], "Smoke", "Box"),
+        FakeSelectionObject(box, ["Face99"], "Smoke", "Box"),
+    ]
+
+    result = view_module.inspect_user_context(ctx, {})
+
+    rows = result["selection"]["entries"]
+    by_subelement = {row["subelement"]: row for row in rows}
+    assert by_subelement["Face1"]["reason"] == "unsupported_instance"
+    # A whole linked instance keeps its instance name.
+    assert rows[1]["subelement"] is None
+    assert rows[1]["target"] == {"object": "Rod"}
+    sketch_rows = [
+        row
+        for row in rows
+        if row["object"] in ("Sketch", "SketchPlain") and row["subelement"] == "Edge1"
+    ]
+    assert len(sketch_rows) == 2
+    for row in sketch_rows:
+        assert row["reason"] == "sketch_subelement"
+        assert row["target"] is None
+    assert by_subelement["Face1.Edge2"]["reason"] == "unsupported_subelement"
+    assert by_subelement["Vertex1"]["reason"] == "unsupported_subelement"
+    assert by_subelement["Face0"]["reason"] == "unsupported_subelement"
+    assert by_subelement["Face99"]["reason"] == "selection_geometry_unavailable"
+    # No source-object target is ever minted for a diagnostic row.
+    for subelement in ("Face1", "Face1.Edge2", "Vertex1", "Face0", "Face99"):
+        assert by_subelement[subelement]["target"] is None
+    assert result["selection"]["count"] == 8
+    assert_context_valid(view_module, result)
+
+
+def test_context_selection_states(view_module) -> None:
+    # Empty selection: available with count 0 and no marker.
+    ctx = make_context_ctx()
+    result = view_module.inspect_user_context(ctx, {})
+    assert result["selection"] == {
+        "status": "available",
+        "count": 0,
+        "entries": [],
+        "truncated": False,
+    }
+    assert "selection" not in result["unavailable"]
+
+    # Failing global selection read: unavailable, count null, no rows.
+    ctx = make_context_ctx()
+    ctx.Gui.selection.ex_error = RuntimeError("selection exploded")
+    result = view_module.inspect_user_context(ctx, {})
+    assert result["selection"] == {
+        "status": "unavailable",
+        "count": None,
+        "entries": [],
+        "truncated": False,
+    }
+    assert "selection" in result["unavailable"]
+
+    # One unreadable row between valid neighbors is retained locally.
+    ctx = make_context_ctx()
+    box = ctx._context_objects["Smoke"]["Box"]
+    ctx.Gui.selection.ex_items = [
+        FakeSelectionObject(box, ["Edge1"], "Smoke", "Box"),
+        UnreadableSelectionObject(),
+        FakeSelectionObject(box, ["Edge2"], "Smoke", "Box"),
+    ]
+    result = view_module.inspect_user_context(ctx, {})
+    rows = result["selection"]["entries"]
+    assert len(rows) == 3
+    assert rows[0]["target"] is not None and rows[2]["target"] is not None
+    assert rows[1]["reason"] == "selection_object_unavailable"
+    assert rows[1]["target"] is None
+    assert result["selection"]["count"] is None
+    assert result["selection"]["status"] == "unavailable"
+    assert "selection" in result["unavailable"]
+    assert_context_valid(view_module, result)
+
+
+def test_context_truncation_counts_flattened_rows(view_module) -> None:
+    wide = make_context_object("Wide", "Smoke", faces=1, edges=200)
+    ctx = make_context_ctx()
+    ctx._context_objects["Smoke"]["Wide"] = wide
+    ctx.objects["Smoke"]["Wide"] = wide
+    ctx.Gui.selection.ex_items = [
+        FakeSelectionObject(wide, [f"Edge{i}" for i in range(1, 33)], "Smoke", "Wide"),
+        FakeSelectionObject(wide, [f"Edge{i}" for i in range(33, 65)], "Smoke", "Wide"),
+    ]
+    result = view_module.inspect_user_context(ctx, {})
+    assert result["selection"]["count"] == 64
+    assert len(result["selection"]["entries"]) == 64
+    assert result["selection"]["truncated"] is False
+
+    ctx.Gui.selection.ex_items.append(FakeSelectionObject(wide, ["Edge65"], "Smoke", "Wide"))
+    result = view_module.inspect_user_context(ctx, {})
+    assert result["selection"]["count"] == 65
+    assert len(result["selection"]["entries"]) == 64
+    assert result["selection"]["truncated"] is True
+    assert_context_valid(view_module, result)
+
+
+def test_context_identities_and_non_3d_view(view_module) -> None:
+    # Distinct active and edit object identities survive unwrapping.
+    ctx = make_context_ctx()
+    sketch = ctx._context_objects["Smoke"]["Sketch"]
+    ctx._context_gui_doc._edit_holder = types.SimpleNamespace(Object=sketch)
+    result = view_module.inspect_user_context(ctx, {})
+    assert result["activeDocument"] == {"name": "Smoke", "label": "Smoke", "generation": 7}
+    assert result["activeObject"] == {"document": "Smoke", "object": "Box"}
+    assert result["editObject"] == {"document": "Smoke", "object": "Sketch"}
+    assert result["activeObject"] != result["editObject"]
+    assert result["workbench"] == "PartDesign"
+    assert result["unavailable"] == []
+
+    # No active document: empty state, not an unavailable read.
+    ctx = make_context_ctx(active_name=None)
+    result = view_module.inspect_user_context(ctx, {})
+    assert result["activeDocument"] is None
+    assert result["activeObject"] is None
+    assert result["editObject"] is None
+    assert result["unavailable"] == []
+
+    # A non-3D foreground view stays descriptive with null camera and
+    # viewport, marks both unavailable, and activates nothing.
+    plain_window = types.SimpleNamespace()
+    ctx = make_context_ctx(view=plain_window)
+    window_calls_before = ctx.Gui.active_window_calls
+    result = view_module.inspect_user_context(ctx, {"include_image": True})
+    assert result["activeView"]["type"] == repr(plain_window)
+    assert result["activeView"]["camera"] is None
+    assert result["activeView"]["viewport"] is None
+    assert {"camera", "viewport", "image"} <= set(result["unavailable"])
+    assert ctx.Gui.active_window_calls == window_calls_before + 1
+    assert_context_valid(view_module, result)
+
+    # A failing foreground-window getter marks activeView unavailable.
+    ctx = make_context_ctx()
+    ctx.Gui.active_window_error = RuntimeError("no window")
+    result = view_module.inspect_user_context(ctx, {})
+    assert result["activeView"] is None
+    assert "activeView" in result["unavailable"]
+
+
+def test_context_image_capture(view_module) -> None:
+    def install_event_tripwires(pumped: list[str]) -> None:
+        """Fail the test if the tool pumps events or updates the GUI."""
+
+        def _forbidden(*_args: Any) -> None:
+            raise AssertionError("event pumping attempted during context capture")
+
+        sys.modules["FreeCADGui"].updateGui = _forbidden
+        sys.modules["PySide"].QtWidgets.QApplication.processEvents = lambda *a: pumped.append(
+            "pump"
+        )
+
+    # 2000x1500 scales down to 768x576; capture uses the Current style.
+    ctx = make_context_ctx()
+    install_context_qimage(ok=True, dims=(768, 576))
+    pumped: list[str] = []
+    install_event_tripwires(pumped)
+    box = ctx._context_objects["Smoke"]["Box"]
+    lid = ctx._context_objects["Other"]["Lid"]
+    selection_before = [
+        FakeSelectionObject(box, ["Edge1", "Edge3"], "Smoke", "Box"),
+        FakeSelectionObject(lid, ["Face2"], "Other", "Lid"),
+    ]
+    ctx.Gui.selection.ex_items = list(selection_before)
+    ctx._context_gui_doc._edit_holder = types.SimpleNamespace(
+        Object=ctx._context_objects["Smoke"]["Sketch"]
+    )
+    ctx._context_view.camera = "#Inventor V2.1 ascii\nposition 4 5 6\norientation 0 1 0 0.5"
+    ctx._context_view.clipping = True
+    ctx._context_view.transparency = 40
+    preferences_before = dict(FakeParamGet.store)
+    active_before = ctx.App.active_name
+
+    result = view_module.inspect_user_context(ctx, {"include_image": True})
+
+    assert result["mimeType"] == "image/png"
+    assert result["width"] == 768
+    assert result["height"] == 576
+    png_bytes = base64.b64decode(result["data"])
+    assert png_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+    (path, width, height, style) = ctx._context_view.save_calls[0]
+    assert (width, height, style) == (768, 576, "Current")
+    assert len(ctx._context_view.save_calls) == 1
+    assert not os.path.exists(path)
+    assert result["unavailable"] == []
+    assert FakeParamGet.set_calls == []
+    # Byte/value-identical state: selection, active document, edit
+    # session, camera, clipping, transparency and preferences.
+    observed_selection = [
+        (so.DocumentName, so.ObjectName, so.SubElementNames) for so in ctx.Gui.selection.ex_items
+    ]
+    expected_selection = [
+        (so.DocumentName, so.ObjectName, so.SubElementNames) for so in selection_before
+    ]
+    assert observed_selection == expected_selection
+    assert ctx.Gui.selection.clear_count == 0
+    assert ctx.App.active_name == active_before
+    assert ctx._context_gui_doc._edit_holder is not None
+    assert ctx._context_view.camera == "#Inventor V2.1 ascii\nposition 4 5 6\norientation 0 1 0 0.5"
+    assert ctx._context_view.clipping is True
+    assert ctx._context_view.transparency == 40
+    assert FakeParamGet.store == preferences_before
+    assert pumped == []
+    assert ctx.Gui.active_window_calls == 1
+    assert_context_valid(view_module, result)
+
+    # Small viewports are never upscaled.
+    ctx = make_context_ctx(view=FakeContextView(size=(400, 300)))
+    install_context_qimage(ok=True, dims=(400, 300))
+    result = view_module.inspect_user_context(ctx, {"include_image": True})
+    assert (result["width"], result["height"]) == (400, 300)
+    assert ctx._context_view.save_calls[0][1:3] == (400, 300)
+
+    for ok, dims, save_error, payload in (
+        (True, (768, 576), None, b""),  # empty capture
+        (False, (768, 576), None, _minimal_png()),  # undecodable image
+        (True, (640, 480), None, _minimal_png()),  # dimension mismatch
+        (True, (768, 576), RuntimeError("save failed"), _minimal_png()),
+    ):
+        ctx = make_context_ctx()
+        ctx._context_view.save_error = save_error
+        ctx._context_view.payload = payload
+        install_context_qimage(ok=ok, dims=dims)
+        result = view_module.inspect_user_context(ctx, {"include_image": True})
+        assert "image" in result["unavailable"]
+        for field in ("mimeType", "data", "width", "height"):
+            assert field not in result
+        assert result["selection"]["count"] == 0
+        assert not os.path.exists(ctx._context_view.save_calls[0][0])
+        assert_context_valid(view_module, result)
+
+    # include_image false performs no capture at all.
+    ctx = make_context_ctx()
+    result = view_module.inspect_user_context(ctx, {})
+    assert ctx._context_view.save_calls == []
+    assert "image" not in result["unavailable"]

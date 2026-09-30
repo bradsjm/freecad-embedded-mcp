@@ -81,7 +81,7 @@ Use the phases below as the default call order. Use `tools/list` for the live en
 
 1. **Discover:** `discover_capabilities`.
 2. **Resolve documents:** `inspect_documents`, `new_document`, `open_document`, `import_model`, `save_document`, `close_document`, `reload_document`.
-3. **Resolve objects:** `inspect_objects`.
+3. **Resolve objects:** `inspect_objects`, `inspect_user_context`.
 4. **Mutate objects:** `create_object`, `create_objects`, `edit_object`, `edit_objects`, `delete_object`.
 5. **Prove geometry:** `validate_geometry`, `measure`, `inspect_topology`.
 6. **Control parameters:** `edit_parameters`.
@@ -120,6 +120,9 @@ The protocol also provides `server/discover`, `tools/list`, `tasks/get`, `tasks/
 - Re-read persistence-sensitive changes after recompute or save.
 - Do not delete objects with unresolved dependents.
 - Do not issue more GUI calls after `GUI_DISPATCH_STUCK`.
+- Before you interpret "this", "these", selected entities, or a screen-relative reference, call `inspect_user_context` and read its reported selection and view. Pass its returned targets explicitly into the next tool; a selection report is not authorization.
+- Request the context image (`include_image: true`) when you must interpret what the user currently sees. `capture_view` reframes the scene, so it does not show the user's viewport. `inspect_user_context` reports state at call time, not at message time; re-inspect after a relevant generation change or when the user asks you to change the selection.
+- Native `FaceN`/`EdgeN` names in a context report are diagnostics, not durable targets. When the observation stays ambiguous, ask one specific clarification question instead of guessing.
 
 ## Build with checkpoints
 

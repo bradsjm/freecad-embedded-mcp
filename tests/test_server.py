@@ -186,7 +186,7 @@ _OTHER_TOOLS = {
     "sketch": ("inspect_sketch", "edit_sketch"),
     "features": ("create_feature", "edit_feature"),
     "export": ("export",),
-    "view": ("capture_view",),
+    "view": ("capture_view", "inspect_user_context"),
     "fem": ("run_fem",),
     "script": ("run_script",),
 }
@@ -2547,3 +2547,154 @@ def test_inspect_documents_with_no_open_documents():
         "activeDocument": None,
     }
     assert STUB_CALLS == []
+
+
+# ---------------------------------------------------------------------------
+# inspect_user_context: registration and publication contract.
+# ---------------------------------------------------------------------------
+
+
+def _load_real_view_definitions():
+    """Load the real view module beside the stubbed tool package."""
+
+    import importlib.util
+
+    module_name = "mcp_server.tools.view_real_contract"
+    spec = importlib.util.spec_from_file_location(
+        module_name, ADDON_DIR / "mcp_server" / "tools" / "view.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+def _register_real_context_tool(server):
+    """Register the real inspect_user_context definition on a stub server."""
+
+    module = _load_real_view_definitions()
+    # The stubbed view module already lists the tool name; replace the
+    # stub registration with the real definition under the same name.
+    for registry in (
+        server._definitions,
+        server._handlers,
+        server._normalizers,
+        server._preflights,
+        server._raw_output_schemas,
+    ):
+        registry.pop("inspect_user_context", None)
+    (definition,) = [
+        item for item in module.TOOL_DEFINITIONS if item["name"] == "inspect_user_context"
+    ]
+    server._add_definition(
+        definition,
+        {"inspect_user_context": module.HANDLERS["inspect_user_context"]},
+        None,
+    )
+    # tools/list serves a construction-time snapshot; refresh it so the
+    # post-hoc registration is visible exactly as an at-startup
+    # registration would be.
+    server._tool_defs = list(server._definitions.values())
+    return module, definition
+
+
+def _context_payload(**overrides):
+    """A schema-valid raw handler payload (JSON-only shape)."""
+
+    payload = {
+        "activeDocument": {"name": "Smoke", "label": "Smoke", "generation": 3},
+        "activeObject": {"document": "Smoke", "object": "Box"},
+        "editObject": None,
+        "workbench": "PartDesign",
+        "activeView": {
+            "type": "<View3DInventor>",
+            "camera": {
+                "position": [1.0, 2.0, 3.0],
+                "direction": [0.0, 0.0, -1.0],
+                "up": [0.0, 1.0, 0.0],
+                "projection": "perspective",
+            },
+            "viewport": {"width": 768, "height": 576},
+        },
+        "selection": {"status": "available", "count": 0, "entries": [], "truncated": False},
+        "unavailable": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_inspect_user_context_registration_contract():
+    server = make_server()
+    _module, definition = _register_real_context_tool(server)
+
+    listed = dispatch(server, "tools/list")["result"]["tools"]
+    (entry,) = [tool for tool in listed if tool["name"] == "inspect_user_context"]
+    assert entry["annotations"] == {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+    # The published schema keeps image metadata but never the bytes.
+    assert "data" not in entry["outputSchema"]["properties"]
+    assert "data" not in entry["outputSchema"]["required"]
+    assert "mimeType" in entry["outputSchema"]["properties"]
+    assert "width" in entry["outputSchema"]["properties"]
+    assert "height" in entry["outputSchema"]["properties"]
+    # The raw schema still carries the optional image payload fields.
+    raw = server._raw_output_schemas["inspect_user_context"]
+    assert raw["properties"]["data"] == {"type": "string", "minLength": 1}
+    for field in ("mimeType", "width", "height"):
+        assert field not in raw["required"]
+
+    # Input: closed, no required properties, no document argument.
+    server_module.validate_schema({}, definition["inputSchema"])
+    server_module.validate_schema({"include_image": True}, definition["inputSchema"])
+    with pytest.raises(server_module.ProtocolError):
+        server_module.validate_schema({"document": "Smoke"}, definition["inputSchema"])
+
+
+def test_inspect_user_context_json_only_result_validates_and_publishes():
+    server = make_server()
+    module, _definition = _register_real_context_tool(server)
+    payload = _context_payload()
+    server_module.validate_schema(payload, module._CONTEXT_OUTPUT_SCHEMA)
+
+    result = server._validated_tool_result("inspect_user_context", payload)
+
+    # A JSON-only result is a text mapping with the full structured
+    # payload; no image content block is produced.
+    assert result["structuredContent"] == payload
+    assert result["content"] == [
+        {"type": "text", "text": json.dumps(payload, ensure_ascii=False, allow_nan=False)}
+    ]
+
+
+def test_inspect_user_context_image_result_publishes_png_exactly_once():
+    server = make_server()
+    module, _definition = _register_real_context_tool(server)
+    png = _minimal_png(width=4, height=3)
+    data = base64.b64encode(png).decode("ascii")
+    payload = _context_payload(
+        mimeType="image/png",
+        data=data,
+        width=4,
+        height=3,
+    )
+    server_module.validate_schema(payload, module._CONTEXT_OUTPUT_SCHEMA)
+
+    result = server._validated_tool_result("inspect_user_context", payload)
+
+    assert result["content"] == [{"type": "image", "mimeType": "image/png", "data": data}]
+    decoded = base64.b64decode(result["content"][0]["data"], validate=True)
+    assert decoded == png
+    _assert_decodable_png(decoded, width=4, height=3)
+    # The structured payload keeps the metadata and never the bytes; the
+    # base64 text occurs exactly once on the wire.
+    expected_metadata = _context_payload(mimeType="image/png", width=4, height=3)
+    assert result["structuredContent"] == expected_metadata
+    assert json.dumps(result).count(data) == 1
