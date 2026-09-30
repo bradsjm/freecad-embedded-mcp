@@ -1036,7 +1036,11 @@ def _volumetric_gate(check: Mapping[str, Any], targets: list[Mapping[str, Any]])
     finite solid volume; None means every target may proceed.
     """
 
-    for side, target in zip(("a", "b", "object"), targets, strict=False):
+    # Volume-range checks gate one target; distance-style checks gate the
+    # ``a``/``b`` pair. The label must match the check's own arity so a
+    # single-target row never reports the misleading ``target 'a'``.
+    labels = ("object",) if check["kind"] == "volume_range" else ("a", "b")
+    for side, target in zip(labels, targets, strict=False):
         if target is None:
             continue
         label = f"target {side!r}" if side != "object" else "target"
@@ -1797,6 +1801,10 @@ def _handle_inspect_topology(ctx: Any, arguments: Mapping[str, Any]) -> dict:
     detail = str(arguments.get("detail") or "compact")
     limit = arguments.get("limit")
     limit = _DEFAULT_TOPOLOGY_PAGE if limit is None else limit
+    # The wire schema accepts integral floats for an integer limit; every
+    # later use (cursor comparison, slicing and cursor creation) needs the
+    # one canonical integer form so a 50.0 page behaves exactly like 50.
+    limit = int(limit)
     target = arguments["target"]
     if not isinstance(target, Mapping):
         raise ToolError(VALIDATION_FAILED, "target must be a shared target object")

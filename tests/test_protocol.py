@@ -395,6 +395,50 @@ class TestLiveParamHeaderMirroring:
         assert validated["params"]["arguments"]["entries"] == [{"a": 1}]
 
 
+class TestHeaderIntegerMirroring:
+    """Integer mirrors compare exactly through Decimal: a header that
+    differs from the body in the last digit of a large integer is a
+    mismatch, and huge integers never round-trip through float."""
+
+    def test_off_by_one_large_integer_header_is_rejected(self):
+        message = valid_message(params=make_params(name=9007199254740992))
+        headers = make_headers(name="9007199254740993")
+        with pytest.raises(protocol.ProtocolError) as excinfo:
+            protocol.validate_request(message, headers)
+        expect_protocol_error(excinfo, protocol.HEADER_MISMATCH)
+
+    def test_exact_large_integer_header_is_accepted(self):
+        message = valid_message(params=make_params(name=9007199254740992))
+        validated = protocol.validate_request(message, make_headers(name="9007199254740992"))
+        assert validated["params"]["name"] == 9007199254740992
+
+    def test_exponent_header_matches_huge_integer_body(self):
+        message = valid_message(params=make_params(name=10**400))
+        validated = protocol.validate_request(message, make_headers(name="1e400"))
+        assert validated["params"]["name"] == 10**400
+
+    def test_header_matches_body_numeric_matrix(self):
+        matches = protocol.header_matches_body
+        assert matches("9007199254740992", 9007199254740992)
+        assert not matches("9007199254740993", 9007199254740992)
+        assert matches("42.0", 42)  # numeric equivalence is preserved
+        assert matches("42", 42.0)
+        assert matches("1e400", 10**400)
+        # NaN, infinity and fraction syntax never match a numeric body.
+        for raw in ("NaN", "Infinity", "-Infinity", "1/2", "abc", ""):
+            assert not matches(raw, 1)
+        # A huge mismatch rejects without raising.
+        assert not matches("1e400", 10**399)
+        # Non-finite float bodies refuse every header.
+        assert not matches("1", float("nan"))
+        assert not matches("1", float("inf"))
+        # Sentinel decoding feeds the same comparison.
+        assert matches(sentinel("42.0"), 42)
+        # Strings and booleans keep their exact rules.
+        assert matches("t", "t") and not matches("t", "u")
+        assert matches("true", True) and not matches("1", True)
+
+
 # ---------------------------------------------------------------------------
 # Finite schemas.
 # ---------------------------------------------------------------------------
@@ -726,6 +770,28 @@ def accept_responses():
     return {"confirm": {"action": "accept", "content": {"confirmed": True}}}
 
 
+class FakeMonotonicClock:
+    """Controllable ``time.monotonic`` double for expiry tests."""
+
+    def __init__(self, start=0.0):
+        self.now = float(start)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def patch_consent_clocks(monkeypatch, monotonic_start, wall_now):
+    """Point the signer's monotonic reads and the wall clock at doubles."""
+    monotonic = FakeMonotonicClock(monotonic_start)
+    wall = {"now": wall_now}
+    monkeypatch.setattr(protocol.time, "monotonic", monotonic)
+    monkeypatch.setattr(protocol.time, "time", lambda: wall["now"])
+    return monotonic, wall
+
+
 class TestConsentSigner:
     def make_signer(self):
         return protocol.ConsentSigner()
@@ -870,6 +936,26 @@ class TestConsentSigner:
     def test_expired_challenge_is_rejected(self):
         signer = self.make_signer()
         token = self.challenge(signer, ttl_s=-1)
+        with pytest.raises(protocol.ToolError) as excinfo:
+            self.consume(signer, token)
+        assert excinfo.value.details == {"reason": "expired"}
+
+    def test_expiry_tracks_monotonic_clock_across_wall_rollback(self, monkeypatch):
+        monotonic, wall = patch_consent_clocks(monkeypatch, 1000.0, 5_000_000.0)
+        signer = self.make_signer()
+        token = self.challenge(signer)
+        self.consume(signer, token)
+
+        # Advance beyond the 300 s TTL; a second valid consume runs the
+        # prune, which drops the expired nonce.
+        monotonic.advance(protocol.DEFAULT_CONSENT_TTL_S + 1.0)
+        second = self.challenge(signer)
+        self.consume(signer, second)
+
+        # Rolling the wall clock backward resurrects nothing: the old
+        # token stays expired because expiry is judged on the monotonic
+        # clock, not the wall clock that just went back.
+        wall["now"] = 0.0
         with pytest.raises(protocol.ToolError) as excinfo:
             self.consume(signer, token)
         assert excinfo.value.details == {"reason": "expired"}

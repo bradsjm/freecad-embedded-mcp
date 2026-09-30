@@ -27,15 +27,15 @@ if str(ADDON_DIR) not in sys.path:
 class FakeSignal:
     # probes["qt.signals"]: queued Qt signals deliver on the
     # application thread between GUI operations.
-    def __init__(self) -> None:
+    def __init__(self, *_types) -> None:
         self.callback = None
 
     def connect(self, callback, *_args) -> None:
         self.callback = callback
 
-    def emit(self) -> None:
+    def emit(self, *args) -> None:
         if self.callback is not None:
-            self.callback()
+            self.callback(*args)
 
 
 class FakeStatusBar:
@@ -97,6 +97,7 @@ def load_gui_dispatch() -> Iterator[types.ModuleType]:
     qt_core = types.SimpleNamespace(
         QObject=object,
         Signal=FakeSignal,
+        Slot=lambda *_types: lambda fn: fn,
         Qt=types.SimpleNamespace(
             QueuedConnection=0,
             NoButton=0,
@@ -753,3 +754,126 @@ def test_request_timeout_cancels_queued_and_isolates_futures() -> None:
         assert result.value == "fresh"
         assert result.error is None
         assert gui_dispatch.pending_count() == 0
+
+
+class RacedQueue:
+    """Queue double: reports work, but a canceller removed it before the read."""
+
+    def empty(self) -> bool:
+        return False
+
+    def get_nowait(self):
+        import queue as _queue
+
+        raise _queue.Empty
+
+    def get(self, *_args, **_kwargs):
+        raise AssertionError("the GUI drain must never block on the queue")
+
+
+def test_drain_never_blocks_when_a_canceller_removes_the_last_item() -> None:
+    with load_gui_dispatch() as gui_dispatch:
+        gui_dispatch._gui_request_queue = RacedQueue()
+        gui_dispatch.process_gui_tasks(reschedule=False)
+        assert gui_dispatch._processing is False
+
+
+def test_nested_heartbeat_tick_keeps_exactly_one_live_chain() -> None:
+    with load_gui_dispatch() as gui_dispatch:
+        ticks = gui_dispatch._test_timer
+        gui_dispatch.initialize()
+        assert len(ticks.calls) == 1
+        with gui_dispatch._state_lock:
+            live = gui_dispatch._generation
+
+        def job() -> str:
+            # Fire the pending heartbeat while this immediate-wake job runs.
+            ticks.calls.pop(0)()
+            # Immediate wakes and retired-generation ticks never rearm.
+            gui_dispatch.process_gui_tasks(reschedule=False)
+            gui_dispatch.process_gui_tasks(reschedule=True, generation=live - 1)
+            return "done"
+
+        # The stub wake signal drains synchronously with reschedule=False.
+        future = gui_dispatch.submit_to_gui(job, operation_name="nested_tick")
+        assert future.result(timeout=1.0).value == "done"
+        assert len(ticks.calls) == 1  # exactly one replacement tick
+
+
+class QueuedCleanupSignal:
+    """Qt QueuedConnection double: emissions wait for the fake GUI loop."""
+
+    def __init__(self) -> None:
+        self.callback = None
+        self.pending: list = []
+
+    def connect(self, callback, *_args) -> None:
+        self.callback = callback
+
+    def emit(self, *args) -> None:
+        self.pending.append(args)
+
+    def deliver(self) -> None:
+        while self.pending:
+            self.callback(*self.pending.pop(0))
+
+
+def _post_from_worker(gui_dispatch, fn) -> bool:
+    box: dict = {}
+    worker = threading.Thread(
+        target=lambda: box.setdefault("posted", gui_dispatch.post_shutdown_cleanup(fn)),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=5.0)
+    return box["posted"]
+
+
+def test_worker_cleanup_runs_only_when_the_gui_loop_delivers_it() -> None:
+    with load_gui_dispatch() as gui_dispatch:
+        gui_dispatch.initialize()  # this thread is the designated GUI thread
+        waker = gui_dispatch._waker
+        signal = QueuedCleanupSignal()
+        signal.connect(waker._on_cleanup)
+        waker._cleanup_sig = signal
+        ran_on: list = []
+
+        assert _post_from_worker(gui_dispatch, lambda: ran_on.append(threading.get_ident()))
+        assert ran_on == []  # nothing runs off the GUI thread
+        signal.deliver()
+        assert ran_on == [threading.get_ident()]
+
+        # On the GUI thread itself the callback runs inline; failures are
+        # contained on the executing thread.
+        assert gui_dispatch.post_shutdown_cleanup(lambda: ran_on.append("inline"))
+        assert ran_on[-1] == "inline"
+
+        def boom() -> None:
+            raise RuntimeError("native removal failed")
+
+        assert gui_dispatch.post_shutdown_cleanup(boom)
+
+
+def test_missing_waker_never_runs_cleanup_off_the_gui_thread() -> None:
+    with load_gui_dispatch() as gui_dispatch:
+        gui_dispatch.initialize()
+        gui_dispatch.cleanup_waker()
+        ran: list = []
+        assert _post_from_worker(gui_dispatch, lambda: ran.append(True)) is False
+        assert ran == []
+
+
+def test_console_errors_off_the_gui_thread_go_to_stderr(capsys) -> None:
+    with load_gui_dispatch() as gui_dispatch:
+        printed: list = []
+        sys.modules["FreeCAD"].Console.PrintError = printed.append
+        gui_dispatch._safe_console_error("unknown thread\n")
+        gui_dispatch.initialize()
+        worker = threading.Thread(
+            target=lambda: gui_dispatch._safe_console_error("worker\n"), daemon=True
+        )
+        worker.start()
+        worker.join(timeout=5.0)
+        gui_dispatch._safe_console_error("gui\n")
+        assert printed == ["gui\n"]
+        assert capsys.readouterr().err == "unknown thread\nworker\n"

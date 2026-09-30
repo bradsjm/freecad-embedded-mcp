@@ -29,6 +29,7 @@ from mcp_server.http_server import (
     MAX_BODY_BYTES,
     McpHTTPServer,
     StreamResponse,
+    _DeadlineRawIO,
     peer_in_allowed_networks,
 )
 from mcp_server.ip_parse import parse_allowed_networks
@@ -847,6 +848,22 @@ def test_name_header_mismatch_returns_400():
         assert server.dispatch_calls() == []
 
 
+def test_huge_numeric_name_header_mismatch_is_400_not_500():
+    """A mirrored integer name beyond float range is compared exactly: a
+    contradictory header is a -32020 rejection, never a 500, and the
+    request is never dispatched."""
+
+    params = {"name": 10**400, "_meta": _meta()}
+    with running_server(echo_dispatch) as server:
+        status, _, body = server.post(
+            valid_request(rpc_id=5, method="tools/call", params=params),
+            routing_headers(method="tools/call", name="9007199254740993"),
+        )
+        assert status == 400
+        assert json.loads(body)["error"]["code"] == -32020
+        assert server.dispatch_calls() == []
+
+
 def test_param_header_contradicting_the_body_is_rejected_on_the_live_path():
     """The live HTTP request path has no per-method annotation table; a
     mirrored Mcp-Param-* header must still match the request body."""
@@ -1219,3 +1236,109 @@ def test_stop_delivers_queued_final_result_with_zero_chunk():
     assert b'"resultType":"complete"' in final
     assert fixture.disconnect_event.wait(0.5) is False
     assert fixture.disconnects == 0  # delivered final counts as completion
+
+
+# --------------------------------------------------------------------------
+# Aggregate request-header deadline (_DeadlineRawIO and the real handler).
+# --------------------------------------------------------------------------
+
+
+class FakeMonotonic:
+    """Fully controlled monotonic clock for the HTTP module under test."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class FakeDribblingSocket:
+    """Socket double delivering one buffered byte per ``recv_into``."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.position = 0
+        self.timeouts = []
+
+    def settimeout(self, timeout):
+        self.timeouts.append(timeout)
+
+    def recv_into(self, buffer):
+        if self.position >= len(self.payload):
+            return 0
+        buffer[0] = self.payload[self.position]
+        self.position += 1
+        return 1
+
+
+def test_deadline_raw_io_bounds_aggregate_header_time(monkeypatch):
+    """Dribbling one byte per recv with every wait shorter than the
+    per-read timeout still exhausts the aggregate header budget."""
+
+    clock = FakeMonotonic()
+    monkeypatch.setattr(sys.modules[_DeadlineRawIO.__module__], "time", clock)
+    sock = FakeDribblingSocket(b"x" * 64)
+    budget_s = 30.0
+    deadline = clock.now + budget_s
+    reader = _DeadlineRawIO(sock, lambda: deadline)
+    assert reader.readable() is True
+
+    buffer = bytearray(1)
+    reads = 0
+    with pytest.raises(TimeoutError, match="request header deadline exceeded"):
+        while True:
+            assert reader.readinto(buffer) == 1
+            reads += 1
+            clock.advance(1.0)  # under the per-read timeout, over the budget
+    assert reads == int(budget_s)
+    # The tolerated wait shrank on every recv: dribbling cannot renew it.
+    assert len(sock.timeouts) == reads
+    assert sock.timeouts == [budget_s - step for step in range(reads)]
+
+    # With no pending deadline the socket timeout is left untouched.
+    free_sock = FakeDribblingSocket(b"y")
+    free_reader = _DeadlineRawIO(free_sock, lambda: None)
+    assert free_reader.readinto(bytearray(1)) == 1
+    assert free_sock.timeouts == []
+
+
+def test_header_deadline_closes_connection_without_dispatch():
+    """An unfinished header block hits the aggregate deadline: the stdlib
+    request loop catches the TimeoutError, the connection is shut down,
+    and the slot is released exactly once with no dispatch."""
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    try:
+        with running_server(echo_dispatch, read_timeout=0.5) as server:
+            client = socket.create_connection(("127.0.0.1", listener.getsockname()[1]), timeout=5.0)
+            try:
+                client.sendall(b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:9\r\n")
+                request, address = listener.accept()
+                slots = server.server._connection_slots
+                # Hold every slot; one of them is this request's slot, which
+                # the handler releases when it finishes.
+                held = 0
+                while slots.acquire(blocking=False):
+                    held += 1
+                held -= 1
+                # Entering the real handler is synchronous: it returns
+                # once the stdlib loop caught the header TimeoutError.
+                server.server._process_request_with_slot(request, address)
+                assert server.dispatch_calls() == []
+                # The served request released its slot exactly once.
+                assert slots.acquire(blocking=False) is True
+                assert slots.acquire(blocking=False) is False
+                for _ in range(held + 1):
+                    slots.release()
+                # The peer observes the shutdown/close as clean EOF.
+                assert client.recv(1024) == b""
+            finally:
+                client.close()
+    finally:
+        listener.close()

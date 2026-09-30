@@ -229,6 +229,35 @@ def _document_consent_target(ctx: Any, doc: Any, *, purpose: str, message: str) 
     }
 
 
+def _open_target(ctx: Any, canonical: str) -> dict[str, Any]:
+    """Build the untrusted-open consent target for an already-resolved path.
+
+    Preflight and the ``open_document`` handler must bind consent to one
+    single canonical resolution of the caller path, so this builder takes
+    the resolved path and never resolves the caller argument itself.
+    """
+    message = (
+        f"Open the FreeCAD document from '{canonical}'? The file is untrusted: "
+        "FCStd documents can execute embedded Python when loaded, which runs "
+        "with your full user privileges."
+    )
+    return _file_consent_target(ctx, canonical, purpose="open", message=message)
+
+
+def _overwrite_target(ctx: Any, doc: Any, canonical: str) -> dict[str, Any]:
+    """Build the overwrite consent target for an already-resolved save path.
+
+    Unconditional by contract: the caller has already decided the
+    destination exists and is not the document's own file, so this builder
+    never resolves the caller path and never returns ``None``.
+    """
+    message = (
+        f"Saving document '{doc.Name}' will overwrite the existing file "
+        f"'{canonical}'. Its current content will be replaced."
+    )
+    return _file_consent_target(ctx, canonical, purpose="overwrite", message=message)
+
+
 def _document_payload(ctx: Any, doc: Any, *, path: str | None = None) -> dict[str, Any]:
     """Identity fields of one live document plus its current generation.
 
@@ -278,12 +307,7 @@ def _open_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
         raise ToolError(VALIDATION_FAILED, "untrusted must be a boolean when provided")
     if not untrusted:
         return None
-    message = (
-        f"Open the FreeCAD document from '{path}'? The file is untrusted: "
-        "FCStd documents can execute embedded Python when loaded, which runs "
-        "with your full user privileges."
-    )
-    return _file_consent_target(ctx, path, purpose="open", message=message)
+    return _open_target(ctx, path)
 
 
 def _save_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
@@ -308,11 +332,7 @@ def _save_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
                 f"save path parent directory does not exist: '{os.path.dirname(canonical)}'",
             )
         return None  # new file; nothing to overwrite
-    message = (
-        f"Saving document '{doc.Name}' will overwrite the existing file "
-        f"'{canonical}'. Its current content will be replaced."
-    )
-    return _file_consent_target(ctx, canonical, purpose="overwrite", message=message)
+    return _overwrite_target(ctx, doc, canonical)
 
 
 def _close_preflight(ctx: Any, args: dict[str, Any]) -> dict[str, Any] | None:
@@ -518,7 +538,9 @@ def _open_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     if untrusted is not True and untrusted is not False:
         raise ToolError(VALIDATION_FAILED, "untrusted must be a boolean when provided")
     if untrusted:
-        _require_approved(ctx, _open_preflight(ctx, arguments))
+        # Recheck against the canonical path resolved above: consent binds
+        # to the exact file this handler opens, never a re-resolution.
+        _require_approved(ctx, _open_target(ctx, canonical))
 
     app = ctx.App
     before = set(app.listDocuments())
@@ -583,7 +605,9 @@ def _save_document(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
                 doc.save()  # ordinary save to the document's own file
             else:
                 if os.path.exists(canonical):
-                    _require_approved(ctx, _save_preflight(ctx, arguments))
+                    # Recheck against the canonical path resolved above;
+                    # _save_preflight would resolve the caller path again.
+                    _require_approved(ctx, _overwrite_target(ctx, doc, canonical))
                 doc.saveAs(canonical)
     except ToolError:
         raise

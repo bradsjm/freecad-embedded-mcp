@@ -695,8 +695,11 @@ class Server:
         self._doc_entries: dict[str, _DocEntry] = {}
         self._ops_lock = threading.Lock()
         self._ops: dict[str, _Operation] = {}
-        self._direct_gui_lock = threading.Lock()
-        self._direct_gui_jobs = 0
+        self._direct_gui_jobs = 0  # guarded by _state_lock
+        # Stop ownership, guarded by _state_lock: teardown still running,
+        # and GUI-thread final cleanup claimed but not yet finished.
+        self._shutdown_in_progress = False
+        self._stop_cleanup_pending = False
         self._subscription_admission_lock = threading.Lock()
 
         self._script_lock = threading.Lock()
@@ -1088,13 +1091,11 @@ class Server:
         self._observer_registered = True
 
     def _remove_observer(self) -> None:
-        """Remove the observer from FreeCAD and clear its registered state."""
+        """Remove the observer from FreeCAD; keep it recorded when removal fails."""
         if self._observer_registered:
-            try:
-                FreeCAD.removeDocumentObserver(self._observer)
-            finally:
-                self._observer_registered = False
-                self._observer = None
+            FreeCAD.removeDocumentObserver(self._observer)
+            self._observer_registered = False
+            self._observer = None
 
     # ------------------------------------------------------------------
     # Dispatch
@@ -1228,6 +1229,7 @@ class Server:
                 _candidate,
                 timeout=_PREFLIGHT_TIMEOUT_S,
                 operation_name="discover:refresh",
+                on_finished=lambda _outcome: self._maybe_finish_draining(),
             )
             if outcome.error is not None:
                 if outcome.stuck is not None:
@@ -1493,7 +1495,11 @@ class Server:
             return None
 
         form_capable = _client_supports_form(client_capabilities)
-        target = self._run_preflight(name, arguments)
+        target = self._run_preflight(
+            name,
+            arguments,
+            report_unprompted=(request_state is None and not form_capable),
+        )
         identity = _target_identity(target)
 
         if request_state is not None:
@@ -1529,11 +1535,8 @@ class Server:
         if target is not None and target.get("requires_consent"):
             if not form_capable:
                 # 1.0 fallback: no elicitation support, no prompt — the
-                # operation proceeds unprompted. Make the bypass visible.
-                FreeCAD.Console.PrintMessage(
-                    f"[MCP] '{name}' proceeded without its consent prompt: "
-                    "the client does not support form elicitation.\n"
-                )
+                # operation proceeds unprompted; the preflight already
+                # reported the bypass on the GUI thread.
                 return target
             message = target.get("message") or "Confirm this operation."
             token = self.signer.challenge(
@@ -1546,20 +1549,32 @@ class Server:
             raise InputRequired(token, consent_input_request(message))
         return target
 
-    def _run_preflight(self, name: str, arguments: dict) -> dict | None:
-        """Run the tool's consent preflight on the GUI thread and return its target."""
+    def _run_preflight(
+        self, name: str, arguments: dict, *, report_unprompted: bool = False
+    ) -> dict | None:
+        """Run the tool's consent preflight on the GUI thread and return its target.
+
+        ``report_unprompted`` logs the consent-fallback bypass from the GUI
+        thread when the preflight returns a consent-required target.
+        """
         preflight = self._preflights[name]
 
         def guarded() -> Any:
             """Run the preflight callable, carrying a ToolError through as the outcome value."""
             try:
-                return preflight(self, name, arguments)
+                target = preflight(self, name, arguments)
             except ToolError as exc:
                 # Preserve the domain code through the dispatcher: a refused
                 # path or a missing file is PATH_NOT_ALLOWED/VALIDATION_FAILED,
                 # not a broken GUI dispatch. Same channel the tool handlers
                 # use to carry a ToolError back as the outcome value.
                 return exc
+            if report_unprompted and isinstance(target, dict) and target.get("requires_consent"):
+                FreeCAD.Console.PrintMessage(
+                    f"[MCP] '{name}' proceeded without its consent prompt: "
+                    "the client does not support form elicitation.\n"
+                )
+            return target
 
         with self._direct_gui_scope(f"preflight:{name}") as rejection:
             if rejection is not None:
@@ -1568,6 +1583,7 @@ class Server:
                 guarded,
                 timeout=_PREFLIGHT_TIMEOUT_S,
                 operation_name=f"preflight:{name}",
+                on_finished=lambda _outcome: self._maybe_finish_draining(),
             )
             if outcome.error is not None:
                 if outcome.stuck is not None:
@@ -1601,6 +1617,8 @@ class Server:
         cancel_event: threading.Event | None = None,
     ) -> _Operation:
         """Reserve one shared operation slot (32 cap) with its monotonic deadline."""
+        # State stays locked through insertion so Stop can never observe
+        # an admitted operation missing from the registry.
         with self._state_lock:
             if self._bound and self._state != "running":
                 raise ToolError(
@@ -1608,25 +1626,25 @@ class Server:
                     "MCP server is stopping; retry after it returns to running",
                     {"reason": "server_not_running", "state": self._state},
                 )
-        with self._ops_lock:
-            if len(self._ops) >= MAX_OPERATIONS:
-                raise ToolError(
-                    SERVER_BUSY,
-                    "Too many active operations; wait for one to finish",
-                    {"reason": "operation_limit", "limit": MAX_OPERATIONS},
+            with self._ops_lock:
+                if len(self._ops) >= MAX_OPERATIONS:
+                    raise ToolError(
+                        SERVER_BUSY,
+                        "Too many active operations; wait for one to finish",
+                        {"reason": "operation_limit", "limit": MAX_OPERATIONS},
+                    )
+                op = _Operation(
+                    op_id=uuid.uuid4().hex,
+                    name=name,
+                    kind=kind,
+                    task_id=task_id,
+                    principal=principal,
+                    deadline_mono=self._clock() + deadline_s,
+                    deadline_s=deadline_s,
+                    cancel_event=(cancel_event if cancel_event is not None else threading.Event()),
                 )
-            op = _Operation(
-                op_id=uuid.uuid4().hex,
-                name=name,
-                kind=kind,
-                task_id=task_id,
-                principal=principal,
-                deadline_mono=self._clock() + deadline_s,
-                deadline_s=deadline_s,
-                cancel_event=(cancel_event if cancel_event is not None else threading.Event()),
-            )
-            self._ops[op.op_id] = op
-            return op
+                self._ops[op.op_id] = op
+                return op
 
     def _remove_op(self, op: _Operation) -> None:
         """Drop one operation and finish draining once the registry is empty."""
@@ -1648,18 +1666,21 @@ class Server:
     def _direct_gui_scope(self, operation_name: str):
         """Retain ownership until a direct GUI caller fully unwinds."""
 
+        rejection: gui_dispatch.Outcome | None = None
         with self._state_lock:
             if self._bound and self._state != "running":
-                yield gui_dispatch.Outcome(
+                rejection = gui_dispatch.Outcome(
                     error=f"'{operation_name}' was not started: MCP server is {self._state}"
                 )
-                return
-        with self._direct_gui_lock:
-            self._direct_gui_jobs += 1
+            else:
+                self._direct_gui_jobs += 1
+        if rejection is not None:
+            yield rejection
+            return
         try:
             yield None
         finally:
-            with self._direct_gui_lock:
+            with self._state_lock:
                 self._direct_gui_jobs -= 1
             self._maybe_finish_draining()
 
@@ -1695,44 +1716,61 @@ class Server:
         self._remove_op(op)
 
     def _maybe_finish_draining(self) -> None:
-        """Once a draining server has no work left, finish into stopped.
+        """Once a draining server has no work left, post its final cleanup.
 
         Qt/observer cleanup must not happen while any GUI work can still
         call back into the server. BOTH queues must be empty: the server's
         retained operations (an async FEM Future keeps its slot after the
         dispatcher job itself completed) AND the dispatcher's own inflight
-        jobs (a stuck GUI callable has not returned yet). Only then is the
-        state flipped to stopped — without another Start/Stop click — and
-        the waker disposal scheduled, safely off the worker finalizer
-        thread.
+        jobs (a stuck GUI callable has not returned yet), and Stop's own
+        teardown must have finished. Only then is the cleanup claimed once
+        and posted to the GUI thread, which removes the observer, disposes
+        the waker and publishes stopped (``_finalize_stop_cleanup``). A
+        failed post keeps the claim and the draining state.
         """
 
         with self._state_lock:
-            draining = self._state == "draining"
-        if not draining:
-            return
-        if (
-            self.pending_operation_count() != 0
-            or gui_dispatch.pending_count() != 0
-            or self._direct_gui_jobs != 0
-        ):
-            return
-        with self._state_lock:
             if (
-                self._state == "draining"
-                and self.pending_operation_count() == 0
-                and gui_dispatch.pending_count() == 0
-                and self._direct_gui_jobs == 0
+                self._state != "draining"
+                or self._shutdown_in_progress
+                or self._stop_cleanup_pending
+                or self._direct_gui_jobs != 0
+                or gui_dispatch.pending_count() != 0
             ):
-                self._state = "stopped"
-                finish = True
-            else:
-                finish = False
-        if finish:
-            try:
-                gui_dispatch.cleanup_waker()
-            except Exception:
-                pass
+                return
+            with self._ops_lock:
+                if self._ops:
+                    return
+            self._stop_cleanup_pending = True
+        gui_dispatch.post_shutdown_cleanup(self._finalize_stop_cleanup)
+
+    def _finalize_stop_cleanup(self) -> None:
+        """GUI-thread final Stop cleanup: observer, waker, then stopped.
+
+        Runs only while this server owns a pending cleanup claim and is
+        idle; a duplicate or premature call does nothing. The claim is kept
+        through native cleanup so a concurrent Start cannot bypass it, and
+        a cleanup failure leaves the server draining for a later retry.
+        """
+
+        with self._state_lock:
+            if not self._stop_cleanup_pending or self._state != "draining":
+                return
+            with self._ops_lock:
+                idle = (
+                    not self._shutdown_in_progress
+                    and self._direct_gui_jobs == 0
+                    and not self._ops
+                    and gui_dispatch.pending_count() == 0
+                )
+            if not idle:
+                self._stop_cleanup_pending = False  # let the last finisher re-post
+                return
+        self._remove_observer()
+        gui_dispatch.cleanup_waker()
+        with self._state_lock:
+            self._stop_cleanup_pending = False
+            self._state = "stopped"
 
     def _overdue_operations(self) -> list[_Operation]:
         """Return operations past their deadline once each, marking them noted."""
@@ -1746,20 +1784,19 @@ class Server:
             return overdue
 
     def has_pending_operations(self) -> bool:
-        """True while any operation still awaits a late finalizer."""
+        """True while any operation awaits a late finalizer or Stop cleanup is unfinished."""
 
-        with self._ops_lock:
-            operations = bool(self._ops)
-        with self._direct_gui_lock:
-            return operations or self._direct_gui_jobs != 0
+        with self._state_lock:
+            if self._shutdown_in_progress or self._stop_cleanup_pending:
+                return True
+            with self._ops_lock:
+                return bool(self._ops) or self._direct_gui_jobs != 0
 
     def pending_operation_count(self) -> int:
         """Number of retained operations (thread-safe read)."""
 
-        with self._ops_lock:
-            operations = len(self._ops)
-        with self._direct_gui_lock:
-            return operations + self._direct_gui_jobs
+        with self._state_lock, self._ops_lock:
+            return len(self._ops) + self._direct_gui_jobs
 
     # -- blocking execution -------------------------------------------------
 
@@ -1801,6 +1838,10 @@ class Server:
 
         def runner() -> Any:
             """Run the handler, merging the recovery receipt and carrying ToolErrors as values."""
+            if not self._tool_enabled(name):
+                return ToolError(
+                    VALIDATION_FAILED, f"tool '{name}' is disabled", {"reason": "tool_disabled"}
+                )
             try:
                 result = handler(op_ctx, arguments)
                 if isinstance(result, dict) and op_ctx.checkpoint:
@@ -1848,7 +1889,23 @@ class Server:
             events.put(_rpc_result(request_id, result))
             events.put(None)  # terminal sentinel: zero-chunk after final result
 
-        threading.Thread(target=produce, name=f"mcp-blocking-{name}", daemon=True).start()
+        try:
+            threading.Thread(target=produce, name=f"mcp-blocking-{name}", daemon=True).start()
+        except BaseException as exc:
+            # No producer owns the reserved slot: release it here.
+            self._remove_op(op)
+            if not isinstance(exc, Exception):
+                raise
+            return _rpc_result(
+                request_id,
+                self._error_result(
+                    ToolError(
+                        SERVER_BUSY,
+                        f"could not start the worker for '{name}'; retry",
+                        {"reason": "worker_unavailable"},
+                    )
+                ),
+            )
         return StreamResponse(
             events,
             on_disconnect=None if is_legacy else on_disconnect,
@@ -1977,17 +2034,25 @@ class Server:
         except ToolError as exc:
             self._remove_op(op)
             return _rpc_result(validated["id"], self._error_result(exc))
-        op.task_id = record.task_id
         # ONE shared cancellation event per operation: tasks/cancel, the
         # service-tick deadline sweep, stop() and a blocking disconnect all
         # set the very Event the dispatcher and ctx handlers poll. Built
-        # before _OpContext so ctx.cancel_event is that same object.
-        op.cancel_event = record.cancel_event
+        # before _OpContext so ctx.cancel_event is that same object. A Stop
+        # racing record creation must survive the event replacement.
+        with self._state_lock, self._ops_lock:
+            op.task_id = record.task_id
+            if op.cancel_event.is_set() or (self._bound and self._state != "running"):
+                record.cancel_event.set()
+            op.cancel_event = record.cancel_event
         op_ctx = _OpContext(self, operation=op, approved_target=_target_identity(target))
         handler = self._handlers[name]
 
         def runner() -> Any:
             """Run the handler, merging the recovery receipt and carrying ToolErrors as values."""
+            if not self._tool_enabled(name):
+                return ToolError(
+                    VALIDATION_FAILED, f"tool '{name}' is disabled", {"reason": "tool_disabled"}
+                )
             try:
                 result = handler(op_ctx, arguments)
                 if isinstance(result, dict) and op_ctx.checkpoint:
@@ -2392,6 +2457,7 @@ class Server:
                 self._read_documents,
                 timeout=_RESOURCE_READ_TIMEOUT_S,
                 operation_name="resources/read:freecad://documents",
+                on_finished=lambda _outcome: self._maybe_finish_draining(),
             )
             if outcome.error is not None:
                 details = {"traceback": outcome.traceback} if outcome.traceback else None
@@ -2562,6 +2628,7 @@ class Server:
                 was_running = False
             else:
                 self._state = "draining"
+                self._shutdown_in_progress = True
                 was_running = True
         if not was_running:
             return self.status()
@@ -2574,9 +2641,17 @@ class Server:
             finally:
                 self._http = None
         counts = gui_dispatch.shutdown()
-        self._remove_observer()
-        # Qt/waker disposal is deferred until the last retained operation
-        # actually finishes (see _maybe_finish_draining).
+        # Retained work (e.g. a solve Future) shares these events with its
+        # task record and handler: request cooperative cancellation only.
+        with self._ops_lock:
+            for op in self._ops.values():
+                if not op.cancel_event.is_set():
+                    op.cancel_event.set()
+                    counts["cancel_requested"] += 1
+        with self._state_lock:
+            self._shutdown_in_progress = False
+        # Observer/Qt/waker disposal is deferred until the last retained
+        # operation actually finishes (see _maybe_finish_draining).
         self._maybe_finish_draining()
         result = {
             "running": False,
@@ -3322,14 +3397,20 @@ def start_server() -> dict:
     with _server_lock:
         current = _server
         if current is not None:
+            # Finish a due Stop cleanup on this GUI thread; no-op otherwise.
+            current._finalize_stop_cleanup()
             with current._state_lock:
                 state = current._state
             if state == "running":
                 return current.status()
             if state == "starting":
                 raise RuntimeError("MCP server is starting; retry in a moment")
-            # draining/stopped: refuse while late GUI work is still active.
-            if current.has_pending_operations() or gui_dispatch.pending_count() > 0:
+            # draining/stopped: refuse while late GUI work or cleanup is active.
+            if (
+                state == "draining"
+                or current.has_pending_operations()
+                or gui_dispatch.pending_count() > 0
+            ):
                 raise RuntimeError(
                     "previous MCP server still has running GUI operations; "
                     "restart is refused until they finish"
@@ -3354,9 +3435,11 @@ def stop_server() -> dict:
     result = server.stop()
     with _server_lock:
         # Retain the drained-but-still-finishing server so its late
-        # finalizers can complete; a fresh start replaces it only when it
-        # has no pending operations left.
-        if not server.has_pending_operations() and gui_dispatch.pending_count() == 0:
+        # finalizers and GUI cleanup can complete; forget it only once it
+        # has confirmed stopped.
+        with server._state_lock:
+            stopped = server._state == "stopped"
+        if _server is server and stopped:
             _server = None
     return result
 

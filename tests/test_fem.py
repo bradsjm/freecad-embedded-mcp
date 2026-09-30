@@ -704,6 +704,63 @@ def test_nonzero_exit_captures_process_diagnostics(tmp_path: Path) -> None:
         assert len(ctx.finished_ops) == 1
 
 
+def test_oversized_failure_output_is_bounded_to_the_tail_with_marker(
+    tmp_path: Path,
+) -> None:
+    with load_fem() as fem:
+        ctx = FakeCtx(FakeDocument(), tmp_path)
+        future, _doc, _analysis = start_solve(fem, ctx, tmp_path)
+        operation = ctx.active_solves["identity-Doc"]
+        tool = operation.tool
+        op = operation
+        # Over 8 MiB of chatter per channel with the decisive lines at the
+        # very end; the Future is the single result object the server
+        # flattens for both the blocking and the detached-task path.
+        stdout_tail = "*ERROR in e_cub: solver died\n"
+        stderr_tail = "ccx terminated with status 134\n"
+        tool.process.stdout = "w" * (8 * 1024 * 1024 + 4096) + stdout_tail
+        tool.process.stderr = "e" * (8 * 1024 * 1024 + 4096) + stderr_tail
+
+        op._on_finished(134, FakeQProcess.ExitStatus.CrashExit)
+
+        error = future.exception()
+        assert isinstance(error, ToolError)
+        assert error.code == "SOLVER_FAILED"
+        limit = fem._MAX_PROCESS_TEXT_LENGTH
+        assert len(error.details["stdout"]) == limit
+        assert len(error.details["stderr"]) == limit
+        assert error.details["stdout"].startswith(fem._PROCESS_TRUNCATION_MARK)
+        assert error.details["stderr"].startswith(fem._PROCESS_TRUNCATION_MARK)
+        assert error.details["stdout"].endswith(stdout_tail)
+        assert error.details["stderr"].endswith(stderr_tail)
+        assert ctx.active_solves == {}
+        assert len(ctx.finished_ops) == 1
+
+
+def test_process_text_preserves_small_output_and_bounds_only_oversized() -> None:
+    with load_fem() as fem:
+        process = FakeQProcess()
+        limit = fem._MAX_PROCESS_TEXT_LENGTH
+        mark = fem._PROCESS_TRUNCATION_MARK
+
+        process.stdout = ""
+        assert fem._process_text(process, "readAllStandardOutput") == ""
+
+        small = "*ERROR in e_cub\n"
+        process.stdout = small
+        assert fem._process_text(process, "readAllStandardOutput") == small
+
+        exact = "y" * limit
+        process.stdout = exact
+        assert fem._process_text(process, "readAllStandardOutput") == exact
+
+        oversized = "a" * (limit + 1) + "decisive tail\n"
+        process.stdout = oversized
+        bounded = fem._process_text(process, "readAllStandardOutput")
+        assert bounded == mark + oversized[-(limit - len(mark)) :]
+        assert len(bounded) == limit
+
+
 def test_crashed_process_is_reported(tmp_path: Path) -> None:
     with load_fem() as fem:
         ctx = FakeCtx(FakeDocument(), tmp_path)

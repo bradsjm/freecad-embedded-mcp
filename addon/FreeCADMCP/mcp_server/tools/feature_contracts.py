@@ -362,17 +362,29 @@ def expensive_feature_present(targets: list[Any]) -> bool:
     """
 
     seen: set[str] = set()
-    queue = list(targets)
+    # Duplicate named seeds are one object in native identity terms: they
+    # must not consume the traversal budget twice, so they are deduplicated
+    # before the initial enqueue. Unnamed objects have no native identity
+    # to compare, so they keep the plain bounded-scan treatment.
+    queue: list[Any] = []
+    for target in targets:
+        name = str(getattr(target, "Name", ""))
+        if name:
+            if name in seen:
+                continue
+            seen.add(name)
+        queue.append(target)
     scanned = 0
     expensive = False
     while queue and scanned < _MAX_DEPENDENT_SCAN:
         obj = queue.pop(0)
+        # ``scanned`` counts unique queued objects only: every named object
+        # is enqueued exactly once because membership is marked at enqueue
+        # time, so reconverging links can never push the count past the
+        # closure's true size.
         scanned += 1
         if str(getattr(obj, "TypeId", "")) in EXPENSIVE_TYPES:
             expensive = True
-        name = str(getattr(obj, "Name", ""))
-        if name:
-            seen.add(name)
         try:
             links = list(getattr(obj, "InList", ()) or ())
         except Exception:
@@ -380,6 +392,7 @@ def expensive_feature_present(targets: list[Any]) -> bool:
         for link in links:
             link_name = str(getattr(link, "Name", ""))
             if link_name and link_name not in seen:
+                seen.add(link_name)
                 queue.append(link)
     if queue:
         raise _fail(
@@ -515,6 +528,16 @@ def _check_gear(obj: Any) -> None:
 
 def _check_pattern(obj: Any) -> None:
     """Bound a pattern feature's occurrences and referenced originals."""
+    # The originals bound holds even when the occurrence bound cannot be
+    # evaluated: a MultiTransform carries no Occurrences property, so an
+    # early return before this check would let a generic edit give it any
+    # number of originals.
+    originals = _original_count(obj)
+    if originals > MAX_PATTERN_ORIGINALS:
+        raise _fail(
+            f"feature '{getattr(obj, 'Name', '')}' references {originals} "
+            f"originals; the bound is {MAX_PATTERN_ORIGINALS}"
+        )
     occurrences = getattr(obj, "Occurrences", None)
     if isinstance(occurrences, bool) or not isinstance(occurrences, int):
         return
@@ -524,12 +547,6 @@ def _check_pattern(obj: Any) -> None:
         raise _fail(
             f"pattern '{getattr(obj, 'Name', '')}' requests {occurrences} "
             f"occurrences; the bound is {MAX_PATTERN_OCCURRENCES}"
-        )
-    originals = _original_count(obj)
-    if originals > MAX_PATTERN_ORIGINALS:
-        raise _fail(
-            f"feature '{getattr(obj, 'Name', '')}' references {originals} "
-            f"originals; the bound is {MAX_PATTERN_ORIGINALS}"
         )
     if occurrences * originals > MAX_PATTERN_OCCURRENCES * 2:
         raise _fail(

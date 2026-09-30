@@ -55,6 +55,7 @@ v2 lifecycle (PLAN section 4):
 import concurrent.futures
 import itertools
 import queue
+import sys
 import threading
 import time
 import traceback
@@ -186,6 +187,7 @@ _processing_since: float = 0.0  # monotonic time when _processing became True
 _task_ids = itertools.count(1)
 _dispatch_health = DispatchHealth()
 _waker: "_WakeSignal | None" = None
+_gui_thread_id: int | None = None  # captured by initialize on the GUI thread
 _state_lock = threading.Lock()  # guards the lifecycle fields below
 _draining = False
 _inflight: "dict[int, _Job]" = {}
@@ -201,11 +203,14 @@ class _WakeSignal(QtCore.QObject):
     """
 
     _sig = QtCore.Signal()
+    #: Carries one post-shutdown cleanup callable to the GUI thread.
+    _cleanup_sig = QtCore.Signal(object)
 
     def __init__(self):
-        """Connect the wake signal for queued delivery on the GUI thread."""
+        """Connect the wake and cleanup signals for queued GUI-thread delivery."""
         super().__init__()
         self._sig.connect(self._on_wake, QtCore.Qt.QueuedConnection)
+        self._cleanup_sig.connect(self._on_cleanup, QtCore.Qt.QueuedConnection)
 
     def wake(self) -> None:
         """Emit the wake signal from any thread; Qt queues the slot call."""
@@ -214,6 +219,11 @@ class _WakeSignal(QtCore.QObject):
     def _on_wake(self) -> None:
         """Drain queued jobs without rescheduling the heartbeat chain."""
         process_gui_tasks(reschedule=False)
+
+    @QtCore.Slot(object)
+    def _on_cleanup(self, fn: Callable[[], None]) -> None:
+        """Run one posted cleanup callable on the GUI thread."""
+        _run_cleanup(fn)
 
 
 class _ShutdownSentinel:
@@ -249,12 +259,30 @@ def _safe_set_result(future: "concurrent.futures.Future[Outcome]", outcome: Outc
 
 
 def _safe_console_error(message: str) -> None:
-    """Report an add-on failure without allowing host logging to raise."""
+    """Report an add-on failure without allowing host logging to raise.
+
+    FreeCAD's console is only touched on the captured GUI thread; any
+    other (or unknown) thread writes to stderr instead.
+    """
 
     try:
-        FreeCAD.Console.PrintError(message)
+        if _gui_thread_id is not None and threading.get_ident() == _gui_thread_id:
+            FreeCAD.Console.PrintError(message)
+        else:
+            sys.stderr.write(message)
     except BaseException:
         pass
+
+
+def _run_cleanup(fn: Callable[[], None]) -> None:
+    """Execute one post-shutdown cleanup callable on the GUI thread; never raise."""
+    try:
+        fn()
+    except Exception as exc:
+        _safe_console_error(
+            f"MCP: post-shutdown cleanup raised {type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}"
+        )
 
 
 def _fire_on_finished(job: _Job, outcome: Outcome) -> None:
@@ -540,6 +568,10 @@ def process_gui_tasks(reschedule: bool = True, *, generation: int | None = None)
     """
     global _processing, _processing_since, _queued_jobs
     if _processing:
+        # A nested heartbeat tick consumed its timer: keep exactly one live
+        # chain. Immediate wakes and retired generations never rearm.
+        if reschedule and _generation_live(generation):
+            _arm_heartbeat()
         return  # re-entrant call from processEvents inside a task; skip
 
     shutdown = False
@@ -566,8 +598,11 @@ def process_gui_tasks(reschedule: bool = True, *, generation: int | None = None)
         if status_bar is not None:
             status_bar.showMessage("MCP: processing…")
         try:
-            while not _gui_request_queue.empty():
-                item = _gui_request_queue.get()
+            while True:
+                try:
+                    item = _gui_request_queue.get_nowait()
+                except queue.Empty:
+                    break  # a canceller may remove items after the emptiness check
                 if isinstance(item, _ShutdownSentinel):
                     with _state_lock:
                         current = _generation
@@ -714,7 +749,7 @@ def initialize() -> None:
     generations never rearm, so a restart can never duplicate the chain.
     Idempotent while already running.
     """
-    global _waker, _draining, _generation
+    global _waker, _draining, _generation, _gui_thread_id
     with _state_lock:
         if _waker is not None and not _draining:
             return  # already live: never arm a competing chain
@@ -731,6 +766,7 @@ def initialize() -> None:
     with _state_lock:
         _draining = False
         _generation += 1
+    _gui_thread_id = threading.get_ident()
     _purge_retired_sentinels()
     _waker = _WakeSignal()
     _arm_heartbeat()
@@ -758,6 +794,27 @@ def cleanup_waker() -> None:
         delete_later()
     except RuntimeError:
         pass  # the underlying QObject is already gone
+
+
+def post_shutdown_cleanup(fn: Callable[[], None]) -> bool:
+    """Run ``fn`` on the GUI thread after normal submissions are disabled.
+
+    Executes inline only on the captured GUI thread; otherwise Qt queues
+    it through the live waker. Returns False when no live waker can post
+    it — the callable never runs off the GUI thread.
+    """
+    if _gui_thread_id is not None and threading.get_ident() == _gui_thread_id:
+        _run_cleanup(fn)
+        return True
+    with _state_lock:
+        waker = _waker
+    if waker is None:
+        return False
+    try:
+        waker._cleanup_sig.emit(fn)
+    except Exception:
+        return False
+    return True
 
 
 def shutdown() -> dict[str, int]:

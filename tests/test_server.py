@@ -120,15 +120,8 @@ def _install_freeCAD_stubs() -> None:
     timer_calls: list = []
     qt_core = types.SimpleNamespace(
         QObject=object,
-        Signal=lambda *_args, **_kw: type(
-            "FakeSignal",
-            (),
-            {
-                "__init__": lambda self: None,
-                "connect": lambda self, cb, *_a: None,
-                "emit": lambda self: None,
-            },
-        )(),
+        Signal=FakeQtSignal,
+        Slot=lambda *_types: lambda fn: fn,
         Qt=types.SimpleNamespace(QueuedConnection=0, NoButton=0, WaitCursor=0),
         QEventLoop=types.SimpleNamespace(ExcludeUserInputEvents=1, ExcludeSocketNotifiers=2),
         QThread=types.SimpleNamespace(msleep=lambda _d: None),
@@ -152,6 +145,40 @@ def _install_freeCAD_stubs() -> None:
     sys.modules["PySide.QtCore"] = qt_core
     sys.modules["PySide.QtWidgets"] = qt_widgets
     _install_freeCAD_stubs.timer_calls = timer_calls  # type: ignore[attr-defined]
+
+
+#: Fake GUI event queue: cleanup callables posted through the waker's
+#: cleanup signal wait here until a test delivers them explicitly on its
+#: designated fake GUI thread (``run_gui_cleanups``).
+GUI_CLEANUPS: list = []
+
+
+class FakeQtSignal:
+    """Signal double: argument-carrying emissions queue on the fake GUI loop.
+
+    The zero-argument wake signal stays inert (tests install their own
+    wakers); a typed signal emission is posted to ``GUI_CLEANUPS``.
+    """
+
+    def __init__(self, *_types) -> None:
+        self.callback = None
+
+    def connect(self, callback, *_args) -> None:
+        self.callback = callback
+
+    def emit(self, *args) -> None:
+        if args:
+            callback = self.callback
+            GUI_CLEANUPS.append(lambda: callback(*args))
+
+
+def run_gui_cleanups() -> int:
+    """Deliver queued cleanup callbacks on the calling (fake GUI) thread."""
+    delivered = 0
+    while GUI_CLEANUPS:
+        GUI_CLEANUPS.pop(0)()
+        delivered += 1
+    return delivered
 
 
 _install_freeCAD_stubs()
@@ -357,6 +384,9 @@ class ThreadedWaker:
 
     def __init__(self) -> None:
         self.threads: list[threading.Thread] = []
+        # Cleanup posts go to the fake GUI queue, like the real waker.
+        self._cleanup_sig = FakeQtSignal(object)
+        self._cleanup_sig.connect(gui_dispatch._run_cleanup)
 
     def wake(self) -> None:
         thread = threading.Thread(
@@ -481,6 +511,7 @@ def _clean_state():
     FC_GUI_STATE["documents"] = {}
     FC_STATE["observers"] = []
     FakeConsole.messages.clear()
+    GUI_CLEANUPS.clear()
     server_module._server = None
     previous_waker = gui_dispatch._waker
     gui_dispatch._waker = None
@@ -2698,3 +2729,346 @@ def test_inspect_user_context_image_result_publishes_png_exactly_once():
     expected_metadata = _context_payload(mimeType="image/png", width=4, height=3)
     assert result["structuredContent"] == expected_metadata
     assert json.dumps(result).count(data) == 1
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle admission, Stop ownership and GUI-thread final cleanup.
+# ---------------------------------------------------------------------------
+
+
+class _GateLock:
+    """Lock double that flags (and optionally parks) one named thread's first acquire."""
+
+    def __init__(self, gated_thread: str, *, park: bool = True) -> None:
+        self._lock = threading.Lock()
+        self._gated_thread = gated_thread
+        self._park = park
+        self.entered = threading.Event()
+        self.acquired = threading.Event()
+        self.release = threading.Event()
+
+    def __enter__(self):
+        gated = threading.current_thread().name == self._gated_thread
+        if gated and not self.entered.is_set():
+            self.entered.set()
+            if self._park:
+                assert self.release.wait(timeout=5.0)
+        self._lock.acquire()
+        if gated:
+            self.acquired.set()
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        self._lock.release()
+        return False
+
+
+def test_stop_cannot_overtake_an_admission_past_its_state_check(lifecycle):
+    server_module.start_server()
+    server = server_module.get_server()
+    gate = _GateLock("admit")
+    server._ops_lock = gate
+    # Flags the stopper's draining transition attempt on the state lock.
+    stop_attempt = _GateLock("stopper", park=False)
+    server._state_lock = stop_attempt
+    box: dict = {}
+
+    def admit() -> None:
+        box["op"] = server._register_operation(
+            "run_fem", kind="task", task_id=None, principal=PRINCIPAL, deadline_s=60.0
+        )
+
+    admitter = threading.Thread(target=admit, name="admit", daemon=True)
+    admitter.start()
+    assert gate.entered.wait(timeout=5.0)  # state checked, insertion pending
+    stopper = threading.Thread(
+        target=lambda: box.setdefault("stop", server_module.stop_server()),
+        name="stopper",
+        daemon=True,
+    )
+    stopper.start()
+    assert stop_attempt.entered.wait(timeout=5.0)  # Stop is now blocked on state
+    # Stop cannot take the state lock while the admission is mid-insertion.
+    assert not wait_until(stop_attempt.acquired.is_set, timeout=0.2)
+    assert server._state == "running"
+    gate.release.set()
+    admitter.join(timeout=5.0)
+    stopper.join(timeout=5.0)
+
+    op = box["op"]
+    assert box["stop"]["state"] == "draining"
+    assert op.op_id in server._ops
+    assert op.cancel_event.is_set()
+    with pytest.raises(protocol.ToolError) as exc:
+        server._register_operation(
+            "run_fem", kind="task", task_id=None, principal=PRINCIPAL, deadline_s=60.0
+        )
+    assert exc.value.details["reason"] == "server_not_running"
+    assert server.status()["state"] == "draining"  # never stopped with admitted work
+    server._remove_op(op)  # true completion on the (fake) GUI thread
+    assert server.status()["state"] == "stopped"
+    assert FC_STATE["observers"] == []
+
+
+@pytest.mark.parametrize("kind", ["preflight", "discover_refresh", "resources_read"])
+def test_timed_out_direct_gui_call_finishes_draining_at_true_completion(
+    lifecycle, monkeypatch, kind
+):
+    monkeypatch.setattr(server_module, "_PREFLIGHT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(server_module, "_RESOURCE_READ_TIMEOUT_S", 0.05)
+    server_module.start_server()
+    server = server_module.get_server()
+    install_waker()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked(*_args):
+        entered.set()
+        release.wait(timeout=5.0)
+        return None
+
+    server._preflights["close_document"] = blocked
+    monkeypatch.setattr(server_module, "_capture_static_capabilities", lambda _doc: blocked() or {})
+    server._read_documents = lambda: blocked() or {"documents": []}
+    try:
+        if kind == "preflight":
+            server._run_preflight("close_document", {})
+        elif kind == "discover_refresh":
+            server._refresh_capabilities(None)
+        else:
+            dispatch(server, "resources/read", {"uri": "freecad://documents"}, rpc_id=1)
+    except (protocol.ToolError, protocol.ProtocolError):
+        pass  # the waiter timed out; the GUI callable is still running
+    assert entered.is_set()
+    assert server.pending_operation_count() == 0  # the caller fully unwound
+    assert gui_dispatch.pending_count() == 1
+
+    assert server_module.stop_server()["state"] == "draining"
+    release.set()
+    assert wait_until(lambda: bool(GUI_CLEANUPS))  # no further request needed
+    assert FC_STATE["observers"] == [server._observer]  # still on the GUI queue
+    run_gui_cleanups()
+    assert server.status()["state"] == "stopped"
+    assert FC_STATE["observers"] == []
+    assert gui_dispatch._waker is None
+
+
+def test_stop_retains_solve_observer_and_retries_failed_cleanup(lifecycle, monkeypatch):
+    server_module.start_server()
+    server = server_module.get_server()
+    install_waker()
+    deferred: Future = Future()
+    STUB_HANDLERS["run_fem"] = lambda _ctx, _arguments: deferred
+    task_id = dispatch(
+        server,
+        "tools/call",
+        {"name": "run_fem", "arguments": {}},
+        rpc_id=1,
+        capabilities=TASKS_CAPS,
+    )["result"]["taskId"]
+    assert wait_until(lambda: gui_dispatch.pending_count() == 0 and bool(STUB_CALLS))
+    record = server._task_store.get(task_id, principal=PRINCIPAL)
+
+    stopped = server_module.stop_server()
+    assert stopped["state"] == "draining"
+    assert stopped["cancel_requested"] == 1
+    # The shared event is set; the solve itself keeps running.
+    assert record.cancel_event.is_set()
+    assert not deferred.done()
+    assert record.status == "working"
+    # The observer stays installed: an edit during the solve advances the
+    # generation the FEM loader compares (stale_generation, test_fem.py).
+    doc = FakeDoc("Solve")
+    FC_STATE["documents"]["Solve"] = doc
+    before = server.document_generation(doc)
+    server._observer.slotChangedObject(doc, object())
+    assert server.document_generation(doc) == before + 1
+
+    real_remove = server_module.FreeCAD.removeDocumentObserver
+    attempts: list = []
+
+    def flaky_remove(observer) -> None:
+        attempts.append(threading.get_ident())
+        if len(attempts) == 1:
+            raise RuntimeError("native observer removal failed")
+        real_remove(observer)
+
+    monkeypatch.setattr(server_module.FreeCAD, "removeDocumentObserver", flaky_remove)
+    resolver = threading.Thread(target=lambda: deferred.set_result({"blocks": 1}), daemon=True)
+    resolver.start()
+    resolver.join(timeout=5.0)
+    assert record.status == "completed"
+    assert attempts == []  # nothing native ran on the resolver thread
+    gui_thread = threading.get_ident()
+    assert run_gui_cleanups() == 1
+    assert attempts == [gui_thread]
+    # Failed removal: no premature stopped, the observer stays recorded.
+    assert server.status()["state"] == "draining"
+    assert FC_STATE["observers"] == [server._observer]
+    assert gui_dispatch._waker is not None
+
+    # Start on the same GUI thread retries the due cleanup, then restarts.
+    status = server_module.start_server()
+    assert attempts == [gui_thread, gui_thread]
+    assert server.status()["state"] == "stopped"
+    replacement = server_module.get_server()
+    assert replacement is not server
+    assert status["state"] == "running"
+    assert FC_STATE["observers"] == [replacement._observer]
+    server._finalize_stop_cleanup()  # duplicate after success: no-op
+    assert len(attempts) == 2
+    server_module.stop_server()
+
+
+def test_task_creation_racing_stop_keeps_its_cancellation(lifecycle, monkeypatch):
+    server_module.start_server()
+    server = server_module.get_server()
+    real_create = server._task_store.create
+    box: dict = {}
+
+    def racing_create(*args, **kwargs):
+        record = real_create(*args, **kwargs)
+        box["stop"] = server_module.stop_server()
+        return record
+
+    monkeypatch.setattr(server._task_store, "create", racing_create)
+    task_id = dispatch(
+        server,
+        "tools/call",
+        {"name": "measure", "arguments": {}},
+        rpc_id=1,
+        capabilities=TASKS_CAPS,
+    )["result"]["taskId"]
+    record = server._task_store.get(task_id, principal=PRINCIPAL)
+    assert record.cancel_event.is_set()  # the replacement event kept Stop's request
+    assert record.status == "cancelled"
+    assert STUB_CALLS == []
+    assert server.status()["state"] == "stopped"
+
+
+def test_queued_cancellations_cannot_finalize_before_stop_teardown(lifecycle, monkeypatch):
+    server_module.start_server()
+    server = server_module.get_server()
+    # The stub wake signal never drains: the task job stays queued.
+    task_id = dispatch(
+        server,
+        "tools/call",
+        {"name": "measure", "arguments": {}},
+        rpc_id=1,
+        capabilities=TASKS_CAPS,
+    )["result"]["taskId"]
+    assert gui_dispatch.pending_count() == 1
+    real_remove = server_module.FreeCAD.removeDocumentObserver
+    seen: list = []
+
+    def recording_remove(observer) -> None:
+        seen.append(server._shutdown_in_progress)
+        real_remove(observer)
+
+    monkeypatch.setattr(server_module.FreeCAD, "removeDocumentObserver", recording_remove)
+    result = server_module.stop_server()
+    assert result["cancelled_queued"] == 1
+    assert server._task_store.get(task_id, principal=PRINCIPAL).status == "cancelled"
+    assert seen == [False]  # cleanup ran once, only after teardown completed
+    assert server.status()["state"] == "stopped"
+
+    # A duplicate queued cleanup of the old server cannot touch a restart.
+    GUI_CLEANUPS.append(server._finalize_stop_cleanup)
+    server_module.start_server()
+    live_waker = gui_dispatch._waker
+    assert live_waker is not None
+    run_gui_cleanups()
+    assert gui_dispatch._waker is live_waker
+    assert len(seen) == 1
+    server_module.stop_server()
+
+
+def test_worker_start_failure_releases_the_operation_slot(lifecycle, monkeypatch):
+    server_module.start_server()
+    server = server_module.get_server()
+
+    class NoThread:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(server_module.threading, "Thread", NoThread)
+        response = dispatch(
+            server, "tools/call", {"name": "inspect_objects", "arguments": {}}, rpc_id=1
+        )
+    error = response["result"]["structuredContent"]["error"]
+    assert response["result"]["isError"] is True
+    assert error["code"] == "SERVER_BUSY"
+    assert error["message"] == "could not start the worker for 'inspect_objects'; retry"
+    assert error["details"] == {"reason": "worker_unavailable"}
+    assert server.pending_operation_count() == 0
+    assert server_module.stop_server()["state"] == "stopped"
+
+
+def test_queued_run_script_rechecks_permission_before_execution():
+    server = make_server()
+    _reset_dispatcher_for_tests()
+    gui_dispatch._waker = None  # keep both calls queued
+    blocking = dispatch(server, "tools/call", {"name": "run_script", "arguments": {}}, rpc_id=1)
+    task_id = dispatch(
+        server,
+        "tools/call",
+        {"name": "run_script", "arguments": {}},
+        rpc_id=2,
+        capabilities=TASKS_CAPS,
+    )["result"]["taskId"]
+    assert wait_until(lambda: gui_dispatch.pending_count() == 2)
+    server.apply_settings({**server.settings, "allow_scripts": False})
+    gui_dispatch.process_gui_tasks(reschedule=False)
+
+    event = drain_stream(blocking, 1)[0]
+    error = event["result"]["structuredContent"]["error"]
+    assert error["code"] == "VALIDATION_FAILED"
+    assert error["details"] == {"reason": "tool_disabled"}
+    record = server._task_store.get(task_id, principal=PRINCIPAL)
+    assert wait_until(lambda: record.terminal)
+    task_error = record.result["structuredContent"]["error"]
+    assert task_error["code"] == "VALIDATION_FAILED"
+    assert task_error["details"] == {"reason": "tool_disabled"}
+    assert STUB_CALLS == []
+    with pytest.raises(protocol.ProtocolError) as exc:
+        dispatch(server, "tools/call", {"name": "run_script", "arguments": {}}, rpc_id=3)
+    assert exc.value.code == protocol.METHOD_NOT_FOUND
+
+
+def test_consent_fallback_message_is_written_on_the_gui_preflight_thread(monkeypatch):
+    server = make_server()
+    _reset_dispatcher_for_tests()
+    writes: list = []
+    preflight_threads: list = []
+    monkeypatch.setattr(
+        FakeConsole,
+        "PrintMessage",
+        staticmethod(lambda message: writes.append((threading.get_ident(), str(message)))),
+    )
+    original = server._preflights["close_document"]
+
+    def recording(*args):
+        preflight_threads.append(threading.get_ident())
+        return original(*args)
+
+    server._preflights["close_document"] = recording
+    PREFLIGHT_RESULTS["close_document"] = dict(CONSENT_TARGET)
+    drain_stream(_call_close(server, rpc_id=1, capabilities={}), 2)
+    [preflight_thread] = preflight_threads
+    assert preflight_thread != threading.get_ident()  # not the request thread
+    assert writes == [
+        (
+            preflight_thread,
+            (
+                "[MCP] 'close_document' proceeded without its consent prompt: "
+                "the client does not support form elicitation.\n"
+            ),
+        )
+    ]
+    # A form-capable client gets a challenge and no fallback message.
+    _call_close(server, rpc_id=2)
+    assert len(writes) == 1

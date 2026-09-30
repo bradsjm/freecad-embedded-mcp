@@ -32,6 +32,7 @@ principal is a non-reversible fingerprint of the bearer token;
 import base64
 import hmac
 import http.server
+import io
 import ipaddress
 import json
 import queue
@@ -42,6 +43,7 @@ import threading
 import time
 import traceback
 import uuid
+from collections.abc import Callable
 from hashlib import sha256
 
 from .ip_parse import parse_allowed_networks
@@ -466,6 +468,38 @@ class McpHTTPServer(http.server.ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+class _DeadlineRawIO(io.RawIOBase):
+    """Raw socket reader bounded by an aggregate header deadline.
+
+    ``deadline()`` returns the absolute monotonic instant at which the
+    current request's header read must be complete, or ``None`` while no
+    deadline applies (headers parsed; body reads keep the plain socket
+    timeout). Before every recv the remaining budget is recomputed, so a
+    client cannot renew the tolerated wait by dribbling bytes. The
+    wrapper never closes the socket: ownership stays with the handler.
+    """
+
+    def __init__(self, sock, deadline: Callable[[], float | None]) -> None:
+        """Adopt the connection socket and the header-deadline source."""
+        super().__init__()
+        self._sock = sock
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        """The stream supports reading."""
+        return True
+
+    def readinto(self, buffer) -> int:
+        """Read into ``buffer`` within the remaining header deadline."""
+        deadline = self._deadline()
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("request header deadline exceeded")
+            self._sock.settimeout(remaining)
+        return self._sock.recv_into(buffer)
+
+
 class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
     """Single-connection handler; the request thread owns any SSE stream."""
 
@@ -476,9 +510,36 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
     def setup(self):
         """Initialize the connection: read timeout, id and response flag."""
         self.timeout = self.server.read_timeout
+        self._header_deadline = None
         super().setup()
+        # Replace the plain socket reader with a deadline-bounded one: the
+        # socket timeout bounds a single recv, not a whole request's
+        # headers, so a slow client could otherwise stretch the head of
+        # one request across many tolerated reads. The original reader has
+        # consumed no bytes and its close detaches without closing the
+        # connection socket.
+        self.rfile.close()
+        self.rfile = io.BufferedReader(
+            _DeadlineRawIO(self.connection, lambda: self._header_deadline)
+        )
         self.connection_id = uuid.uuid4().hex
         self._response_started = False
+
+    def handle_one_request(self):
+        """Bound one request's whole header read by the read timeout."""
+        self._header_deadline = time.monotonic() + self.server.read_timeout
+        try:
+            super().handle_one_request()
+        finally:
+            self._header_deadline = None
+
+    def parse_request(self):
+        """Release the header deadline once the request head is parsed."""
+        result = super().parse_request()
+        if result:
+            # Body reads keep the plain socket timeout set by _handle.
+            self._header_deadline = None
+        return result
 
     def log_message(self, format, *args):
         """Suppress per-request logging to keep the FreeCAD console quiet."""

@@ -210,6 +210,7 @@ class FakeCtx:
         self.App = FakeApp()
         self._doc = doc
         self.approved_target = approved
+        self.canonical_calls: list[str] = []
 
     def document_generation(self, doc: FakeDoc) -> int:
         return 1
@@ -225,7 +226,9 @@ class FakeCtx:
     def canonical_path(self, path: Any) -> str:
         if not isinstance(path, str) or not path:
             raise ToolError(VALIDATION_FAILED, "path must be a non-empty string")
-        return str(path)
+        resolved = str(path)
+        self.canonical_calls.append(resolved)
+        return resolved
 
     def file_fingerprint(self, path: Any) -> dict | None:
         return {"size": 10, "mtime_ns": 1}
@@ -494,6 +497,32 @@ def test_tampered_consent_target_fails_without_effect(tmp_path) -> None:
     assert excinfo.value.code == CONSENT_DENIED
     assert calls == []
     assert doc.transactions == []
+
+
+def test_handler_binds_consent_to_its_own_resolved_path(tmp_path) -> None:
+    """Approval minted for one path never authorizes the import of another:
+    the handler rechecks the fingerprint of the exact resolved path it is
+    about to load, after resolving the caller path exactly once."""
+    with load_import() as module:
+        path = tmp_path / "part.step"
+        path.write_text("ISO-10303-21")
+        other = tmp_path / "other.step"
+        other.write_text("ISO-10303-21")
+        doc = FakeDoc(str(path))
+        ctx = FakeCtx(doc)
+        ctx.approved_target = consent_target(module, ctx, str(other), "step")
+        calls: list[tuple] = []
+        module._import_step = lambda path, document: calls.append((path, document))
+
+        with pytest.raises(ToolError) as excinfo:
+            call(module, ctx, path=str(path), format="step")
+
+    assert excinfo.value.code == CONSENT_DENIED
+    assert calls == []  # no native import ran
+    assert doc.transactions == []  # the mutation gate never opened
+    # Preflight resolved the approved path once, the handler resolved the
+    # caller path once: no second resolution anywhere in the handler.
+    assert ctx.canonical_calls == [str(other), str(path)]
 
 
 # ---------------------------------------------------------------------------

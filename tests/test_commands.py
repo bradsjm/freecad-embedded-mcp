@@ -11,6 +11,7 @@ to stopped transition only after true completion.
 """
 
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -619,8 +620,10 @@ def test_status_snapshots_never_contain_the_token():
 # ---------------------------------------------------------------------------
 
 
-def test_draining_finishes_into_stopped_only_after_true_completion():
+def test_draining_finishes_into_stopped_only_after_true_completion(monkeypatch):
     server = ts.make_server()
+    # This thread is the designated fake GUI thread: final cleanup runs inline.
+    monkeypatch.setattr(ts.gui_dispatch, "_gui_thread_id", threading.get_ident())
     with server._state_lock:
         server._state = "draining"
     # A retained operation keeps the server in draining.

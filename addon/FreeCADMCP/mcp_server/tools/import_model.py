@@ -156,16 +156,13 @@ check_schema(_IMPORT_OUTPUT)
 # ---------------------------------------------------------------------------
 
 
-def preflight(ctx: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the import consent target for ``import_model``, else ``None``."""
+def _import_target(ctx: Any, path: str) -> dict[str, Any]:
+    """Build the untrusted-input consent target for an already-resolved path.
 
-    if name != "import_model":
-        return None
-    doc = ctx.require_document(arguments.get("document"))
-    ctx.check_document_idle(doc)
-    path = ctx.canonical_path(arguments.get("path"))
-    if not os.path.isfile(path):
-        raise ToolError(VALIDATION_FAILED, f"no such import file: '{path}'")
+    Preflight and the handler must bind consent to one single canonical
+    resolution, so the approved fingerprint always belongs to the exact
+    file ``_import_step`` or the mesh loader receives.
+    """
     return {
         "kind": "file",
         "path": path,
@@ -177,6 +174,19 @@ def preflight(ctx: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any] 
             "will be loaded into the current document."
         ),
     }
+
+
+def preflight(ctx: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the import consent target for ``import_model``, else ``None``."""
+
+    if name != "import_model":
+        return None
+    doc = ctx.require_document(arguments.get("document"))
+    ctx.check_document_idle(doc)
+    path = ctx.canonical_path(arguments.get("path"))
+    if not os.path.isfile(path):
+        raise ToolError(VALIDATION_FAILED, f"no such import file: '{path}'")
+    return _import_target(ctx, path)
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +344,9 @@ def _import_model(ctx: Any, arguments: dict) -> dict:
     path = ctx.canonical_path(arguments["path"])
     if not os.path.isfile(path):
         raise ToolError(VALIDATION_FAILED, f"no such import file: '{path}'")
-    # Recheck the approved consent target immediately before the effect.
-    _require_approved(ctx, preflight(ctx, "import_model", arguments))
+    # Recheck the approved consent target immediately before the effect,
+    # built from the same resolved path the import below receives.
+    _require_approved(ctx, _import_target(ctx, path))
 
     requested_name = str(arguments.get("name") or "ImportedMesh")
     created: list[Any] = []

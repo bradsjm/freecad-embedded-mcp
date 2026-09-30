@@ -185,6 +185,28 @@ class FakeCtx:
         return str(path)
 
 
+class _ShiftingPathCtx(FakeCtx):
+    """FakeCtx whose canonical_path answers ``first`` once, then ``after``.
+
+    Models a caller path whose resolution is not stable across reads: a
+    handler that resolves the same argument twice would consent on one
+    path and act on the other. The lifecycle handlers must resolve the
+    caller path exactly once and bind consent to that resolution.
+    """
+
+    def __init__(self, tmp_path, first, after):
+        super().__init__(tmp_path)
+        self.canonical_calls: list[str] = []
+        self._first = first
+        self._after = after
+
+    def canonical_path(self, path):
+        self.canonical_calls.append(str(path))
+        if len(self.canonical_calls) == 1:
+            return self._first
+        return self._after
+
+
 # ---------------------------------------------------------------------------
 # new_document.
 # ---------------------------------------------------------------------------
@@ -438,6 +460,34 @@ def test_open_document_missing_file_fails_before_any_mutation(tmp_path):
     assert ctx.App.calls == []
 
 
+def test_open_document_binds_consent_to_its_own_single_resolution(tmp_path):
+    """The handler rechecks the approved target against the one canonical
+    path it resolved itself: a foreign approval is CONSENT_DENIED with no
+    native open, and a matching target keeps the ordinary behavior."""
+    probe = FakeCtx(tmp_path)
+    existing = probe.write_file(probe.allowed_root / "ExistingA.FCStd")
+    missing = str(probe.allowed_root / "MissingB.FCStd")
+
+    ctx = _ShiftingPathCtx(tmp_path, first=existing, after=missing)
+    ctx.approved_target = {  # approval minted for a different file
+        "kind": "file",
+        "path": str(probe.allowed_root / "Elsewhere.FCStd"),
+        "fingerprint": None,
+        "purpose": "open",
+    }
+    with pytest.raises(ToolError) as excinfo:
+        documents.HANDLERS["open_document"](ctx, {"path": "caller.FCStd"})
+    assert excinfo.value.code == CONSENT_DENIED
+    assert ctx.App.documents == {}  # no native open ran
+    assert ctx.canonical_calls == ["caller.FCStd"]  # resolved exactly once
+
+    matched = _ShiftingPathCtx(tmp_path, first=existing, after=missing)
+    matched.approved_target = documents._open_target(matched, existing)
+    payload = documents.HANDLERS["open_document"](matched, {"path": "caller.FCStd"})
+    assert payload["name"] == "existing"
+    assert payload["path"] == existing
+
+
 # ---------------------------------------------------------------------------
 # save_document.
 # ---------------------------------------------------------------------------
@@ -505,6 +555,53 @@ def test_save_document_checks_idle_gate(tmp_path):
     ctx.busy = None
     documents.HANDLERS["save_document"](ctx, {"document": "doc"})
     assert ctx.idle_checks == ["doc", "doc"]
+
+
+def test_save_document_binds_consent_to_its_own_single_resolution(tmp_path):
+    """The save handler resolves the caller path once and rechecks the
+    overwrite target for that exact destination. With resolutions A (an
+    existing file) then B (missing), a second resolution saw only B,
+    skipped the prompt and would have written A without any consent."""
+    source = FakeCtx(tmp_path)
+    own = source.write_file(source.allowed_root / "own.FCStd")
+    destination_a = source.write_file(source.allowed_root / "DestinationA.FCStd")
+    missing_b = str(source.allowed_root / "MissingB.FCStd")
+
+    def shifting_ctx():
+        doc = FakeDoc("doc", file_name=own)
+        ctx = _ShiftingPathCtx(tmp_path, first=destination_a, after=missing_b)
+        ctx.add_document(doc)
+        save_as: list[str] = []
+        doc.saveAs = lambda path: (save_as.append(path), setattr(doc, "FileName", path))
+        return ctx, doc, save_as
+
+    # No approval: the existing destination A must refuse before saveAs
+    # even though a second resolution would only ever see missing B.
+    ctx, _, save_as = shifting_ctx()
+    with pytest.raises(ToolError) as excinfo:
+        documents.HANDLERS["save_document"](ctx, {"document": "doc", "path": "caller.FCStd"})
+    assert excinfo.value.code == CONSENT_DENIED
+    assert save_as == []
+    assert ctx.canonical_calls == ["caller.FCStd"]  # resolved exactly once
+
+    # Approval for B (the second resolution, a missing file) never
+    # authorizes the handler's actual destination A.
+    ctx_b, doc_b, save_as_b = shifting_ctx()
+    ctx_b.approved_target = documents._overwrite_target(ctx_b, doc_b, missing_b)
+    with pytest.raises(ToolError) as excinfo:
+        documents.HANDLERS["save_document"](ctx_b, {"document": "doc", "path": "caller.FCStd"})
+    assert excinfo.value.code == CONSENT_DENIED
+    assert save_as_b == []
+    assert ctx_b.canonical_calls == ["caller.FCStd"]
+
+    # Approval for A still allows saveAs(A).
+    ctx_a, doc_a, save_as_a = shifting_ctx()
+    ctx_a.approved_target = documents._overwrite_target(ctx_a, doc_a, destination_a)
+    payload = documents.HANDLERS["save_document"](
+        ctx_a, {"document": "doc", "path": "caller.FCStd"}
+    )
+    assert payload["path"] == destination_a
+    assert save_as_a == [destination_a]
 
 
 # ---------------------------------------------------------------------------

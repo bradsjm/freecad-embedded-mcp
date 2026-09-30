@@ -562,23 +562,9 @@ class LegacyProtocol:
     def _header_error(session: _LegacySession, message: dict, lowered: dict) -> LegacyReply | None:
         """Validate optional mirror headers against the actual legacy body."""
 
-        version_header = lowered.get(PROTOCOL_VERSION_HEADER)
-        if version_header is not None:
-            try:
-                value = header_source_value(version_header)
-            except ValueError as exc:
-                return _error_reply(
-                    400,
-                    HEADER_MISMATCH,
-                    f"header mismatch: MCP-Protocol-Version: {exc}",
-                )
-            if value != session.version:
-                return _error_reply(
-                    400,
-                    HEADER_MISMATCH,
-                    "header mismatch: MCP-Protocol-Version does not match the "
-                    f"negotiated {session.version} session",
-                )
+        version_error = LegacyProtocol._version_header_error(session, lowered)
+        if version_error is not None:
+            return version_error
         if "method" not in message:
             return None
         method = message["method"]
@@ -615,6 +601,37 @@ class LegacyProtocol:
             _validate_param_headers(params, lowered, None)
         except ProtocolError as exc:
             return _error_reply(400, exc.code, exc.message, exc.data)
+        return None
+
+    @staticmethod
+    def _version_header_error(
+        session: _LegacySession, lowered: Mapping[str, Any]
+    ) -> LegacyReply | None:
+        """Validate the optional ``MCP-Protocol-Version`` mirror header.
+
+        A header that is not a legal value or disagrees with the
+        negotiated session version is a 400 HEADER_MISMATCH. Shared by
+        the single-request and batch paths so the rule cannot drift.
+        """
+
+        version_header = lowered.get(PROTOCOL_VERSION_HEADER)
+        if version_header is None:
+            return None
+        try:
+            value = header_source_value(version_header)
+        except ValueError as exc:
+            return _error_reply(
+                400,
+                HEADER_MISMATCH,
+                f"header mismatch: MCP-Protocol-Version: {exc}",
+            )
+        if value != session.version:
+            return _error_reply(
+                400,
+                HEADER_MISMATCH,
+                "header mismatch: MCP-Protocol-Version does not match the "
+                f"negotiated {session.version} session",
+            )
         return None
 
     # ------------------------------------------------------------------
@@ -1035,6 +1052,9 @@ class LegacyProtocol:
                 INVALID_REQUEST,
                 "JSON-RPC batches are only accepted for the 2025-03-26 revision",
             )
+        version_error = LegacyProtocol._version_header_error(session, lowered)
+        if version_error is not None:
+            return version_error
         if not members:
             return _error_reply(400, INVALID_REQUEST, "malformed envelope: empty batch")
         requests: list[dict] = []
@@ -1078,6 +1098,14 @@ class LegacyProtocol:
                     "malformed envelope: duplicate request id in batch",
                 )
             seen_ids.add(member["id"])
+        # A legacy client may never inject consent state on the wire:
+        # reject every tools/call member before any member runs or
+        # reserves a slot.
+        for member in requests + notifications:
+            if member.get("method") == "tools/call":
+                param_error = _reject_client_consent_fields(member.get("params", {}))
+                if param_error is not None:
+                    return param_error
         if not requests:
             # Notifications pass through immediately; nothing can wait.
             for member in notifications:

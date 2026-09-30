@@ -1200,6 +1200,35 @@ def test_inspect_topology_pages_every_face_once_through_signed_cursors():
     assert pages == 3
 
 
+def test_inspect_topology_integral_float_limit_pages_like_the_integer_form():
+    # The wire schema deliberately accepts integral floats for an integer
+    # limit; a 50.0 request must produce byte-identical pages and cursor
+    # continuation to the integer 50 form, never a slice-type crash.
+    ctx = _topology_doc()
+
+    def collect(limit: float) -> list[list[int]]:
+        arguments: dict[str, object] = {
+            "document": "Doc",
+            "target": {"object": "Shell"},
+            "limit": limit,
+        }
+        protocol.validate_schema(arguments, _definition("inspect_topology")["inputSchema"])
+        pages: list[list[int]] = []
+        cursor: str | None = None
+        while True:
+            page_arguments = {**arguments}
+            if cursor is not None:
+                page_arguments["cursor"] = cursor
+            result = geometry.HANDLERS["inspect_topology"](ctx, page_arguments)
+            _assert_output_schema(result, "inspect_topology")
+            pages.append([item["index"] for item in result["items"]])
+            cursor = result["nextCursor"]
+            if cursor is None:
+                return pages
+
+    assert collect(50.0) == collect(50)
+
+
 def test_topology_limit_above_max_is_clamped():
     ctx = _topology_doc()
     arguments = {"document": "Doc", "target": {"object": "Shell"}, "limit": 500}
@@ -1531,6 +1560,58 @@ def test_check_non_volumetric_shell_cannot_pass():
     row = result["checks"][0]
     assert row["status"] == "indeterminate"
     assert row["reason"] == "non_volumetric_target"
+
+
+def test_volume_range_gate_names_target_without_a_side_letter():
+    # A volume_range check gates exactly one target, so its diagnostics
+    # must speak of ``target``; the ``target 'a'`` lettering belongs to the
+    # two-target distance-style checks only.
+    nonvolumetric = FakeObject("Shell", FakeShape(volume=0.0, solids=0, bounds=(0, 0, 0, 5, 5, 5)))
+    invalid = FakeObject("Broken", FakeShape(valid=False))
+    ctx = FakeCtx({"Shell": nonvolumetric, "Broken": invalid, "Box": _solid("Box")})
+
+    volume_row = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [{"kind": "volume_range", "object": {"object": "Shell"}, "min": 1.0}],
+        },
+    )["checks"][0]
+    assert volume_row["status"] == "indeterminate"
+    assert volume_row["reason"] == "non_volumetric_target"
+    assert any(
+        "target reports solid_count=0" in diagnostic for diagnostic in volume_row["diagnostics"]
+    )
+    assert not any("target '" in diagnostic for diagnostic in volume_row["diagnostics"])
+
+    invalid_row = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [{"kind": "volume_range", "object": {"object": "Broken"}, "min": 1.0}],
+        },
+    )["checks"][0]
+    assert invalid_row["status"] == "indeterminate"
+    assert invalid_row["reason"] == "target_invalid"
+    assert any(
+        "target failed shape.isValid()" in diagnostic for diagnostic in invalid_row["diagnostics"]
+    )
+    assert not any("target '" in diagnostic for diagnostic in invalid_row["diagnostics"])
+
+    # The two-target checks keep their per-side lettering.
+    pair_row = geometry.HANDLERS["validate_geometry"](
+        ctx,
+        {
+            "document": "Doc",
+            "checks": [
+                {"kind": "interference_max", "a": {"object": "Shell"}, "b": {"object": "Box"}}
+            ],
+        },
+    )["checks"][0]
+    assert pair_row["reason"] == "non_volumetric_target"
+    assert any(
+        "target 'a' reports solid_count" in diagnostic for diagnostic in pair_row["diagnostics"]
+    )
 
 
 def test_check_clearance_and_interference_semantics():

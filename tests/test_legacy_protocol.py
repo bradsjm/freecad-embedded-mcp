@@ -1004,6 +1004,68 @@ def test_batch_cancel_notification_passes_immediately():
     assert next_event(reply.stream) is None
 
 
+@pytest.mark.parametrize("field", ["requestState", "inputResponses"])
+def test_batch_consent_fields_reject_before_any_member(field):
+    """Consent state may never ride the legacy wire: a batch carrying it
+    is one 400 rejection before any member runs or reserves a slot."""
+
+    server = make_server()
+    adapter = make_adapter(server)
+    sid = session_of(initialize(adapter, "2025-03-26"))
+    send(adapter, sid, request("notifications/initialized", None))
+    member = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "run_script", "arguments": {}, field: "client-injected"},
+    }
+    reply = send(adapter, sid, [request("tools/list", 1), member])
+    assert reply.status == 400
+    assert reply.stream is None  # no member ran: one rejection envelope
+    assert reply.payload["error"]["code"] == protocol.INVALID_REQUEST
+    assert "requestState or inputResponses" in reply.payload["error"]["message"]
+    assert STUB_CALLS == []
+    assert adapter._inflight == 0
+
+
+def test_batch_version_header_mismatch_is_header_mismatch():
+    server = make_server()
+    adapter = make_adapter(server)
+    sid = session_of(initialize(adapter, "2025-03-26"))
+    send(adapter, sid, request("notifications/initialized", None))
+    reply = adapter.handle(
+        [request("ping", 1)],
+        {"mcp-session-id": sid, "mcp-protocol-version": "2025-06-18"},
+        PRINCIPAL,
+    )
+    assert reply.status == 400
+    assert reply.stream is None
+    error = reply.payload["error"]
+    assert error["code"] == protocol.HEADER_MISMATCH
+    assert "MCP-Protocol-Version" in error["message"]
+
+    # Control: the same batch with the matching header still streams.
+    ok = adapter.handle([request("ping", 1)], {"mcp-session-id": sid}, PRINCIPAL)
+    assert ok.status == 200 and ok.stream is not None
+    assert next_event(ok.stream)["result"] == {}
+    assert next_event(ok.stream) is None
+
+
+def test_single_request_version_header_mismatch_is_header_mismatch():
+    server = make_server()
+    adapter = make_adapter(server)
+    sid = session_of(initialize(adapter, "2025-03-26"))
+    send(adapter, sid, request("notifications/initialized", None))
+    reply = adapter.handle(
+        request("ping", 1),
+        {"mcp-session-id": sid, "mcp-protocol-version": "2025-06-18"},
+        PRINCIPAL,
+    )
+    assert reply.status == 400
+    assert reply.payload["error"]["code"] == protocol.HEADER_MISMATCH
+    assert "MCP-Protocol-Version" in reply.payload["error"]["message"]
+
+
 # ---------------------------------------------------------------------------
 # legacy_result translation (unit).
 # ---------------------------------------------------------------------------

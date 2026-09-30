@@ -32,6 +32,7 @@ until explicit startup.
 from __future__ import annotations
 
 import base64
+import decimal
 import hashlib
 import hmac
 import json
@@ -412,8 +413,12 @@ def header_source_value(raw: Any) -> str:
 def header_matches_body(raw: Any, body_value: Any) -> bool:
     """Compare a raw header value against its mirrored body source value.
 
-    Integer/number sources compare numerically (``42`` equals ``42.0``),
-    booleans compare as lowercase ``true``/``false``, strings exactly.
+    Booleans compare as lowercase ``true``/``false``. Integer sources
+    compare exactly through ``decimal.Decimal`` so a header that differs
+    from the body in the last digit of a large integer is a mismatch
+    instead of a float-rounding accident. Float sources compare
+    numerically (``42`` equals ``42.0``), strings exactly. Fraction
+    syntax never matches a numeric body.
     """
 
     try:
@@ -422,10 +427,16 @@ def header_matches_body(raw: Any, body_value: Any) -> bool:
         return False
     if isinstance(body_value, bool):
         return effective == ("true" if body_value else "false")
-    if isinstance(body_value, (int, float)):
+    if isinstance(body_value, int):
+        try:
+            parsed = decimal.Decimal(effective)
+        except (decimal.InvalidOperation, ValueError):
+            return False
+        return parsed.is_finite() and parsed == body_value
+    if isinstance(body_value, float):
         try:
             return math.isfinite(body_value) and float(effective) == body_value
-        except ValueError:
+        except (ValueError, OverflowError):
             return False
     if isinstance(body_value, str):
         return effective == body_value
@@ -1273,7 +1284,10 @@ class ConsentSigner:
         payload = {
             "kind": "consent",
             "principal": fingerprint(principal),
-            "exp": time.time() + (self._ttl_s if ttl_s is None else float(ttl_s)),
+            # Monotonic time: a wall-clock rollback must not resurrect an
+            # expired challenge. Signed consent state is process-local, so
+            # the expiry needs no wall-clock epoch.
+            "exp": time.monotonic() + (self._ttl_s if ttl_s is None else float(ttl_s)),
             "nonce": secrets.token_urlsafe(16),
             "method": method,
             "args": fingerprint(dict(arguments)),
@@ -1323,7 +1337,7 @@ class ConsentSigner:
                 "consent state rejected",
                 {"reason": "tampered"},
             )
-        if time.time() >= payload.get("exp", 0):
+        if time.monotonic() >= payload.get("exp", 0):
             raise ToolError(CONSENT_DENIED, "consent expired", {"reason": "expired"})
         if payload.get("principal") != fingerprint(principal):
             raise ToolError(
@@ -1400,6 +1414,6 @@ class ConsentSigner:
 
     def _prune(self) -> None:
         """Drop consumed nonces whose consent already expired."""
-        now = time.time()
+        now = time.monotonic()
         for nonce in [n for n, exp in self._consumed_nonces.items() if exp <= now]:
             del self._consumed_nonces[nonce]

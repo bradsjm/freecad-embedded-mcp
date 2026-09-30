@@ -1026,6 +1026,128 @@ def test_overwide_dependent_closure_is_refused_before_effects() -> None:
     assert target in doc.Objects
 
 
+def _multi_transform(name: str = "MT") -> FakeObj:
+    """A MultiTransform double: Originals/Transformations links, no Occurrences."""
+
+    return FakeObj(
+        name,
+        TypeId="PartDesign::MultiTransform",
+        properties=("Originals", "Transformations"),
+        prop_types={
+            "Originals": "App::PropertyLinkList",
+            "Transformations": "App::PropertyLinkList",
+        },
+        shape=FakeShape(),
+        values={"Originals": [], "Transformations": []},
+    )
+
+
+def _original_refs(count: int) -> list[dict[str, str]]:
+    return [{"object": f"Pad{index}"} for index in range(count)]
+
+
+def test_multi_transform_nine_originals_refuse_before_recompute_and_roll_back() -> None:
+    # MultiTransform exposes no Occurrences property, but the mutation gate
+    # must still refuse nine originals before the validation recompute and
+    # roll the applied link edit back.
+    pads = [box(f"Pad{index}") for index in range(9)]
+    transform = _multi_transform()
+    doc = FakeDoc(objects=[transform, *pads])
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "MT",
+                "properties": {"Originals": _original_refs(9)},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "references 9 originals; the bound is 8" in error.message
+    assert error.details["operationState"] == "rolled_back"
+    assert ("abort", None) in doc.calls
+    assert ("commit", None) not in doc.calls
+    assert transform.Originals == []
+    assert transform.history == []
+    # Exactly one recompute ran: the rollback recompute after the abort.
+    assert doc.recompute_count == 1
+
+
+def test_multi_transform_with_eight_originals_commits() -> None:
+    pads = [box(f"Pad{index}") for index in range(8)]
+    transform = _multi_transform()
+    doc = FakeDoc(objects=[transform, *pads])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.edit_object(
+        ctx,
+        {
+            "document": doc.Name,
+            "object": "MT",
+            "properties": {"Originals": _original_refs(8)},
+        },
+    )
+
+    assert len(transform.Originals) == 8
+    assert [call[0] for call in doc.calls] == ["open", "commit"]
+    validate_schema(result, _output_schema("edit_object"))
+
+
+def test_edit_objects_refuses_a_nine_original_multi_transform_atomically() -> None:
+    pads = [box(f"Pad{index}") for index in range(9)]
+    first = _multi_transform("MT1")
+    second = _multi_transform("MT2")
+    doc = FakeDoc(objects=[first, second, *pads])
+    ctx = FakeCtx(doc)
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_objects(
+            ctx,
+            {
+                "document": doc.Name,
+                "edits": [
+                    {"object": "MT1", "properties": {"Originals": _original_refs(8)}},
+                    {"object": "MT2", "properties": {"Originals": _original_refs(9)}},
+                ],
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "references 9 originals; the bound is 8" in error.message
+    assert error.details["operationState"] == "rolled_back"
+    assert ("abort", None) in doc.calls
+    assert ("commit", None) not in doc.calls
+    assert first.Originals == []
+    assert second.Originals == []
+
+
+def test_edit_objects_multi_transforms_with_in_bound_originals_commit() -> None:
+    pads = [box(f"Pad{index}") for index in range(8)]
+    first = _multi_transform("MT1")
+    second = _multi_transform("MT2")
+    doc = FakeDoc(objects=[first, second, *pads])
+    ctx = FakeCtx(doc)
+
+    result = objects_mod.edit_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "edits": [
+                {"object": "MT1", "properties": {"Originals": _original_refs(8)}},
+                {"object": "MT2", "properties": {"Originals": _original_refs(4)}},
+            ],
+        },
+    )
+
+    assert len(first.Originals) == 8
+    assert len(second.Originals) == 4
+    assert [call[0] for call in doc.calls] == ["open", "commit"]
+    validate_schema(result, _output_schema("edit_objects"))
+
+
 def test_failed_recompute_rolls_back_and_restores_undo_mode() -> None:
     doc = FakeDoc(objects=[box()])
     obj = doc.getObject("Box")

@@ -12,6 +12,7 @@ import sys
 import types
 from collections.abc import Iterator
 from contextlib import contextmanager
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ if str(ADDON_DIR) not in sys.path:
 
 from mcp_server import protocol
 from mcp_server.protocol import ToolError, validate_schema
+from mcp_server.tools import feature_contracts as contracts
 
 VALIDATION_FAILED = "VALIDATION_FAILED"
 
@@ -2887,3 +2889,266 @@ def test_dressup_refuses_when_the_selection_geometry_is_unreadable() -> None:
 
         assert excinfo.value.details["reason"] == "selection_changed"
         assert doc.getObject("Fillet") is None
+
+
+# ---------------------------------------------------------------------------
+# Pattern workload bounds and the dependent-closure scan.
+# ---------------------------------------------------------------------------
+
+
+class _PatternDouble:
+    """A pattern-feature double exposing exactly the workload properties."""
+
+    def __init__(
+        self,
+        name: str,
+        type_id: str,
+        *,
+        originals: tuple[Any, ...] = (),
+        values: dict[str, Any] | None = None,
+    ) -> None:
+        self.Name = name
+        self.TypeId = type_id
+        self.Originals = list(originals)
+        for key, value in (values or {}).items():
+            setattr(self, key, value)
+
+
+class _ScanObj:
+    """A dependent-graph double whose every ``InList`` read is counted."""
+
+    def __init__(self, name: str, *, type_id: str = "Part::Feature") -> None:
+        self.Name = name
+        self.TypeId = type_id
+        self.reads = 0
+        self._in_list: list[_ScanObj] = []
+
+    @property
+    def InList(self) -> list[_ScanObj]:
+        self.reads += 1
+        return self._in_list
+
+
+def _chain(seed_name: str, count: int) -> tuple[_ScanObj, list[_ScanObj]]:
+    """A straight dependent chain: the seed plus ``count`` named followers."""
+    seed = _ScanObj(seed_name)
+    nodes = [_ScanObj(f"D{index:03d}") for index in range(count)]
+    for current, following in pairwise(nodes):
+        current._in_list.append(following)
+    seed._in_list.append(nodes[0])
+    return seed, nodes
+
+
+def test_multi_transform_without_occurrences_refuses_nine_originals() -> None:
+    # MultiTransform carries no Occurrences property: the originals bound
+    # must hold even so, or a generic edit could give it any count.
+    transform = _PatternDouble(
+        "MT",
+        "PartDesign::MultiTransform",
+        originals=tuple(object() for _ in range(9)),
+    )
+
+    with pytest.raises(ToolError) as excinfo:
+        contracts.check_workload(None, [transform])
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert "references 9 originals; the bound is 8" in excinfo.value.message
+
+
+def test_multi_transform_with_eight_originals_keeps_existing_behavior() -> None:
+    transform = _PatternDouble(
+        "MT",
+        "PartDesign::MultiTransform",
+        originals=tuple(object() for _ in range(8)),
+    )
+
+    contracts.check_workload(None, [transform])
+
+
+def test_pattern_occurrence_bounds_reuse_one_original_count() -> None:
+    # One original-count read feeds its own bound and the combined
+    # occurrence bound.
+    combined = _PatternDouble(
+        "Pat",
+        "PartDesign::LinearPattern",
+        originals=tuple(object() for _ in range(3)),
+        values={"Occurrences": 32},
+    )
+    with pytest.raises(ToolError) as combined_info:
+        contracts.check_workload(None, [combined])
+    assert "32 occurrences over 3 originals" in combined_info.value.message
+
+    over = _PatternDouble(
+        "Pat",
+        "PartDesign::LinearPattern",
+        originals=tuple(object() for _ in range(9)),
+        values={"Occurrences": 3},
+    )
+    with pytest.raises(ToolError) as over_info:
+        contracts.check_workload(None, [over])
+    assert "references 9 originals; the bound is 8" in over_info.value.message
+
+
+class _RecomputeLengthProbeDoc(FakeDoc):
+    """A document recording the target Length visible at every recompute."""
+
+    def __init__(self, body: FakeBody, feature: FakeFeature) -> None:
+        super().__init__(body, supported=SUPPORTED)
+        self._feature = feature
+        self.recomputed_lengths: list[float] = []
+
+    def recompute(self) -> None:
+        super().recompute()
+        self.recomputed_lengths.append(float(self._feature.Length))
+
+
+def test_edit_feature_refuses_nine_stored_originals_before_recompute() -> None:
+    """A pattern whose stored Originals grew past the bound refuses in-gate.
+
+    The refusal must precede the validation recompute, and the transaction
+    must roll the applied edit back.
+    """
+
+    with load_features() as module:
+        feature = FakeFeature(
+            "Pat",
+            "PartDesign::LinearPattern",
+            properties=("Originals", "Direction", "Length", "Occurrences"),
+            shape=FakeShape(),
+        )
+        object.__setattr__(
+            feature,
+            "_values",
+            {
+                "Length": 20.0,
+                "Occurrences": 3,
+                "Originals": [
+                    FakeFeature(
+                        f"Pad{index}",
+                        "PartDesign::Pad",
+                        properties=("Profile", "Length"),
+                        shape=FakeShape(),
+                    )
+                    for index in range(9)
+                ],
+            },
+        )
+        body = FakeBody(members=[feature], tip=feature, shape=feature.Shape)
+        doc = _RecomputeLengthProbeDoc(body, feature)
+        doc.Objects.append(feature)
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            edit(module, ctx, object="Pat", parameters={"length": 30})
+
+        error = excinfo.value
+        assert error.code == VALIDATION_FAILED
+        assert "references 9 originals; the bound is 8" in error.message
+        assert error.details["operationState"] == "rolled_back"
+        assert feature.Length == 20.0
+        assert doc.transactions[-1] == ("abort",)
+        # No recompute ever saw the applied value: the edit was refused
+        # before the validation recompute and every rollback recompute saw
+        # the restored value only.
+        assert set(doc.recomputed_lengths) == {20.0}
+
+
+def test_expensive_scan_walks_reconverging_and_cyclic_graphs_once() -> None:
+    # Reconverging links (a diamond) and a dependent cycle must each visit
+    # an object exactly once instead of queueing duplicate work.
+    diamond_seed = _ScanObj("Seed")
+    left = _ScanObj("Left")
+    right = _ScanObj("Right")
+    join = _ScanObj("Join", type_id="PartDesign::AdditiveLoft")
+    diamond_seed._in_list.extend([left, right])
+    left._in_list.append(join)
+    right._in_list.append(join)
+
+    assert contracts.expensive_feature_present([diamond_seed]) is True
+    assert diamond_seed.reads == 1
+    assert left.reads == 1
+    assert right.reads == 1
+    assert join.reads == 1
+
+    first = _ScanObj("First")
+    second = _ScanObj("Second")
+    first._in_list.append(second)
+    second._in_list.append(first)
+
+    assert contracts.expensive_feature_present([first]) is False
+    assert first.reads == 1
+    assert second.reads == 1
+
+
+def test_expensive_scan_completes_a_256_object_closure_once_per_object() -> None:
+    seed, nodes = _chain("Seed", 255)
+
+    assert contracts.expensive_feature_present([seed]) is False
+    assert seed.reads == 1
+    assert all(node.reads == 1 for node in nodes)
+
+
+def test_expensive_scan_refuses_a_257_object_closure() -> None:
+    seed, _nodes = _chain("Seed", 256)
+
+    with pytest.raises(ToolError) as excinfo:
+        contracts.expensive_feature_present([seed])
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert excinfo.value.details == {"reason": "too_many_dependents"}
+
+
+def test_expensive_scan_duplicate_seeds_do_not_consume_the_bound() -> None:
+    seed, nodes = _chain("Seed", 255)
+
+    # The same object twice and a same-named twin are one object in native
+    # identity terms: the 256-object closure still completes.
+    twin = _ScanObj("Seed")
+    assert contracts.expensive_feature_present([seed, seed, twin]) is False
+    assert seed.reads == 1
+    assert twin.reads == 0
+    assert all(node.reads == 1 for node in nodes)
+
+    over_seed, _over_nodes = _chain("Seed", 256)
+    with pytest.raises(ToolError) as excinfo:
+        contracts.expensive_feature_present([over_seed, over_seed, over_seed])
+
+    assert excinfo.value.details == {"reason": "too_many_dependents"}
+
+
+def test_expensive_scan_keeps_unnamed_objects_on_the_bounded_path() -> None:
+    # Unnamed objects have no native identity to compare: they are scanned
+    # when seeded directly and never enqueued as dependents.
+    anon = _ScanObj("")
+    dependent = _ScanObj("")
+    anon._in_list.append(dependent)
+
+    assert contracts.expensive_feature_present([anon, anon]) is False
+    assert anon.reads == 2
+    assert dependent.reads == 0
+
+
+def test_edit_feature_refuses_an_oversized_dependent_closure_before_the_transaction() -> None:
+    """The recovery scan runs before the transaction opens.
+
+    A 257-object dependent closure hanging off the edited feature refuses
+    the edit without opening a transaction.
+    """
+
+    with load_features() as module:
+        feature, doc = make_edit_doc(
+            "Pat",
+            "PartDesign::LinearPattern",
+            ("Originals", "Direction", "Length", "Occurrences"),
+            {"Length": 20.0, "Occurrences": 3, "Originals": []},
+        )
+        seed, _nodes = _chain("D", 256)
+        feature.InList.append(seed)
+        ctx = FakeCtx(doc)
+
+        with pytest.raises(ToolError) as excinfo:
+            edit(module, ctx, object="Pat", parameters={"length": 30})
+
+        assert excinfo.value.code == VALIDATION_FAILED
+        assert excinfo.value.details == {"reason": "too_many_dependents"}
+        assert doc.transactions == []

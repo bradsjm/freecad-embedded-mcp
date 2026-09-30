@@ -573,6 +573,7 @@ def load_view_module() -> Iterator[types.ModuleType]:
     qt_core = types.SimpleNamespace(
         QObject=object,
         Signal=lambda *_: None,
+        Slot=lambda *_types: lambda fn: fn,
         Qt=types.SimpleNamespace(QueuedConnection=0),
         QEventLoop=types.SimpleNamespace(ExcludeUserInputEvents=1, ExcludeSocketNotifiers=2),
         QThread=types.SimpleNamespace(msleep=lambda _delay: None),

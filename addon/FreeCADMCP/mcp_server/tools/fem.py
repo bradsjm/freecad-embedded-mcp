@@ -94,6 +94,15 @@ def bounded_exception_reason(
     return bounded_reason(f"{prefix}{type(exc).__name__}: {exc}", limit=limit)
 
 
+# Process exit diagnostics ride inside the SOLVER_FAILED ``details`` payload,
+# which must stay far below the transport's response limit, while one chatty
+# failed solve can emit megabytes per channel. One cap bounds each channel;
+# the tail is kept (marker first) because the final solver lines carry the
+# actual failure.
+_MAX_PROCESS_TEXT_LENGTH = 8192
+_PROCESS_TRUNCATION_MARK = "...[truncated]"
+
+
 # ---------------------------------------------------------------------------
 # Tool definition.
 # ---------------------------------------------------------------------------
@@ -1148,7 +1157,7 @@ def _result_files(working_dir: str) -> tuple[str, list[str], int, bool]:
 
 
 def _process_text(process: Any, method_name: str) -> str:
-    """Read a QProcess output channel as lossily decoded UTF-8 text."""
+    """Read a QProcess output channel as bounded, lossily decoded UTF-8 text."""
     reader = getattr(process, method_name, None)
     if not callable(reader):
         return ""
@@ -1160,9 +1169,15 @@ def _process_text(process: Any, method_name: str) -> str:
     if data is None:
         return ""
     try:
-        return bytes(raw).decode("utf-8", errors="replace")
+        text = bytes(raw).decode("utf-8", errors="replace")
     except Exception:
         return ""
+    if len(text) <= _MAX_PROCESS_TEXT_LENGTH:
+        return text
+    # Keep the channel's tail — the final solver lines name the failure — and
+    # mark the cut so bounded text is never mistaken for complete output.
+    keep = _MAX_PROCESS_TEXT_LENGTH - len(_PROCESS_TRUNCATION_MARK)
+    return _PROCESS_TRUNCATION_MARK + text[-keep:]
 
 
 HANDLERS["run_fem"] = run_fem
