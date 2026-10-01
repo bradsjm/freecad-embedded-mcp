@@ -9,6 +9,7 @@ Use this file for exact tool behavior. Read [Protocol and security](protocol-sec
 - [Standard sequence](#standard-sequence)
 - [Property mapping](#property-mapping)
 - [Inspection response](#inspection-response)
+- [`inspect_user_context`](#inspect_user_context)
 - [`inspect_sketch` and `edit_sketch`](#inspect_sketch-and-edit_sketch)
 - [`edit_parameters` results](#edit_parameters-results)
 - [`create_feature` details](#create_feature-details)
@@ -37,6 +38,7 @@ setting is enabled. Document tools return the actual sanitized
 | `close_document` | Close one document and report its prior path, discarded state, and final known generation | `document`; consent when dirty or unsaved nonempty |
 | `reload_document` | Close and reopen the saved file; reports the reopened document and generation | `document`; consent to discard unsaved changes |
 | `inspect_objects` | List objects sorted by Name, or an explicit nonempty object selection; signed-cursor pagination | `document`; optional `objects`, `cursor`, `detail` (`compact`/`full`), `property_filter`, `limit` (default 32), `property_offset`, `property_limit` |
+| `inspect_user_context` | Read-only user-context snapshot: active document, active and edit objects, workbench, foreground view (type, camera, viewport), and the GUI selection as explicit shared targets (at most 64 rows); optional unchanged viewport PNG | none; optional `include_image` (default `false`) |
 | `create_object` | Create a supported Part/App type or a FEM object | `document`, `type`, `name`; optional `properties`, `expected_solids`, `expected_bounds`, `bounds_tolerance`, `response_detail` |
 | `create_objects` | Create 1–32 independent objects atomically; returns the requested-to-actual `nameMapping` | `document`, `entries`; optional `expectations` keyed by requested name, `response_detail` |
 | `edit_object` | Assign properties with full prevalidation; `Spreadsheet::Sheet` cell contents use `properties.cells`; link values accept the shared targets; reports post-state evidence (`response_detail: "full"` adds before/after deltas; the default is `compact`) | `document`, `object`, `properties`; optional `expected_generation`, `expected_solids`, `expected_bounds`, `bounds_tolerance`, `response_detail` |
@@ -79,7 +81,7 @@ Every geometric target boundary accepts one closed union of three forms. The for
 | Form | Payload | Meaning |
 |---|---|---|
 | Whole object | `{"object": "Pad"}` | Identity. No `subelement` key; the old empty-string subelement sentinel is refused (`empty_subelement`). |
-| Signed reference | `{"object": "Pad", "subelement": "<opaque signed token>"}` | One fresh subshape identity. Take tokens from `inspect_topology` items or `resolvedSelections` receipts; raw numeric `Face7`/`EdgeN` labels are never accepted as durable input. |
+| Signed reference | `{"object": "Pad", "subelement": "<opaque signed token>"}` | One fresh subshape identity. Take tokens from `inspect_topology` items, `resolvedSelections` receipts, or `inspect_user_context` selection rows; raw numeric `Face7`/`EdgeN` labels are never accepted as durable input. |
 | Query | `{"object": "Pad", "query": [{"role": "face", "selector": ">Z"}, {"role": "edge", "selector": "%CIRCLE"}], "expected_generation": 4}` | A declarative selection evaluated at call time. The same descriptor works in `measure` targets, `create_feature` subelement lists, link properties (including FEM `References`), and `capture_view` focus. |
 
 A query is 1–3 steps; each step carries `role` (`face` or `edge`), an optional `selector` (omitted selects every candidate of that role), an optional `radius: {"min", "max"}` range in mm, and an optional analytic `axis: {"direction": [x, y, z], "tolerance_deg": 0.1}` that matches cylinder/cone/torus and circular-curve axes sign-insensitively — it is separate from the CadQuery normal/tangent operators. Later steps narrow: `faces >Z` then `edges %CIRCLE` selects the top perimeter edges. `face` then `edge` expands the selected faces' edges; the reverse order is refused (no implicit ancestor queries).
@@ -103,7 +105,7 @@ Operations that consumed a query-origin link or reference report `resolvedSelect
 
 1. Call `discover_capabilities`. Read `gui.state`, exporter/FEM availability, and the supported-type inventory; add `detail: "full"` when the complete `supportedTypes` list is needed. Call `tools/list` when you need exact tool schemas.
 2. Address the target document by the `name` returned by `new_document` or `open_document`. When the name is unknown, call `inspect_documents` and read its rows before choosing the target.
-3. Call `inspect_objects(document)` and read the compact rows before editing. Use `detail: "full"` for a `Spreadsheet::Sheet` when cell contents, formulas, aliases, or evaluated values matter.
+3. Call `inspect_objects(document)` and read the compact rows before editing. Use `detail: "full"` for a `Spreadsheet::Sheet` when cell contents, formulas, aliases, or evaluated values matter. When the request depends on the user's current selection or view ("this", "these", a screen-relative reference), call `inspect_user_context` first and pass its returned targets explicitly.
 4. Create or edit one dependency stage at a time; use `create_objects` only for independent entries, then inspect after each recompute.
 5. Run `validate_geometry` and `measure` on the final solid.
 6. Call `export`, then `capture_view` with the `mode` that matches the question: `overview` after opens and large modifications, `interior` for internal features, `fit` for mating, `detail` for one enlarged feature. When inspecting an existing model, call `capture_view` `overview` as soon as you locate the relevant objects, then keep later reads targeted: an `objects` selection with `detail: "full"` and `property_filter`. Read bounds as cumulative PartDesign results, establish orientation from geometry and axes rather than object labels, and verify thickness with `measure` faces or sections before attributing a parameter to a wall.
@@ -125,6 +127,44 @@ A full spreadsheet row adds bounded cells, aliases, raw contents, formulas, eval
 Full-detail rows serialize link values as shared targets: same-document whole links as `{"object"}`, resolvable subshape links as `{"object", "subelement": "<signed token>"}`, and cross-document, unsupported, stale, or otherwise unresolvable links as `{"unavailableLink": {"object", "reason"}}` — a diagnostic `nativeSubelement` label may accompany it but is never accepted as target input. Raw `FaceN` labels are never published as references.
 
 Use `typeId` and internal `name` for automation. Use `label` only for human presentation.
+
+## `inspect_user_context`
+
+`inspect_user_context` observes the user's context without changing anything: it does not frame, activate a view, change the selection, pump events, or write preferences. It takes no required arguments; `include_image` (boolean, default `false`) is the only input. The result always carries:
+
+- `activeDocument` — `{name, label, generation}` or `null`. No active document is `null` without a marker.
+- `activeObject`, `editObject` — `{document, object}` or `null`: the GUI active object and the object in an open edit session, with their actual document and object names.
+- `workbench` — active workbench name or `null`.
+- `activeView` — `{type, camera, viewport}` or `null`. `type` describes the foreground window. A non-3D window keeps `camera` and `viewport` `null`.
+  - `camera` — `{position, direction, up, projection}`. Each vector is three numbers or `null`; `projection` is `orthographic`, `perspective`, or `null`. Each field is read independently, so a readable field survives a failed sibling.
+  - `viewport` — `{width, height}` of the native view, or `null`.
+- `selection` — `{status, count, entries, truncated}`; see below.
+- `unavailable` — failed-read markers in canonical order: `activeDocument`, `activeObject`, `editObject`, `workbench`, `activeView`, `camera`, `viewport`, `selection`, `image`.
+
+The handler reports native-read failures as data, not tool errors. Normal argument validation and GUI-dispatch failures still apply. A failed native read becomes a marker in `unavailable` while verified facts stay usable; a null field without a marker is genuine empty state, not a failed read.
+
+### Selection report
+
+The tool flattens the GUI selection: each selected subelement becomes one row in native order, which is not click chronology. A selected instance resolves to itself, never to its source. An empty subelement list is one whole-object row. An unreadable subelement list keeps one diagnostic row and sets `status: "unavailable"` with `count: null`. At most 64 rows are returned. When all subelement lists are readable, `count` reports the full number and `truncated` is `true` above 64. When a list is unreadable, `truncated` counts only known rows; `false` does not prove a complete selection.
+
+Each row carries `document`, `generation`, `object`, `label`, `type`, `subelement`, `target`, and `reason`. Row identity fields stay nullable: a diagnostic row reports only what was readable. `subelement` keeps the native name (`Face2`, `Edge1`) as a diagnostic.
+
+| `reason` | Meaning | `target` |
+|---|---|---|
+| `null` | Whole object (including shapeless objects and whole linked instances), or a canonical `FaceN`/`EdgeN` subelement | Whole target or signed reference |
+| `unsupported_subelement` | Native name is not a canonical `FaceN`/`EdgeN` | `null` |
+| `unsupported_instance` | `App::Link` subelement; instance topology correspondence is not proven | `null` |
+| `sketch_subelement` | Displayed sketch edge labels do not map to editable geometry or constraint ids | `null` |
+| `selection_object_unavailable` | Object missing, resolved to another instance, or generation or type unreadable | `null` |
+| `selection_geometry_unavailable` | Shape, index, or subshape read failed | `null` |
+
+A non-null `target` is a shared target: pass it directly into `measure`, `inspect_topology`, `capture_view` focus, `create_feature` subelement lists, or link properties. Signed references from rows are bound to the selection-time generation and go stale after a relevant change, like every signed token. A selection report is evidence, not authorization.
+
+### Context image
+
+With `include_image: true` and a 3D foreground view, the tool captures one unchanged PNG of the active viewport, scaled proportionally down to a 768-pixel longest edge and never upscaled. The capture uses the view's own state: nothing is framed, activated, or reconfigured, and whether selection highlights render is not asserted. The PNG is published once in the image content block; `structuredContent` keeps the observations with `mimeType`, `width`, and `height`. If the image is unavailable, there is no image content block or image metadata, and `unavailable` carries `image`. Without `include_image` no capture happens and `image` is never marked.
+
+The result describes state at execution time, not at message-submission time. Re-inspect after a relevant generation change or when the user changes the selection.
 
 ## `inspect_sketch` and `edit_sketch`
 

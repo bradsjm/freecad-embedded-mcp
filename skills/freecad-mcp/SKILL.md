@@ -108,7 +108,7 @@ The protocol also provides `server/discover`, `tools/list`, `tasks/get`, `tasks/
 - Pass `expected_generation` on object, sketch, or feature edits after an earlier inspection.
 - Pass `expected_solids` and `expected_bounds` when the design determines them.
 - Read bounds as feature results: a PartDesign pad or pocket reports the cumulative Body result, not only the material it added or removed. Establish orientation from geometry and explicit axes, never from object labels. Verify wall thickness with `measure` (faces or section) or `inspect_topology` before attributing a parameter value to a specific wall. After locating the relevant objects in an existing model, capture one `capture_view` overview before reasoning about placement, and narrow further reads to those objects with `objects` plus `detail: "full"` and `property_filter`.
-- Address topology with the shared targets: whole object `{"object":"Name"}`, signed reference `{"object":"Name","subelement":"<token>"}` taken from `inspect_topology`, or declarative query `{"object":"Name","query":[{"role":"face","selector":">Z"}]}`.
+- Address topology with the shared targets: whole object `{"object":"Name"}`, signed reference `{"object":"Name","subelement":"<token>"}` taken from `inspect_topology` or `inspect_user_context` rows, or declarative query `{"object":"Name","query":[{"role":"face","selector":">Z"}]}`.
 - Reuse one query descriptor across `measure` targets, `create_feature` subelement lists, link properties such as FEM `References`, and `capture_view` focus. A consumer that needs exactly one shape refuses `selection_empty` or `selection_ambiguous`; a set consumer expands the matches and reports `resolvedSelections` receipts carrying the selection-time generation.
 - Selectors use the bounded CadQuery grammar. Named views keep CadQuery meanings, not FreeCAD camera names: front=>Z, back=<Z, left=<X, right=>X, top=>Y, bottom=<Y. Never send a raw `FaceN`/`EdgeN` label as durable input; sign it through `inspect_topology` first.
 - Omit `response_detail` and `detail` for compact results; pass `"full"` explicitly when before/after deltas matter.
@@ -122,6 +122,7 @@ The protocol also provides `server/discover`, `tools/list`, `tasks/get`, `tasks/
 - Do not issue more GUI calls after `GUI_DISPATCH_STUCK`.
 - Before you interpret "this", "these", selected entities, or a screen-relative reference, call `inspect_user_context` and read its reported selection and view. Pass its returned targets explicitly into the next tool; a selection report is not authorization.
 - Request the context image (`include_image: true`) when you must interpret what the user currently sees. `capture_view` reframes the scene, so it does not show the user's viewport. `inspect_user_context` reports state at call time, not at message time; re-inspect after a relevant generation change or when the user asks you to change the selection.
+- Read `inspect_user_context` `unavailable` markers as missing evidence, not negative answers; a null without a marker is genuine empty state. Entries cap at 64 rows; read `count` and `truncated` before you assume the whole selection is reported.
 - Native `FaceN`/`EdgeN` names in a context report are diagnostics, not durable targets. When the observation stays ambiguous, ask one specific clarification question instead of guessing.
 
 ## Build with checkpoints
