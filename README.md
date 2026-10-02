@@ -56,7 +56,7 @@ Install through FreeCAD's Add-on Manager (recommended), or copy the add-on folde
    | Field | Value |
    | --- | --- |
    | Repository URL | `https://github.com/bradsjm/freecad-embedded-mcp` |
-   | Branch | `v2.0-embedded-mcp` |
+   | Branch | `embedded-mcp` |
 
 5. Confirm with **OK** and close Preferences.
 6. Open **Tools → Addon Manager**.
@@ -80,7 +80,7 @@ FreeCAD user add-on directories:
 Copy or symlink the add-on directory:
 
 ```bash
-git clone https://github.com/bradsjm/freecad-embedded-mcp.git
+git clone -b embedded-mcp https://github.com/bradsjm/freecad-embedded-mcp.git
 cd freecad-embedded-mcp
 
 # Copy (Linux, Ubuntu/Debian)

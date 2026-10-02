@@ -2,7 +2,7 @@ name: test
 
 on:
   push:
-    branches: [main, v2.0-embedded-mcp]
+    branches: [main, embedded-mcp]
   pull_request:
 
 jobs:

@@ -7,8 +7,9 @@
   <maintainer email="jb@nrgup.net">Jonathan</maintainer>
   <author email="nekanat.stock@gmail.com">neka-nat</author>
   <license file="LICENSE">MIT</license>
-  <url type="repository" branch="v2.0-embedded-mcp">https://github.com/bradsjm/freecad-embedded-mcp</url>
-  <url type="readme">https://github.com/bradsjm/freecad-embedded-mcp/blob/v2.0-embedded-mcp/README.md</url>
+  <!-- Branch has no "v" prefix: GitHub drops the leading "v" from the ZIP archive wrapper name, and the Add-on Manager expects the wrapper to match the literal branch. -->
+  <url type="repository" branch="embedded-mcp">https://github.com/bradsjm/freecad-embedded-mcp</url>
+  <url type="readme">https://github.com/bradsjm/freecad-embedded-mcp/blob/embedded-mcp/README.md</url>
   <icon>addon/FreeCADMCP/Resources/icons/mcp-workbench.svg</icon>
   <freecadmin>1.1.3</freecadmin>
   <freecadmax>1.1.99</freecadmax>

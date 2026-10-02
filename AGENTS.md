@@ -107,7 +107,7 @@ Every completion MUST pass both ruff gates. Run `uv run ruff check .` and `uv ru
 - `mcp_server/input_aliases.py` — liberal-input normalization: closed alias tables (`build_table`) and the request walker (`normalize_arguments`) that tool normalizers run at dispatch, before schema validation, consent, and task storage (see `TOOL_DESIGN.md`).
 - `mcp_server/object_validation.py` — mutation gate and geometry reports. `mcp_server/tasks.py` — task store. `mcp_server/subscriptions.py` — connection-scoped bounded queues. `mcp_server/settings.py` — atomic, fail-closed settings (`port`, `token`, `auto_start`, `remote_enabled`, `allowed_ips`, `allowed_roots`, `recovery_enabled`, `recovery_directory`, `allow_scripts`). `mcp_server/ip_parse.py` — strict `allowed_ips` parsing.
 - `mcp_server/tools/` — `documents`, `import_model`, `objects`, `geometry`, `sketch`, `features`, `parameters`, `export`, `view`, `fem`, `script`, and `recovery`.
-- `pyproject.toml` — pytest config plus the ruff lint/format rules. `package.xml` — Addon Manager manifest (repo `bradsjm/freecad-embedded-mcp`, branch `v2.0-embedded-mcp`, freecad 1.1.3–1.1.99). `README.md` — install, handshake, and tool docs. `skills/freecad-mcp/SKILL.md` — agent-skill entry point.
+- `pyproject.toml` — pytest config plus the ruff lint/format rules. `package.xml` — Addon Manager manifest (repo `bradsjm/freecad-embedded-mcp`, branch `embedded-mcp`, freecad 1.1.3–1.1.99). `README.md` — install, handshake, and tool docs. `skills/freecad-mcp/SKILL.md` — agent-skill entry point.
 
 ## Runtime/Tooling Preferences
 
