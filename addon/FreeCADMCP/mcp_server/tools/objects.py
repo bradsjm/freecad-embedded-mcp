@@ -149,6 +149,21 @@ _FEM_FACTORIES.update(
 )
 
 # ---------------------------------------------------------------------------
+# Python-factory diagnostic hints for Python-backed types this protocol
+# cannot create natively. Guidance strings only: nothing is imported,
+# registered, or called, and no native factory is added. The document's
+# supportedTypes() list stays authoritative, so a hint appears only after
+# that list rejects the mapped name.
+# ---------------------------------------------------------------------------
+_PYTHON_FACTORY_HINTS: dict[str, str] = {
+    "Part::Tube": "BasicShapes.Shapes.addTube",
+    "Draft::Circle": "Draft.make_circle",
+    "Draft::Rectangle": "Draft.make_rectangle",
+    "Draft::Polygon": "Draft.make_polygon",
+    "Draft::Wire": "Draft.make_wire",
+}
+
+# ---------------------------------------------------------------------------
 # Property-type tables for native prevalidation.
 # ---------------------------------------------------------------------------
 
@@ -2134,6 +2149,11 @@ def _plan_create(ctx: Any, doc: Any, obj_type: str, properties: dict) -> tuple[A
     ``doc.addObject``. Base-link factory arguments are resolved and popped
     from ``properties`` here so missing references fail before any
     transaction exists.
+
+    A document whose ``supportedTypes()`` rejects a type mapped in
+    ``_PYTHON_FACTORY_HINTS`` gets that factory's name as guidance and
+    ``nextTool: discover_capabilities``; every other rejection keeps the
+    plain unsupported-type message and ``nextTool: inspect_objects``.
     """
 
     if obj_type.startswith("Fem::"):
@@ -2171,14 +2191,37 @@ def _plan_create(ctx: Any, doc: Any, obj_type: str, properties: dict) -> tuple[A
     if callable(supported):
         types = [str(entry) for entry in (supported() or ())]
         if obj_type not in types:
+            hint = _PYTHON_FACTORY_HINTS.get(obj_type)
+            if hint is None:
+                message = (
+                    f"type '{obj_type}' is not supported by document "
+                    f"'{getattr(doc, 'Name', '<unknown>')}'"
+                )
+                next_tool = "inspect_objects"
+            else:
+                message = (
+                    f"type '{obj_type}' requires the Python factory {hint}; "
+                    "create_object and create_objects do not provide that factory. "
+                    "Call discover_capabilities with detail='full' to inspect "
+                    "supported types and scripting availability."
+                )
+                if bool(getattr(ctx, "settings", {}).get("allow_scripts", False)):
+                    message += " For this exact object type, use run_script with that factory."
+                    # Only exact mapped types reach this branch, so the
+                    # prefix never infers guidance for another Draft spelling.
+                    if obj_type.startswith("Draft::"):
+                        message += (
+                            " Draft factories use the active document; select the "
+                            "intended document and restore the previous active document."
+                        )
+                next_tool = "discover_capabilities"
             raise ToolError(
                 VALIDATION_FAILED,
-                f"type '{obj_type}' is not supported by document "
-                f"'{getattr(doc, 'Name', '<unknown>')}'",
+                message,
                 {
                     "supportedTypes": types[:_MAX_FILTER],
                     "suggestions": _suggestions(obj_type, types),
-                    "nextTool": "inspect_objects",
+                    "nextTool": next_tool,
                 },
             )
     return None, {}

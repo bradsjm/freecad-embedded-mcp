@@ -89,14 +89,14 @@ def stuck_failure(snapshot: dict[str, Any], *, just_timed_out: bool) -> dict[str
 
     if just_timed_out:
         lead = (
-            f"GUI dispatch timed out after {timeout:g}s while '{operation}' was "
-            "still running on FreeCAD's GUI thread."
+            f"GUI dispatch exceeded its {timeout:g}s total wait budget while "
+            f"'{operation}' was still running on FreeCAD's GUI thread."
         )
     else:
         lead = (
-            f"GUI dispatch unavailable: '{operation}' timed out after "
-            f"{timeout:g}s and is still running "
-            f"({running_for:.1f}s elapsed)."
+            f"GUI dispatch unavailable: '{operation}' exceeded its "
+            f"{timeout:g}s total wait budget and is still running "
+            f"({running_for:.1f}s running)."
         )
 
     return {

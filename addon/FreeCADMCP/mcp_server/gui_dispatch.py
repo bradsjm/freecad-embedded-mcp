@@ -10,8 +10,13 @@ Mechanics reused from the legacy ``rpc_server/gui_dispatch.py``:
 1. Per-call isolation: every submission owns its job record and Future. A
    timeout in one call can never corrupt the response of another call.
 2. Immediate wake via Qt signal; the 500 ms heartbeat stays as a fallback.
-3. Mouse-button/popup/modal deferral: a tick is skipped while the user drags
-   or a popup/modal dialog is open, so MCP work never interrupts navigation.
+3. Bounded mouse deferral: a tick is skipped while a mouse button is held
+   (e.g. a 3D navigation drag), but only for five seconds per held-button
+   episode (``_MOUSE_DEFER_MAX_S``); after that, queued work runs even
+   mid-drag. Popup and modal deferral is never bypassed. Every deferring
+   tick records its reason in ``_last_defer`` and a queued timeout reports
+   the last blocker observed at or after that job was queued, as guidance
+   only: never proof that the drag or dialog is still open.
 4. Re-entrancy guard: ``process_gui_tasks`` never drains nested inside a
    running task's ``processEvents``.
 5. Stuck fail-fast: once a started task times out, later GUI calls fail
@@ -152,6 +157,7 @@ class _Job:
         "future",
         "on_finished",
         "operation",
+        "queued_at",
         "task_id",
     )
 
@@ -166,6 +172,9 @@ class _Job:
         """Create a job with its Future, done event and exactly-once state."""
         self.task_id = task_id
         self.operation = operation
+        # Guard observations recorded before this moment never diagnose
+        # this job's queue wait.
+        self.queued_at = time.monotonic()
         self.fn = fn
         self.cancel_event = cancel_event
         self.on_finished = on_finished
@@ -192,6 +201,26 @@ _state_lock = threading.Lock()  # guards the lifecycle fields below
 _draining = False
 _inflight: "dict[int, _Job]" = {}
 _jobs_by_future: "dict[concurrent.futures.Future[Outcome], _Job]" = {}
+# Bounded mouse-guard deferral: navigation keeps the GUI queue for at most
+# this many seconds per held-button episode, then queued work runs.
+_MOUSE_DEFER_MAX_S = 5.0
+# Monotonic time of the first tick that observed the current held-button
+# episode; ``None`` (never 0.0) means no episode is open.
+_mouse_defer_since: float | None = None
+# Last guard deferral a GUI tick observed: (diagnostic suffix, observation
+# time). Ticks publish the tuple in one assignment and never mutate it, so
+# request threads read it without a lock. Cleared on an empty-queue tick,
+# before an unblocked drain, and on a genuine new generation; worker
+# shutdown never resets it (the next initialization does).
+_last_defer: "tuple[str, float] | None" = None
+
+# Exact guard diagnostics carried by ``_last_defer`` and appended to a
+# queued timeout outcome.
+_MOUSE_DEFER_NOTE = (
+    "Mouse buttons are held in FreeCAD; release them or wait for the five-second mouse guard limit."
+)
+_POPUP_DEFER_NOTE = "A popup or context menu is open in FreeCAD; close it and retry."
+_MODAL_DEFER_NOTE = "A modal dialog is open in FreeCAD; finish or close it and retry."
 
 
 class _WakeSignal(QtCore.QObject):
@@ -318,16 +347,29 @@ def _stuck_outcome(snapshot: dict[str, Any], *, just_timed_out: bool) -> Outcome
     )
 
 
-def _queued_timeout_outcome(timeout: float) -> Outcome:
-    """Timeout message for a job that never started, with the busy hint."""
-    hint = ""
+def _queued_timeout_outcome(job: _Job, timeout: float) -> Outcome:
+    """Precise deadline message for a job that never started.
+
+    While a drain is live the busy hint is preferred; otherwise the last
+    guard observation is appended only when it was observed at or after
+    this job was queued. The note is the last observed blocker, not proof
+    that the drag or dialog is still open.
+    """
+    message = (
+        f"GUI dispatch timed out after {timeout:g}s before '{job.operation}' "
+        "started. This operation never started and will not execute."
+    )
     if _processing:
-        busy_for = time.monotonic() - _processing_since
-        hint = (
-            f" (GUI thread has been busy for {busy_for:.1f}s — "
-            "consider a detached task for heavy OCCT operations)"
+        return Outcome(
+            error=(
+                message + " The GUI thread is busy with an earlier operation; wait for "
+                "it to finish before retrying."
+            )
         )
-    return Outcome(error=f"GUI dispatch timed out after {timeout}s{hint}")
+    observed = _last_defer
+    if observed is not None and observed[1] >= job.queued_at:
+        return Outcome(error=f"{message} {observed[0]}")
+    return Outcome(error=message)
 
 
 def _create_job(
@@ -470,13 +512,13 @@ def _execute_job(job: _Job) -> None:
 def _abandon(job: _Job, timeout: float) -> Outcome:
     """Resolve a waiter timeout without lying about a running job.
 
-    For a job that never started, the job settles as cancelled: it will
-    never enter FreeCAD, it leaves the inflight set (like shutdown's queued
-    cancellations), the Future receives the cancellation outcome, and
-    ``on_finished`` fires here. For a running job, health is marked stuck
-    and the stuck outcome is only the blocking caller's return value: the
-    Future stays pending and ``on_finished`` stays unused until the callable
-    actually returns.
+    For a job that never started, the job settles as cancelled-before-start:
+    it will never enter FreeCAD, it leaves the inflight set (like shutdown's
+    queued cancellations), the Future receives the precise queued deadline
+    outcome, and ``on_finished`` fires here. For a running job, health is
+    marked stuck and the stuck outcome is only the blocking caller's return
+    value: the Future stays pending and ``on_finished`` stays unused until
+    the callable actually returns.
     """
     fetch = False
     settle_outcome: Outcome | None = None
@@ -493,7 +535,7 @@ def _abandon(job: _Job, timeout: float) -> Outcome:
             job._cancelled = True
             job._future_done = True
             job._finished_fired = True
-            settle_outcome = _queued_timeout_outcome(timeout)
+            settle_outcome = _queued_timeout_outcome(job, timeout)
     if fetch:
         return job.future.result()
     removed = _remove_queued_job(job) if settle_outcome is not None else False
@@ -554,11 +596,14 @@ def _arm_heartbeat() -> None:
 def process_gui_tasks(reschedule: bool = True, *, generation: int | None = None) -> None:
     """Drain queued GUI-thread jobs and optionally reschedule.
 
-    Skips the current tick when any mouse button is held (e.g. 3D navigation
-    drag), when a popup or modal dialog is open, or when already executing a
-    task (re-entrancy guard). The guard prevents ``doc.recompute()`` or
+    Skips the current tick when a popup or modal dialog is open (never
+    bypassed), when a mouse button is held (e.g. 3D navigation drag) — but
+    only for ``_MOUSE_DEFER_MAX_S`` seconds per held-button episode, after
+    which queued work runs even mid-drag — or when already executing a task
+    (re-entrancy guard). The guard prevents ``doc.recompute()`` or
     ``processEvents()`` inside a task from triggering a nested drain that
-    would corrupt FreeCAD state.
+    would corrupt FreeCAD state. Each deferring tick publishes the reason in
+    ``_last_defer`` so a later queued timeout can name the observed blocker.
 
     ``reschedule=False`` is used by the immediate-wake path so it does not
     start a second heartbeat chain alongside the existing 500 ms one.
@@ -566,7 +611,7 @@ def process_gui_tasks(reschedule: bool = True, *, generation: int | None = None)
     a retired generation's tick still drains (dropping retired stop
     sentinels) but never rearms, so a restart can never duplicate chains.
     """
-    global _processing, _processing_since, _queued_jobs
+    global _processing, _processing_since, _queued_jobs, _last_defer, _mouse_defer_since
     if _processing:
         # A nested heartbeat tick consumed its timer: keep exactly one live
         # chain. Immediate wakes and retired generations never rearm.
@@ -577,16 +622,30 @@ def process_gui_tasks(reschedule: bool = True, *, generation: int | None = None)
     shutdown = False
     try:
         if _gui_request_queue.empty():
+            # Idle tick: an expired guard note and an interrupted mouse
+            # episode say nothing about work queued after this observation.
+            _last_defer = None
+            _mouse_defer_since = None
             return  # nothing queued; skip cursor/status-bar churn on idle ticks
-        if QtWidgets.QApplication.mouseButtons() != QtCore.Qt.NoButton:
-            return  # user is dragging; defer to next tick
-        if QtWidgets.QApplication.activePopupWidget() is not None:
-            return  # context menu or popup open; defer to next tick
-        if QtWidgets.QApplication.activeModalWidget() is not None:
-            return  # modal dialog open; defer to next tick
 
+        now = time.monotonic()
+        if QtWidgets.QApplication.mouseButtons() == QtCore.Qt.NoButton:
+            _mouse_defer_since = None  # released: the episode is over
+        elif _mouse_defer_since is None:
+            _mouse_defer_since = now  # first observation of this drag
+        if _mouse_defer_since is not None and now - _mouse_defer_since < _MOUSE_DEFER_MAX_S:
+            _last_defer = (_MOUSE_DEFER_NOTE, now)
+            return  # bounded navigation deferral: retry on a later tick
+        if QtWidgets.QApplication.activePopupWidget() is not None:
+            _last_defer = (_POPUP_DEFER_NOTE, now)
+            return  # context menu or popup open; defer to next tick (never bypassed)
+        if QtWidgets.QApplication.activeModalWidget() is not None:
+            _last_defer = (_MODAL_DEFER_NOTE, now)
+            return  # modal dialog open; defer to next tick (never bypassed)
+
+        _last_defer = None  # about to drain: no blocker is holding work back
         _processing = True
-        _processing_since = time.monotonic()
+        _processing_since = now
         app = QtWidgets.QApplication.instance()
         try:
             status_bar = FreeCADGui.getMainWindow().statusBar()
@@ -602,6 +661,9 @@ def process_gui_tasks(reschedule: bool = True, *, generation: int | None = None)
                 try:
                     item = _gui_request_queue.get_nowait()
                 except queue.Empty:
+                    # Normal drain exit: the next queued call must not
+                    # inherit this episode's (possibly expired) interval.
+                    _mouse_defer_since = None
                     break  # a canceller may remove items after the emptiness check
                 if isinstance(item, _ShutdownSentinel):
                     with _state_lock:
@@ -667,7 +729,7 @@ def dispatch_to_gui(
 
     Waits up to ``timeout`` seconds for true completion. On timeout a queued
     job is cancelled before it can enter FreeCAD (its Future settles with
-    the cancellation outcome); for a running job the stuck outcome is
+    the queued-deadline outcome); for a running job the stuck outcome is
     returned to the caller only — the job's Future stays pending and settles
     with the real outcome when the callable actually returns, and
     ``on_finished`` fires exactly once then. Never raises ``TimeoutError``;
@@ -692,7 +754,7 @@ def request_timeout(
     The public deadline API for a Future from ``submit_to_gui`` whose
     owning operation is swept outside the dispatcher (e.g. the server's
     ``service_actions``). A still-queued job is cancelled before it can
-    enter FreeCAD: its Future settles with the cancellation ``Outcome``
+    enter FreeCAD: its Future settles with the queued-deadline ``Outcome``
     and ``on_finished`` fires exactly once. A running job has its health
     marked stuck (later submissions fail fast) while its Future stays
     pending and settles only with the real outcome when the callable
@@ -749,7 +811,7 @@ def initialize() -> None:
     generations never rearm, so a restart can never duplicate the chain.
     Idempotent while already running.
     """
-    global _waker, _draining, _generation, _gui_thread_id
+    global _waker, _draining, _generation, _gui_thread_id, _last_defer, _mouse_defer_since
     with _state_lock:
         if _waker is not None and not _draining:
             return  # already live: never arm a competing chain
@@ -768,6 +830,11 @@ def initialize() -> None:
         _generation += 1
     _gui_thread_id = threading.get_ident()
     _purge_retired_sentinels()
+    # A genuine new generation starts with no guard episode: the next
+    # held-button observation opens a fresh interval. The idempotent
+    # early-return above never reaches this, so a live episode survives.
+    _last_defer = None
+    _mouse_defer_since = None
     _waker = _WakeSignal()
     _arm_heartbeat()
 

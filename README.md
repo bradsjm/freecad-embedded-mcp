@@ -69,13 +69,23 @@ FreeCAD user add-on directories:
 
 | Platform | Directory |
 | --- | --- |
-| Windows | `%APPDATA%\FreeCAD\Mod\` |
+| Windows, FreeCAD 1.1 | `%APPDATA%\FreeCAD\v1-1\Mod\` |
+| Windows, older unversioned installations | `%APPDATA%\FreeCAD\Mod\` |
 | macOS, FreeCAD 1.1 | `~/Library/Application Support/FreeCAD/v1-1/Mod/` |
 | Ubuntu | `~/.FreeCAD/Mod/` |
 | Ubuntu snap | `~/snap/freecad/common/Mod/` |
 | Debian | `~/.local/share/FreeCAD/Mod` |
 | Arch / CachyOS (FreeCAD 1.1 from `extra/freecad`) | `~/.local/share/FreeCAD/v1-1/Mod/` |
 | Flatpak | `~/.var/app/org.freecad.FreeCAD/data/FreeCAD/v1-1/Mod/` |
+
+Packaging and preferences can alter these paths. To confirm the directory on your installation, open FreeCAD's Python console and run:
+
+```python
+import os
+print(os.path.join(FreeCAD.getUserAppDataDir(), "Mod"))
+```
+
+The returned path takes precedence over the examples above. A manual copy must place `FreeCADMCP/InitGui.py` directly below that `Mod` directory.
 
 Copy or symlink the add-on directory:
 
@@ -345,6 +355,14 @@ Cancellation is honest about its limits. A running CalculiX solver is never kill
 
 FreeCAD GUI-thread operations cannot be force-cancelled safely. If a GUI-thread operation exceeds its timeout after starting, the server reports `GUI_DISPATCH_STUCK` and rejects later GUI operations immediately.
 
+Waiting in the GUI queue consumes the operation deadline; there is no fresh execution budget at task start. A queued deadline means the callable never ran and will not run later. A running timeout does not stop native work.
+
+`GUI_DISPATCH_STUCK` carries `reason: deadline_exceeded` and `stillRunning: true` for the original running call. A later refusal carries `reason: dispatcher_stuck` and `started: false`.
+
+Poll `tasks/get` for a detached operation's real terminal result. A blocking response already returned to its caller is not replaced by a later result. Retained work and health clear only on true completion.
+
+Mouse deferral is bounded to five seconds; popup and modal deferral is not bypassed. Use the returned blocker guidance and `discover_capabilities` health rather than resubmitting mutations blindly.
+
 Use `discover_capabilities` to inspect dispatch health. Document queries run on the GUI thread alongside modelling operations. If health does not return to normal after the operation finishes, restart FreeCAD.
 
 ### `run_script` sessions
@@ -352,6 +370,8 @@ Use `discover_capabilities` to inspect dispatch health. Document queries run on 
 `run_script` executes on the GUI thread inside a namespace seeded with `FreeCAD`/`App` and `Gui` aliases. Variables survive between calls to the same `session_id` for the server's lifetime.
 
 At most 32 sessions are kept. New sessions are refused rather than evicting live state. An exception in executed code returns captured stdout, stderr, and the traceback. Code execution still has FreeCAD's full privileges; it is not sandboxed.
+
+Prefer structured mutation tools when they cover the operation. Successful script execution does not certify geometry validity. After a geometry-changing script finishes, call `validate_geometry` for the affected objects; use `inspect_objects` first if their names or state are unknown. Validation follows actual completion, including late completion after a timeout. A reported deadline does not mean the code stopped, so wait for actual completion before validating. For detached calls, poll `tasks/get` for the real terminal result.
 
 ## Agent skill
 
@@ -412,7 +432,7 @@ The CI workflow runs the lock check, Ruff lint, Ruff format check, add-on compil
 
 ### What was carried over
 
-- **GUI-thread dispatch:** A queue ferries every FreeCAD operation to the main thread. A Qt signal wakes the queue with a 500 ms heartbeat fallback. Ticks are skipped while a mouse button is held, so MCP work never interrupts 3D navigation.
+- **GUI-thread dispatch:** A queue ferries every FreeCAD operation to the main thread. A Qt signal wakes the queue with a 500 ms heartbeat fallback. Ticks are skipped while a popup or modal dialog is open. Mouse deferral is bounded to five seconds, after which queued MCP work runs and can interrupt an ongoing drag.
 - **Dispatch health:** A GUI operation that overruns its timeout fails fast and blocks later GUI operations until the dispatcher is healthy. `dispatch_health.py` moved across almost unchanged and is now reported through `discover_capabilities`.
 - **Persistent script namespace:** `run_script` keeps a namespace with `FreeCAD`/`App` and `Gui` aliases for each `session_id`.
 - **Add-on UX:** The “MCP Addon” workbench, the “FreeCAD MCP” toolbar and menu, status indicator, connection details, and settings in `freecad_mcp_settings.json` under FreeCAD's user app-data directory.

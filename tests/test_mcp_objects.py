@@ -1438,7 +1438,90 @@ def test_create_rejects_unsupported_type_without_transaction() -> None:
     with pytest.raises(ToolError) as exc_info:
         objects_mod.create_object(ctx, {"document": doc.Name, "type": "Part::NotReal", "name": "X"})
 
-    expect_tool_error(exc_info, VALIDATION_FAILED)
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    # Unknown types keep the generic refusal: no factory guidance, no
+    # run_script advice, and inspection as the next tool.
+    assert error.message == "type 'Part::NotReal' is not supported by document 'Doc'"
+    assert "Python factory" not in error.message
+    assert "run_script" not in error.message
+    assert error.details["nextTool"] == "inspect_objects"
+    assert doc.calls == []
+    assert doc.recompute_count == 0
+
+
+# (requested type, Python factory hint, Draft active-document flag). The
+# names and factories mirror objects_mod._PYTHON_FACTORY_HINTS; kept
+# literal so a mapping regression cannot hide behind a shared constant.
+_MAPPED_HINTS = [
+    ("Part::Tube", "BasicShapes.Shapes.addTube", False),
+    ("Draft::Circle", "Draft.make_circle", True),
+    ("Draft::Rectangle", "Draft.make_rectangle", True),
+    ("Draft::Polygon", "Draft.make_polygon", True),
+    ("Draft::Wire", "Draft.make_wire", True),
+]
+
+
+@pytest.mark.parametrize(
+    ("obj_type", "factory_hint", "is_draft"),
+    _MAPPED_HINTS,
+    ids=[entry[0] for entry in _MAPPED_HINTS],
+)
+@pytest.mark.parametrize("allow_scripts", [False, True], ids=["scripts-off", "scripts-on"])
+def test_create_mapped_python_type_refusal_names_factory_and_discovery(
+    obj_type: str, factory_hint: str, is_draft: bool, allow_scripts: bool
+) -> None:
+    """A supportedTypes()-rejected mapped type explains the missing Python
+    factory and points at discovery. run_script advice follows the setting,
+    and the Draft active-document note applies only to Draft factories."""
+    doc = FakeDoc()
+    ctx = FakeCtx(doc)
+    ctx.settings = {"allow_scripts": allow_scripts}
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_object(ctx, {"document": doc.Name, "type": obj_type, "name": "X"})
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    expected = (
+        f"type '{obj_type}' requires the Python factory {factory_hint}; "
+        "create_object and create_objects do not provide that factory. "
+        "Call discover_capabilities with detail='full' to inspect supported types "
+        "and scripting availability."
+    )
+    if allow_scripts:
+        expected += " For this exact object type, use run_script with that factory."
+        if is_draft:
+            expected += (
+                " Draft factories use the active document; select the intended "
+                "document and restore the previous active document."
+            )
+    assert error.message == expected
+    assert error.details["nextTool"] == "discover_capabilities"
+    assert error.details["supportedTypes"] == [
+        "Part::Box",
+        "Part::Feature",
+        "App::DocumentObjectGroup",
+    ]
+    # A refused hint is never advertised as a creatable type.
+    assert obj_type not in error.details["supportedTypes"]
+    assert "suggestions" in error.details
+    assert doc.calls == []
+    assert doc.Objects == []
+    assert doc.recompute_count == 0
+
+
+def test_create_mapped_python_type_refusal_without_settings_omits_run_script() -> None:
+    """A context with no settings attribute at all still explains the missing
+    factory and never mentions run_script."""
+    doc = FakeDoc()
+    ctx = FakeCtx(doc)  # FakeCtx carries no settings attribute by default
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_object(ctx, {"document": doc.Name, "type": "Draft::Circle", "name": "X"})
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "requires the Python factory Draft.make_circle" in error.message
+    assert "run_script" not in error.message
+    assert error.details["nextTool"] == "discover_capabilities"
     assert doc.calls == []
     assert doc.recompute_count == 0
 
@@ -3001,6 +3084,33 @@ def test_create_objects_invalid_second_entry_rolls_back_the_batch() -> None:
     assert ("abort", None) in doc.calls
     assert ("commit", None) not in doc.calls
     assert doc.Objects == []
+
+
+def test_create_objects_mapped_type_refusal_takes_effect_before_any_entry() -> None:
+    """A mapped refusal is planned per entry before the transaction opens, so
+    an earlier valid entry never takes effect either."""
+    doc = _BoxDoc()
+    ctx = FakeCtx(doc)
+    ctx.settings = {"allow_scripts": True}
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_objects(
+            ctx,
+            {
+                "document": doc.Name,
+                "entries": [
+                    {"type": "Part::Box", "name": "First"},
+                    {"type": "Draft::Circle", "name": "Circle"},
+                ],
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert "requires the Python factory Draft.make_circle" in error.message
+    assert error.details["nextTool"] == "discover_capabilities"
+    assert doc.calls == []
+    assert doc.Objects == []
+    assert doc.recompute_count == 0
 
 
 def test_create_objects_expectations_keyed_by_requested_name() -> None:

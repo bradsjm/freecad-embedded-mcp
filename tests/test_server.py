@@ -521,6 +521,8 @@ def _clean_state():
     gui_dispatch._dispatch_health._timeout_seconds = 0.0
     gui_dispatch._inflight.clear()
     gui_dispatch._queued_jobs = 0
+    gui_dispatch._last_defer = None
+    gui_dispatch._mouse_defer_since = None
     _drain_gui_queue()
     yield
     gui_dispatch.shutdown()
@@ -1046,10 +1048,52 @@ def test_queued_deadline_cancels_before_execution():
         result = events[0]["result"]
         assert result["isError"] is True
         assert result["structuredContent"]["error"]["code"] == "GUI_DISPATCH_FAILED"
+        message = result["structuredContent"]["error"]["message"]
+        assert "timed out" in message
+        assert "never started and will not execute" in message
         assert STUB_CALLS == []  # never entered FreeCAD
         assert not server.has_pending_operations()
     finally:
         server_module.DEFAULT_DEADLINE_S = original_deadline
+
+
+def test_service_actions_queued_deadline_settles_completed_without_execution():
+    """A detached queued deadline is terminal, honest, and never executes."""
+    server = make_server()
+    gui_dispatch._waker = None  # keep the detached job queued
+    STUB_HANDLERS["run_script"] = lambda ctx, args: {"tool": "run_script"}
+    task_id = dispatch(
+        server,
+        "tools/call",
+        {"name": "run_script", "arguments": {}},
+        rpc_id=1,
+        capabilities=TASKS_CAPS,
+    )["result"]["taskId"]
+    assert wait_until(lambda: gui_dispatch.pending_count() == 1)
+
+    op = next(iter(server._ops.values()))
+    op.deadline_mono = server._clock() - 0.001
+    server._service_actions()
+
+    tasks_get = dispatch(
+        server,
+        "tasks/get",
+        {"taskId": task_id},
+        rpc_id=2,
+        capabilities=TASKS_CAPS,
+    )["result"]
+    assert tasks_get["status"] == "completed"
+    assert tasks_get["result"]["isError"] is True
+    error = tasks_get["result"]["structuredContent"]["error"]
+    assert error["code"] == "GUI_DISPATCH_FAILED"
+    assert "timed out" in error["message"]
+    assert "never started and will not execute" in error["message"]
+    assert STUB_CALLS == []  # zero handler calls
+    assert not server.has_pending_operations()
+
+    # A later drain must not execute the cancelled job.
+    gui_dispatch.process_gui_tasks(reschedule=False)
+    assert STUB_CALLS == []
 
 
 # ---------------------------------------------------------------------------

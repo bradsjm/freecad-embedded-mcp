@@ -55,7 +55,12 @@ _RUN_SCRIPT_DEFINITION: dict[str, Any] = {
         "themselves; the result reports cancellation_requested and "
         "deadline_exceeded factually. Execution is not interruptible and "
         "not sandboxed: the bearer token grants full local code-execution "
-        "authority. Refused while a FEM solve is active."
+        "authority. Refused while a FEM solve is active. Prefer structured "
+        "mutation tools when they cover the operation. Successful script "
+        "execution does not certify geometry validity. After a "
+        "geometry-changing script finishes, call validate_geometry for the "
+        "affected objects; use inspect_objects first if their names or "
+        "state are unknown."
     ),
     "inputSchema": {
         "type": "object",
