@@ -113,7 +113,7 @@ When a fit decision must be recorded as evidence in one call, pass `checks` (1�
 ```
 
 - `volume_range`: the object's volume must lie inside `min` and/or `max` (mm³, inclusive; at least one bound is required; an empty or inverted range refuses before evaluation).
-- `clearance_min`: `min` is a strictly positive distance in mm. The check measures BOTH minimum distance and common volume and passes only when distance >= `min` AND the common volume is zero. A zero requested clearance is refused — use `interference_max` to permit touching.
+- `clearance_min`: `min` is a strictly positive minimum distance in mm between the two solids. For a centred fit it equals the per-side gap; an off-centre placement reduces it. The check measures BOTH minimum distance and common volume and passes only when distance >= `min` AND the common volume is zero. A zero requested clearance is refused — use `interference_max` to permit touching.
 - `interference_max`: passes when the common volume <= `max` (mm³, default 0). Zero common volume permits contact and is never evidence of positive clearance.
 
 `objects` may be omitted when `checks` are supplied: the owner objects of the check targets are then reported in first-use order (capped at 100). An explicit `objects` list stays the exact report scope; with no checks, `objects` is required and the check-only fields are absent. The tool never defaults validation to every document object.
@@ -144,11 +144,11 @@ Read the capture against this list, and report the answer for each group:
 
 **Printability**
 
-- One large flat face is available for bed adhesion at the print orientation.
-- No overhang above the printable angle is left unsupported without a stated reason. See [Printability and print orientation](printability.md).
-- Every freestanding wall, pin, and tab is thick enough to print.
+- The chosen orientation gives stable bed contact, selected by the orientation priority rather than by the largest flat face.
+- Unsupported overhangs stay within 45° from vertical unless an overhang coupon proves more. Every other underside has a recorded bridge, support, or redesign decision. See [Measure overhangs from the vertical](printability.md#measure-overhangs-from-the-vertical).
+- Every freestanding wall, pin, and tab has at least two extrusion lines of thickness.
 - Each boss and standoff connects to a wall or a rib instead of standing alone.
-- Bottom edges are chamfered rather than filleted.
+- Bottom edges that touch the bed are chamfered rather than filleted.
 
 **Geometry quality**
 
@@ -180,9 +180,9 @@ Before reporting the CAD export as validated:
 - [ ] Single-solid requirement satisfied or multi-part intent explicitly confirmed.
 - [ ] Bounding box matches the asserted expected bounds.
 - [ ] Result reviewed through `capture_view` in `overview` mode where visual evidence is useful.
-- [ ] Print orientation chosen, with a flat bed face and no unexplained overhang. Recommendations reported.
+- [ ] Print orientation and every bridge, support, or redesign decision satisfy [the printability checks](printability.md#verify-the-design-before-export). Recommendations reported.
 - [ ] Every sourced real-world dimension records its source and date, and every assumed value is marked as assumed.
-- [ ] Every mating interface has a named fit class and per-side clearance; uncalibrated values are reported as assumptions.
+- [ ] Every mating interface has a named fit class and a per-side clearance; uncalibrated values are reported as assumptions. See [Parameterize fits per side](printability.md#parameterize-fits-per-side).
 - [ ] Snap-fit arms/hooks have load orientation, root fillet, lead-in, and deflection/fatigue review.
 - [ ] Fastener bosses, insert pilots, captive-nut pockets, or self-tapping pilots have vendor or material data, or are marked test heuristics.
 - [ ] Export includes only intended geometry and the file was checked programmatically.

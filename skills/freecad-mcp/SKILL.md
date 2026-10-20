@@ -1,6 +1,6 @@
 ---
 name: freecad-mcp
-description: "Design, inspect, edit, validate, simulate, and export FreeCAD models through the embedded FreeCAD MCP server. Use for parametric parts, CSG, sketches, PartDesign, assemblies, STEP/STL import, mesh repair, FEM, enclosures, manufacturing fit, and 3D-printable output. Also use to measure, repair, change, or export an existing FCStd model."
+description: "Design, inspect, edit, validate, simulate, and export FreeCAD models through the embedded FreeCAD MCP server. Use for parametric parts, CSG, sketches, PartDesign, assemblies, STEP/STL import, mesh repair, FEM, enclosures, manufacturing fit, and 3D-printable output. Also use for FDM/FFF design rules: nozzle-scaled walls, overhangs, bridges, horizontal holes, print orientation, per-side fit clearance, and PLA/PETG/ASA material choice. Also use to measure, repair, change, or export an existing FCStd model."
 ---
 
 # FreeCAD MCP
@@ -26,7 +26,8 @@ START
 ├─ Need STL, STEP, 3MF, mesh import, or repair?
 │  ├─ Standard export, mesh details, or repair? → references/export-print.md
 │  └─ Python escape hatch? → references/python-export.md
-├─ Need an FFF-printable design? → references/printability.md
+├─ Need an FDM/FFF-printable design, print orientation, fit, or filament choice? → references/printability.md
+│  └─ Exact overhang, bed-chamfer, teardrop, wall, or build-volume payload? → references/recipes.md
 ├─ Need an electronic component or enclosure? → references/electronic-components.md
 ├─ Need FEM? → references/fem.md
 ├─ Did a call fail or time out? → references/troubleshooting.md
@@ -158,7 +159,7 @@ Require all applicable evidence:
 
 A positive distance alone does not prove separation. A zero common volume does not prove clearance; it is contact evidence only. Use both measure modes, or `validate_geometry` with `clearance_min` plus `interference_max`, for mating parts.
 
-For FFF output, read `references/printability.md` before final geometry. Choose the build orientation before overhang-sensitive features. Mark unsourced fit values and uncalibrated clearances as assumptions.
+For FDM/FFF output, read `references/printability.md` before final geometry. Choose the build orientation before overhang-sensitive features, then apply its extrusion-scale, overhang, material, and per-side fit rules. Mark unsourced fit values and uncalibrated clearances as assumptions.
 
 ## Handle failures
 
