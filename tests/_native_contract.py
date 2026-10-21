@@ -43,6 +43,7 @@ REQUIRED: tuple[str, ...] = (
     "measure.difference",
     "feature.delete_reroute",
     "gui.edit_session",
+    "feature.write_expectations",
     "doc.lifecycle",
 )
 

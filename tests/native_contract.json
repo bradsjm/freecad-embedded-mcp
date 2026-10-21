@@ -1,5 +1,5 @@
 {
-  "captured": "2026-09-14T22:21:51.076+00:00",
+  "captured": "2026-10-21T01:48:44.140+00:00",
   "freecad": "1.1.3",
   "probes": {
     "attachment.properties": {
@@ -430,7 +430,7 @@
       "doc_isTouched_present": true,
       "outcome": "ok",
       "reopened": {
-        "file_name": "/Users/jonathan/Documents/3D Printing/FreeCAD/freecad-embedded-mcp/.native-contract/tmp/lifecycle.FCStd",
+        "file_name": "/Users/jonathan/Library/Application Support/FreeCAD/v1-1/Mod/freecad-embedded-mcp/.native-contract/tmp/lifecycle.FCStd",
         "label": "lifecycle",
         "name": "lifecycle",
         "object_count": 195
@@ -618,6 +618,75 @@
         "volume": "0.0"
       },
       "outcome": "ok"
+    },
+    "feature.write_expectations": {
+      "checks": {
+        "cleanup": true,
+        "material_added_empty": true,
+        "material_removed_bounds": true,
+        "material_removed_volume": true,
+        "material_status_ok": true,
+        "reversed_four_cylinders": true,
+        "reversed_volume_in_range": true,
+        "setup_volume_12000": true,
+        "wrong_way_left_no_object": true,
+        "wrong_way_measured_12000": true,
+        "wrong_way_refused": true,
+        "wrong_way_rolled_back": true
+      },
+      "expectationResults": [
+        {
+          "object": "ContractExpBody",
+          "topologyCounts": [
+            {
+              "max": 4,
+              "measured": 4,
+              "min": 4,
+              "query": [
+                {
+                  "role": "face",
+                  "selector": "%CYLINDER"
+                }
+              ]
+            }
+          ],
+          "volume": {
+            "max": 10880,
+            "measured": 10869.026644707676,
+            "min": 10860
+          }
+        }
+      ],
+      "leftover": [],
+      "materialChanges": [
+        {
+          "added": {
+            "bounds": null,
+            "volume": 0.0
+          },
+          "object": "ContractExpBody",
+          "reason": null,
+          "removed": {
+            "bounds": [
+              7.0,
+              7.0,
+              0.0,
+              33.0,
+              23.0,
+              10.0
+            ],
+            "volume": 1130.9733552923253
+          },
+          "status": "ok"
+        }
+      ],
+      "outcome": "ok",
+      "refusal": {
+        "code": "VALIDATION_FAILED",
+        "measured": 12000.0,
+        "operationState": "rolled_back",
+        "reason": "expected_volume"
+      }
     },
     "fem.objects": {
       "factories": [
@@ -885,7 +954,7 @@
         "no_edit_session": true
       },
       "createdFeature": "ContractEditBox",
-      "document": "MCP_NativeContract_58894",
+      "document": "MCP_NativeContract_96721",
       "editObject": "ContractEditBox",
       "guiActiveObject": "ContractEditBox",
       "inEditName": null,
@@ -1204,86 +1273,86 @@
       "orientations": {
         "Back": {
           "direction": [
-            3.2816971849999114e-08,
-            -0.9999999999999997,
-            -7.771561172376096e-16
+            0.0,
+            -1.0,
+            0.0
           ],
           "up": [
-            3.2816971849999114e-08,
-            7.771561172376096e-16,
-            0.9999999999999997
+            0.0,
+            0.0,
+            1.0
           ]
         },
         "Bottom": {
           "direction": [
             0.0,
-            -4.641020666628482e-08,
-            0.9999999999999989
+            0.0,
+            1.0
           ],
           "up": [
             0.0,
-            -0.9999999999999989,
-            -4.641020666628482e-08
+            -1.0,
+            0.0
           ]
         },
         "Dimetric": {
           "direction": [
-            -0.3333330772143096,
-            0.8819173294122863,
-            -0.33333299224220236
+            -0.333333,
+            0.881917,
+            -0.333333
           ],
           "up": [
-            -0.1178508919147652,
-            0.3118045076518854,
-            0.9428091621759197
+            -0.117851,
+            0.311805,
+            0.942809
           ]
         },
         "Front": {
           "direction": [
             0.0,
-            0.9999999999999973,
-            7.320510347335801e-08
+            1.0,
+            0.0
           ],
           "up": [
             0.0,
-            -7.320510347335801e-08,
-            0.9999999999999973
+            0.0,
+            1.0
           ]
         },
         "Isometric": {
           "direction": [
-            -0.5773503713049556,
-            0.5773500842303949,
-            -0.5773503520334821
+            -0.57735,
+            0.57735,
+            -0.57735
           ],
           "up": [
-            -0.4082481194620269,
-            0.40824857862465425,
-            0.8164965223481775
+            -0.408248,
+            0.408249,
+            0.816497
           ]
         },
         "Left": {
           "direction": [
-            0.9999999999999969,
-            5.497160127099221e-08,
-            -5.4971604268594376e-08
+            1.0,
+            0.0,
+            0.0
           ],
           "up": [
-            5.497160127099221e-08,
-            5.4971604268594376e-08,
-            0.9999999999999969
+            0.0,
+            0.0,
+            1.0
           ]
         },
         "Right": {
           "direction": [
-            -0.9999999999999968,
-            -5.6353316568724665e-08,
-            5.6353313349077894e-08
+            -1.0,
+            0.0,
+            0.0
           ],
           "up": [
-            5.6353316568724665e-08,
-            -5.6353313349077894e-08,
-            0.9999999999999968
+            0.0,
+            0.0,
+            1.0
           ]
         },
         "Top": {
@@ -1300,14 +1369,14 @@
         },
         "Trimetric": {
           "direction": [
-            -0.4095750684908514,
-            0.7094068190824832,
-            -0.5735766978443136
+            -0.409575,
+            0.709407,
+            -0.573577
           ],
           "up": [
-            -0.2867879943353558,
-            0.4967321960726389,
-            0.8191518611893385
+            -0.286788,
+            0.496732,
+            0.819152
           ]
         }
       },

@@ -1855,6 +1855,143 @@ def edit_session_payload(runner: Runner) -> dict:
     }
 
 
+# Body with a 40 x 30 x 10 pad and four r=3 circles on the XY plane at z=0.
+# A pocket from that sketch cuts empty space unless it is reversed.
+PROGRAM_EXPECTATION_PLATE = r"""
+import json
+import FreeCAD as App, Part
+doc = App.getDocument("@DOC@")
+body = doc.addObject("PartDesign::Body", "ContractExpBody")
+xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+plate = body.newObject("Sketcher::SketchObject", "ContractExpPlate")
+plate.AttachmentSupport = [(xy, "")]
+plate.MapMode = "FlatFace"
+corners = [App.Vector(0, 0, 0), App.Vector(40, 0, 0), App.Vector(40, 30, 0), App.Vector(0, 30, 0)]
+for i in range(4):
+    plate.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+pad = body.newObject("PartDesign::Pad", "ContractExpPad")
+pad.Profile = plate
+pad.Length = 10
+holes = body.newObject("Sketcher::SketchObject", "ContractExpHoles")
+holes.AttachmentSupport = [(xy, "")]
+holes.MapMode = "FlatFace"
+for x, y in ((10, 10), (30, 10), (10, 20), (30, 20)):
+    holes.addGeometry(Part.Circle(App.Vector(x, y, 0), App.Vector(0, 0, 1), 3))
+doc.recompute()
+print("PROBE_RESULT:" + json.dumps({
+    "outcome": "ok", "body": body.Name, "holes": holes.Name,
+    "volume": body.Shape.Volume, "names": [o.Name for o in body.Group],
+}))
+"""
+
+# Remove the expectation Body and everything it owns from the probe document.
+PROGRAM_EXPECTATION_CLEANUP = r"""
+import json
+import FreeCAD as App
+doc = App.getDocument("@DOC@")
+body = doc.getObject("ContractExpBody")
+if body is not None:
+    body.removeObjectsFromDocument()
+    doc.removeObject(body.Name)
+doc.recompute()
+remaining = doc.getObject("ContractExpBody") is not None
+print("PROBE_RESULT:" + json.dumps({"outcome": "ok", "remaining": remaining}))
+"""
+
+
+def write_expectations_payload(runner: Runner) -> dict:
+    """Write-time expectations and the material report on a real PartDesign pocket.
+
+    The first pocket cuts away from the pad, so the Body volume stays 12000 and
+    ``expected_volume`` MUST refuse and roll it back. The reversed pocket cuts
+    four through holes: 12000 - 4*pi*9*10 = 10869.03 mm3, four cylindrical
+    faces, and 1130.97 mm3 removed at x 7-33, y 7-23, z 0-10.
+    """
+
+    doc = runner.ensure_document()
+    setup = runner.extract_payload(runner.run_program(PROGRAM_EXPECTATION_PLATE))
+    if setup.get("outcome") != "ok":
+        return setup
+    # Shared request: only the pocket direction differs between the two calls.
+    request = {
+        "document": doc,
+        "body": setup["body"],
+        "kind": "pocket",
+        "name": "ContractExpPocket",
+        "profile": setup["holes"],
+        "include_material_change": True,
+        "expected_solids": 1,
+        "expected_volume": {"min": 10860, "max": 10880},
+        "expected_topology_counts": [
+            {"query": [{"role": "face", "selector": "%CYLINDER"}], "min": 4, "max": 4}
+        ],
+    }
+    # The wrong-way pocket must fail; a success here is itself a mismatch.
+    refusal: dict = {}
+    try:
+        runner.client.call_tool(
+            "create_feature", dict(request, parameters={"extent": "through_all"})
+        )
+    except ToolFailure as exc:
+        refusal = exc.error
+    after_refusal = runner.client.call_tool("inspect_objects", {"document": doc})
+    leftover = sorted(
+        str(row.get("name"))
+        for row in after_refusal.get("objects") or ()
+        if str(row.get("name", "")).startswith("ContractExpPocket")
+    )
+    created = runner.client.call_tool(
+        "create_feature",
+        dict(request, parameters={"extent": "through_all", "reversed": True}),
+    )
+    cleanup = runner.extract_payload(runner.run_program(PROGRAM_EXPECTATION_CLEANUP))
+    details = refusal.get("details") or {}
+    results = (created.get("expectationResults") or [{}])[0]
+    measured_volume = (results.get("volume") or {}).get("measured")
+    measured_count = ((results.get("topologyCounts") or [{}])[0]).get("measured")
+    change = (created.get("materialChanges") or [{}])[0]
+    removed = change.get("removed") or {}
+    added = change.get("added") or {}
+    removed_volume = removed.get("volume")
+    removed_bounds = removed.get("bounds")
+    checks = {
+        "setup_volume_12000": abs(float(setup.get("volume") or 0.0) - 12000.0) <= 1e-6,
+        "wrong_way_refused": refusal.get("code") == "VALIDATION_FAILED"
+        and details.get("reason") == "expected_volume",
+        "wrong_way_measured_12000": isinstance(details.get("measured"), (int, float))
+        and abs(float(details["measured"]) - 12000.0) <= 1e-6,
+        "wrong_way_rolled_back": details.get("operationState") == "rolled_back",
+        "wrong_way_left_no_object": not leftover,
+        "reversed_volume_in_range": isinstance(measured_volume, (int, float))
+        and 10860 <= float(measured_volume) <= 10880,
+        "reversed_four_cylinders": measured_count == 4,
+        "material_status_ok": change.get("status") == "ok",
+        "material_added_empty": added.get("volume") == 0.0 and added.get("bounds") is None,
+        "material_removed_volume": isinstance(removed_volume, (int, float))
+        and abs(float(removed_volume) - 1130.9733552923) <= 1e-3,
+        "material_removed_bounds": isinstance(removed_bounds, list)
+        and len(removed_bounds) == 6
+        and all(
+            abs(float(got) - want) <= 1e-6
+            for got, want in zip(removed_bounds, (7.0, 7.0, 0.0, 33.0, 23.0, 10.0), strict=True)
+        ),
+        "cleanup": cleanup.get("outcome") == "ok" and cleanup.get("remaining") is False,
+    }
+    return {
+        "refusal": {
+            "code": refusal.get("code"),
+            "reason": details.get("reason"),
+            "measured": details.get("measured"),
+            "operationState": details.get("operationState"),
+        },
+        "leftover": leftover,
+        "expectationResults": created.get("expectationResults"),
+        "materialChanges": created.get("materialChanges"),
+        "checks": checks,
+        "outcome": "ok" if all(checks.values()) else "mismatch",
+    }
+
+
 def run_constraint_forms_default(runner: Runner) -> tuple[dict, bool, dict]:
     """One verification step over the documented candidates."""
     program = DEFAULT_FORMS_PROGRAM.replace(
@@ -2100,6 +2237,20 @@ def run_probe_sequence(runner: Runner, payloads: dict, sweep: bool) -> None:
         "gui.edit_session",
         {"tool": "inspect_documents", "arguments": {}},
         lambda: edit_session_payload(runner),
+    )[0]
+    payloads["feature.write_expectations"] = runner.step(
+        "feature.write_expectations",
+        {
+            "tool": "create_feature",
+            "arguments": {
+                "kind": "pocket",
+                "parameters": "<through_all, then reversed through_all>",
+                "expected_volume": {"min": 10860, "max": 10880},
+                "expected_topology_counts": "<four %CYLINDER faces>",
+                "include_material_change": True,
+            },
+        },
+        lambda: write_expectations_payload(runner),
     )[0]
 
     # qt.signals: two run_script calls through one persistent session.
