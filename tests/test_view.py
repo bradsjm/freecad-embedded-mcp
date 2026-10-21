@@ -553,6 +553,15 @@ class FakeQPainter:
         pass
 
 
+class FakeQTextOption:
+    """QtGui.QTextOption stub so legend composition loads headless."""
+
+    WrapAtWordBoundaryOrAnywhere = 4
+
+    def setWrapMode(self, _mode: int) -> None:
+        pass
+
+
 @contextmanager
 def load_view_module() -> Iterator[types.ModuleType]:
     """Load mcp_server/tools/view.py against stubbed FreeCAD/Qt modules."""
@@ -579,6 +588,7 @@ def load_view_module() -> Iterator[types.ModuleType]:
         QEventLoop=types.SimpleNamespace(ExcludeUserInputEvents=1, ExcludeSocketNotifiers=2),
         QThread=types.SimpleNamespace(msleep=lambda _delay: None),
         QTimer=types.SimpleNamespace(singleShot=lambda *_: None),
+        QRectF=lambda *rect: tuple(rect),
     )
     pyside = types.ModuleType("PySide")
     pyside.QtCore = qt_core
@@ -587,6 +597,7 @@ def load_view_module() -> Iterator[types.ModuleType]:
         QImage=FakeQImage,
         QPainter=FakeQPainter,
         QColor=lambda *rgb: tuple(rgb),
+        QTextOption=FakeQTextOption,
     )
 
     sys.modules["FreeCAD"] = freecad

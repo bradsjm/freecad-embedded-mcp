@@ -223,14 +223,15 @@ def _compose_sheet(cells: list[dict[str, Any]]) -> tuple[bytes, list[dict[str, i
 
     Each cell is ``{"label", "path", "x", "y", "w", "h", "legend"}``. A
     panel cell draws the captured image across the cell minus the constant
-    label strip along its bottom edge; a legend cell draws its text lines
-    over the strip background instead. ``PySide.QtGui`` is imported lazily
+    label strip along its bottom edge; a legend cell wraps its text lines
+    inside the cell over the strip background instead, so a long document
+    name stays readable on a small sheet. ``PySide`` is imported lazily
     so the module keeps loading headless. Returns the sheet PNG bytes and
     the per-cell rects, which the handler reports verbatim as the
     ``views`` manifest ``rect`` values.
     """
 
-    from PySide import QtGui
+    from PySide import QtCore, QtGui
 
     width = max(cell["x"] + cell["w"] for cell in cells)
     height = max(cell["y"] + cell["h"] for cell in cells)
@@ -242,12 +243,18 @@ def _compose_sheet(cells: list[dict[str, Any]]) -> tuple[bytes, list[dict[str, i
         try:
             painter.fillRect(0, 0, width, height, QtGui.QColor(255, 255, 255))
             strip = QtGui.QColor(*_LABEL_STRIP_COLOR)
+            # Legend text breaks at words, or anywhere when one word is wider than the cell.
+            legend_wrap = QtGui.QTextOption()
+            legend_wrap.setWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
             for cell in cells:
                 x, y, w, h = cell["x"], cell["y"], cell["w"], cell["h"]
                 if cell.get("legend"):
                     painter.fillRect(x, y, w, h, strip)
-                    for offset, line in enumerate(cell["legend"]):
-                        painter.drawText(x + 12, y + 20 + 16 * offset, line)
+                    painter.drawText(
+                        QtCore.QRectF(x + 12, y + 8, max(1, w - 24), max(1, h - 16)),
+                        "\n".join(cell["legend"]),
+                        legend_wrap,
+                    )
                     continue
                 strip_y = y + h - _LABEL_STRIP
                 image = QtGui.QImage(cell["path"])
