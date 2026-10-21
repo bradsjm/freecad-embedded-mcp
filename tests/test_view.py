@@ -13,6 +13,7 @@ itself fails.
 
 import base64
 import importlib.util
+import math
 import os
 import struct
 import sys
@@ -919,6 +920,30 @@ def test_overview_manifest_carries_generation_and_camera_axes(view_module) -> No
         assert entry["section_plane"] is None
     assert result["views"][7]["direction"] is None
     assert result["views"][7]["view"] == "Legend"
+
+
+def test_overview_manifest_rounds_camera_axes(view_module) -> None:
+    camera = "position (0,-100,0) orientation (-1e-9,0,1,0.3)"
+    ctx = make_ctx(
+        active="Smoke",
+        gui_views={
+            "Smoke": FakeView(camera=camera),
+            "Other": FakeView(),
+        },
+    )
+
+    result = view_module.capture_view(ctx, capture_args(mode="overview", view_name=None))
+
+    # Independent expectation: a 0.3 rad rotation of -Z and +Y about a
+    # near-vertical axis rounds to these vectors. The raw sub-micron noise
+    # (about 4e-11 and -3e-10 on the x/y components) must fold to +0.0.
+    expected_direction = [0.0, 0.0, -1.0]
+    expected_up = [-0.29552, 0.955336, 0.0]
+    for entry in result["views"][:7]:
+        assert entry["direction"] == expected_direction
+        assert entry["up"] == expected_up
+        for values in (entry["direction"], entry["up"]):
+            assert all(math.copysign(1.0, value) > 0.0 for value in values if value == 0.0)
 
 
 def test_overview_document_scope_uses_viewfit_and_reports_objects(view_module) -> None:

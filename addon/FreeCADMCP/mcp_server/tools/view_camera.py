@@ -90,6 +90,17 @@ def _unit_axis(index: int) -> tuple[float, float, float]:
     return tuple(1.0 if position == index else 0.0 for position in range(3))  # type: ignore[return-value]
 
 
+def _round_vector(values: Any) -> list[float]:
+    """Return the vector components rounded to six decimals.
+
+    Manifest output only: raw camera and section geometry carries float
+    noise that inflates every JSON payload. Adding ``0.0`` after the
+    rounding folds ``-0.0`` back to ``0.0``.
+    """
+
+    return [round(float(value), 6) + 0.0 for value in values]
+
+
 # Document basis axes in tie-break order (X before Y before Z): the least
 # parallel one becomes a derived screen-up or section normal.
 _BASIS_AXES = (_unit_axis(0), _unit_axis(1), _unit_axis(2))
@@ -219,8 +230,9 @@ def _camera_axes(view: Any) -> tuple[list[float], list[float]] | None:
 
     ``direction`` is the view direction (the camera-local -Z axis in world
     coordinates) and ``up`` the camera-local +Y axis. The camera
-    ``orientation`` is read as the axis-angle pair Inventor writes.
-    Returns ``None`` when the camera string is unavailable or
+    ``orientation`` is read as the axis-angle pair Inventor writes. Both
+    vectors are rounded to six decimals for manifest output. Returns
+    ``None`` when the camera string is unavailable or
     unparseable; panel manifests then report null camera axes instead of
     failing the capture.
     """
@@ -237,7 +249,7 @@ def _camera_axes(view: Any) -> tuple[list[float], list[float]] | None:
     up = _rotate_axis_angle(axis_values, angle, (0.0, 1.0, 0.0))
     if not _finite_vec(direction) or not _finite_vec(up):
         return None
-    return list(direction), list(up)
+    return _round_vector(direction), _round_vector(up)
 
 
 def _quat_from_basis(

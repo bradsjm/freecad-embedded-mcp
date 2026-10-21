@@ -58,6 +58,7 @@ from .view_camera import (
     _camera_axes,
     _derived_camera_string,
     _least_parallel_basis_axis,
+    _round_vector,
     _vec_normalize,
 )
 from .view_camera import (
@@ -554,7 +555,10 @@ def _capture_interior(
                     "view": label,
                     "direction": direction,
                     "up": up,
-                    "section_plane": {"normal": list(normal), "point": list(center)},
+                    "section_plane": {
+                        "normal": _round_vector(normal),
+                        "point": _round_vector(center),
+                    },
                     "derived": False,
                     "rect": {
                         "x": cell_x,
@@ -734,8 +738,8 @@ def _capture_fit(
                 "direction": direction,
                 "up": up,
                 "section_plane": {
-                    "normal": list(normal),
-                    "point": list(mating_point),
+                    "normal": _round_vector(normal),
+                    "point": _round_vector(mating_point),
                 },
                 "derived": False,
                 "rect": {
