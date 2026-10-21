@@ -153,17 +153,20 @@ def _shape_bounds(shape: Any) -> list[float] | None:
     return [float(coordinate) for coordinate in finite]  # type: ignore[arg-type]
 
 
-def _shape_diagnostics(shape: Any) -> list[str]:
-    """Return bounded ``shape.check()`` diagnostics, tolerating a scalar result."""
+def _shape_diagnostics(shape: Any, valid: bool | None) -> list[str]:
+    """Return bounded ``shape.check()`` diagnostics for a shape not proven valid.
+
+    Native ``check()`` repeats the ``isValid()`` analysis, so a valid shape is skipped;
+    for an invalid one it raises ``ValueError`` listing one finding per line.
+    """
+    if valid is True:
+        return []
     try:
-        found = shape.check()
-    except Exception:
-        return []
-    if not found:
-        return []
-    if isinstance(found, str):
-        found = [found]
-    return [str(item) for item in found][:_MAX_DIAGNOSTICS]
+        shape.check()
+    except Exception as exc:
+        lines = [line.strip() for line in str(exc).splitlines()]
+        return [line for line in lines if line][:_MAX_DIAGNOSTICS]
+    return []
 
 
 def _solid_count(shape: Any) -> int | None:
@@ -250,7 +253,7 @@ def geometry_report(obj: Any, expected_solids: int | None = None) -> dict:
     report["bounds"] = document_bounds(obj)
     if report["bounds"] is None:
         report["geometryUnavailable"] = "document-space bounds unavailable"
-    report["diagnostics"] = _shape_diagnostics(shape)
+    report["diagnostics"] = _shape_diagnostics(shape, report["shape_valid"])
     try:
         report["max_tolerance"] = _finite(shape.getTolerance(1))
     except Exception:

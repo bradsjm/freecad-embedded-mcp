@@ -17,6 +17,7 @@ CONTRACT: dict = json.loads(_PATH.read_text(encoding="utf-8"))
 REQUIRED: tuple[str, ...] = (
     "server.version",
     "shape.null_attributes",
+    "shape.check",
     "attachment.properties",
     "geometry.attributes",
     "geometry.getConstruction",

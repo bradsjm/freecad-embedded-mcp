@@ -628,6 +628,42 @@ result["outcome"] = "ok"
 print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
 """
 
+# Native check() contract the diagnostics reader depends on: a valid solid
+# returns None, and an invalid face raises ValueError listing one finding per line.
+PROGRAM_SHAPE_CHECK = """
+import json as _json
+import Part
+
+result = {}
+cases = {
+    "valid_box": Part.makeBox(1, 1, 1),
+    "bowtie_face": Part.Face(Part.makePolygon([
+        App.Vector(0, 0, 0), App.Vector(1, 1, 0), App.Vector(1, 0, 0),
+        App.Vector(0, 1, 0), App.Vector(0, 0, 0),
+    ])),
+}
+for name, shape in cases.items():
+    entry = {"isValid": bool(shape.isValid())}
+    try:
+        entry["check"] = {"returned": repr(shape.check())}
+    except Exception as exc:
+        entry["check"] = {
+            "raised": type(exc).__name__,
+            "lines": [line for line in str(exc).splitlines() if line.strip()],
+        }
+    result[name] = entry
+valid, invalid = result["valid_box"], result["bowtie_face"]
+checks = {
+    "valid_returns_none": valid["isValid"] and valid["check"] == {"returned": "None"},
+    "invalid_raises_value_error": not invalid["isValid"]
+    and invalid["check"].get("raised") == "ValueError"
+    and bool(invalid["check"].get("lines")),
+}
+result["checks"] = checks
+result["outcome"] = "ok" if all(checks.values()) else "mismatch"
+print("PROBE_RESULT:" + _json.dumps(result, sort_keys=True))
+"""
+
 PROGRAM_ATTACHMENT = """
 import json as _json
 
@@ -2185,6 +2221,7 @@ def run_probe_sequence(runner: Runner, payloads: dict, sweep: bool) -> None:
 
     script_probes = [
         ("shape.null_attributes", PROGRAM_NULL_SHAPE),
+        ("shape.check", PROGRAM_SHAPE_CHECK),
         ("attachment.properties", PROGRAM_ATTACHMENT),
         ("geometry.attributes", PROGRAM_GEOMETRY_ATTRS),
         ("geometry.getConstruction", PROGRAM_GET_CONSTRUCTION),

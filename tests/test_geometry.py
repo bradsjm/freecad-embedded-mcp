@@ -48,7 +48,11 @@ def _ensure_object_validation() -> None:
                 volume = shape.Volume
                 box = shape.BoundBox
                 bounds = [box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax]
-                diagnostics = list(shape.check())
+                try:
+                    shape.check()
+                    diagnostics = []
+                except ValueError as exc:
+                    diagnostics = [line for line in str(exc).splitlines() if line.strip()]
                 max_tolerance = shape.getTolerance(1)
             if expected_solids is None:
                 ok, report_error = True, None
@@ -158,7 +162,10 @@ class FakeShape:
         return self._valid
 
     def check(self):
-        return list(self._check)
+        # Native check(): None when valid; ValueError with one finding per line otherwise.
+        if self._check:
+            raise ValueError("\n".join(self._check) + "\n")
+        return None
 
     def getTolerance(self, mode):
         return self._tolerance
@@ -529,7 +536,8 @@ def test_validate_geometry_valid_non_solid():
 
 
 def test_validate_geometry_zero_volume_solid_fails():
-    shape = FakeShape(volume=0.0, check_results=["surface BRep check failed"])
+    # Native check() reports findings only for a shape isValid() rejects.
+    shape = FakeShape(volume=0.0, valid=False, check_results=["surface BRep check failed"])
     ctx = FakeCtx({"Box": FakeObject("Box", shape)})
     result = geometry.HANDLERS["validate_geometry"](
         ctx, {"document": "Doc", "objects": ["Box"], "expected_solids": 1}

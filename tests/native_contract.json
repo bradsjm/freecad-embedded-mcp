@@ -1,5 +1,5 @@
 {
-  "captured": "2026-10-21T01:48:44.140+00:00",
+  "captured": "2026-10-21T01:59:24.688+00:00",
   "freecad": "1.1.3",
   "probes": {
     "attachment.properties": {
@@ -954,7 +954,7 @@
         "no_edit_session": true
       },
       "createdFeature": "ContractEditBox",
-      "document": "MCP_NativeContract_96721",
+      "document": "MCP_NativeContract_97001",
       "editObject": "ContractEditBox",
       "guiActiveObject": "ContractEditBox",
       "inEditName": null,
@@ -1205,6 +1205,29 @@
       "edit": "TypeError: Wrong arguments",
       "outcome": "rejected",
       "value_after": "10.0"
+    },
+    "shape.check": {
+      "bowtie_face": {
+        "check": {
+          "lines": [
+            "Self-intersecting wire",
+            "Unorientable shape"
+          ],
+          "raised": "ValueError"
+        },
+        "isValid": false
+      },
+      "checks": {
+        "invalid_raises_value_error": true,
+        "valid_returns_none": true
+      },
+      "outcome": "ok",
+      "valid_box": {
+        "check": {
+          "returned": "None"
+        },
+        "isValid": true
+      }
     },
     "shape.null_attributes": {
       "Area": {

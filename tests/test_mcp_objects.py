@@ -480,8 +480,11 @@ class FakeShape:
             setattr(box, name, value)
         return box
 
-    def check(self) -> list[str]:
-        return list(self._check)
+    def check(self) -> None:
+        # Native check(): None when valid; ValueError with one finding per line otherwise.
+        if self._check:
+            raise ValueError("\n".join(self._check) + "\n")
+        return None
 
     def getTolerance(self, _: int) -> float:
         return self._tolerance
