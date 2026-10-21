@@ -109,8 +109,9 @@ Build a shape, verify it, and save a checkpoint before adding the next layer of 
 
 After each stage:
 
-1. Run one `capture_view` call in the default `overview` mode; its labeled sheet covers `Isometric`, `Top`, `Front`, and the other named orientations.
-2. Run `validate_geometry` for bounds, solid count, and validity.
-3. Save the milestone with `save_document` before the next stage.
+1. Run `validate_geometry` for bounds, solid count, and validity, with the stage's expected values.
+2. Prove each feature the stage added with an `inspect_topology` query or `measure(mode="section")`.
+3. Capture an image only as [Spend images on form](../SKILL.md#spend-images-on-form) directs, or when the user needs to review the stage visually.
+4. Save the milestone with `save_document` before the next stage.
 
 Show the user the stage result and the key dimensions, then continue. Treat design approval as a real decision point, because a wrong envelope or mounting layout is expensive to change after detail work. Do not stall on a stage the user already specified or approved, and do not request approval for a detail the requirements already decide.

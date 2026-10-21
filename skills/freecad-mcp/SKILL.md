@@ -50,7 +50,7 @@ Read `references/mcp-tools.md` only when the active tool schema or a server edge
 10. Re-read each changed property, cell, link, or file effect.
 11. Validate the stage before you add dependent features.
 12. Save the editable source before expensive or destructive work.
-13. Validate geometry, fit, placement, and visual form; run the `overview` review after large modifications and document opens, and early in existing-model inspection after you locate the relevant objects.
+13. Validate geometry, fit, and placement with text evidence; review visual form with `capture_view` only at the points in [Spend images on form](#spend-images-on-form).
 14. Export only the intended final objects.
 15. Report tool results as evidence, not as inferred success.
 
@@ -108,7 +108,7 @@ The protocol also provides `server/discover`, `tools/list`, `tasks/get`, `tasks/
 - Require `cellContentsPersisted: true` after a spreadsheet write.
 - Pass `expected_generation` on object, sketch, or feature edits after an earlier inspection.
 - Pass `expected_solids` and `expected_bounds` when the design determines them.
-- Read bounds as feature results: a PartDesign pad or pocket reports the cumulative Body result, not only the material it added or removed. Establish orientation from geometry and explicit axes, never from object labels. Verify wall thickness with `measure` (faces or section) or `inspect_topology` before attributing a parameter value to a specific wall. After locating the relevant objects in an existing model, capture one `capture_view` overview before reasoning about placement, and narrow further reads to those objects with `objects` plus `detail: "full"` and `property_filter`.
+- Read bounds as feature results: a PartDesign pad or pocket reports the cumulative Body result, not only the material it added or removed. Establish orientation from geometry and explicit axes, never from object labels. Verify wall thickness with `measure` (faces or section) or `inspect_topology` before attributing a parameter value to a specific wall. After locating the relevant objects in an existing model, narrow further reads to those objects with `objects` plus `detail: "full"` and `property_filter`.
 - Address topology with the shared targets: whole object `{"object":"Name"}`, signed reference `{"object":"Name","subelement":"<token>"}` taken from `inspect_topology` or `inspect_user_context` rows, or declarative query `{"object":"Name","query":[{"role":"face","selector":">Z"}]}`.
 - Reuse one query descriptor across `measure` targets, `create_feature` subelement lists, link properties such as FEM `References`, and `capture_view` focus. A consumer that needs exactly one shape refuses `selection_empty` or `selection_ambiguous`; a set consumer expands the matches and reports `resolvedSelections` receipts carrying the selection-time generation.
 - Selectors use the bounded CadQuery grammar. Named views keep CadQuery meanings, not FreeCAD camera names: front=>Z, back=<Z, left=<X, right=>X, top=>Y, bottom=<Y. Never send a raw `FaceN`/`EdgeN` label as durable input; sign it through `inspect_topology` first.
@@ -125,6 +125,20 @@ The protocol also provides `server/discover`, `tools/list`, `tasks/get`, `tasks/
 - Request the context image (`include_image: true`) when you must interpret what the user currently sees. `capture_view` reframes the scene, so it does not show the user's viewport. `inspect_user_context` reports state at call time, not at message time; re-inspect after a relevant generation change or when the user asks you to change the selection.
 - Read `inspect_user_context` `unavailable` markers as missing evidence, not negative answers; a null without a marker is genuine empty state. Entries cap at 64 rows; read `count` and `truncated` before you assume the whole selection is reported.
 - Native `FaceN`/`EdgeN` names in a context report are diagnostics, not durable targets. When the observation stays ambiguous, ask one specific clarification question instead of guessing.
+
+## Spend images on form
+
+Text evidence gives dimensional proof. A `capture_view` image gives only qualitative evidence of form. In one FreeCAD 1.1.3 profile, text tool calls took 29–38 ms and returned a few hundred tokens. A `detail` capture took 0.24 s. An `overview` capture renders seven views. It took 1.40 s and cost about 1,800 image tokens at its default size. Costs vary by client and model.
+
+- Answer dimension, position, orientation, count, and fit questions with `validate_geometry`, `measure`, or `inspect_topology` first.
+- Read a profile with `measure(mode="section")`. It returns exact lines and circles in document coordinates.
+- Do not capture an image after each stage.
+- Capture once after you locate the relevant objects in an unfamiliar model, and once before delivery.
+- Capture also when text evidence conflicts, or when the user asks for a visual review.
+- Capture also for a form question that text cannot state: overall shape, a missing feature, or an accidental rotation.
+- Use `detail` with a `focus` for one feature. Use `overview` only when the orientation or form of the whole model is in question.
+- Pass a smaller `width` and `height` when coarse form is enough. In the profile, a smaller size cut image tokens but not overview render time.
+- Do not repeat a capture with the same mode, focus, and settings while the geometry is unchanged.
 
 ## Build with checkpoints
 
@@ -154,7 +168,7 @@ Require all applicable evidence:
 - The bounds match the design within a stated tolerance.
 - `measure(mode="difference")` reports the added or removed material when a change must be quantified (`difference_volume` is the material of `a` that `b` does not cover; an empty result reports `difference_volume` 0 with null bounds).
 - `measure(mode="distance")` confirms clearance magnitude and `measure(mode="interference")` confirms no volumetric overlap, or record both decisions in one `validate_geometry` call with `checks`: `clearance_min` passes only when distance >= min AND the common volume is zero; `interference_max` passes when the common volume <= max.
-- `capture_view` in `overview` mode confirms the requested form and placement; `interior`/`fit` supplement where internal features matter.
+- The visual review follows [Spend images on form](#spend-images-on-form).
 - The export readback matches the source bounds and solid intent.
 
 A positive distance alone does not prove separation. A zero common volume does not prove clearance; it is contact evidence only. Use both measure modes, or `validate_geometry` with `clearance_min` plus `interference_max`, for mating parts.
