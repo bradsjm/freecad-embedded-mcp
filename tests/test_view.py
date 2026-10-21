@@ -1192,6 +1192,36 @@ def test_fit_derives_axis_from_coaxial_cylinders(view_module) -> None:
     }
 
 
+def test_fit_accepts_coaxial_cylinders_offset_along_the_axis(view_module) -> None:
+    # Field repro: both axis origins lie on the same line but 10 mm apart
+    # along it, which exceeds the 6 mm bore radius.
+    pin = FakeShapeObject(
+        "Pin",
+        "Smoke",
+        FakeShape(
+            (24.1, 14.1, -10.0, 35.9, 25.9, 0.0),
+            faces=[FakeFace(Cylinder((0.0, 0.0, -1.0), (30.0, 20.0, -10.0), 5.9))],
+        ),
+    )
+    hole = FakeShapeObject(
+        "Hole",
+        "Smoke",
+        FakeShape(
+            (24.0, 14.0, 0.0, 36.0, 26.0, 10.0),
+            faces=[FakeFace(Cylinder((0.0, 0.0, -1.0), (30.0, 20.0, 0.0), 6.0))],
+        ),
+    )
+    ctx = make_ctx(active="Smoke", smoke_objects={"Pin": pin, "Hole": hole})
+
+    result = view_module.capture_view(ctx, _fit_arguments())
+
+    section = result["views"][1]["section_plane"]
+    assert section["normal"] == [1.0, 0.0, 0.0]
+    # The midpoint stays on the shared axis through (30, 20).
+    assert section["point"] == [30.0, 20.0, -5.0]
+    assert section["point"][:2] == [30.0, 20.0]
+
+
 def test_fit_subelement_targets_narrow_the_mating_axis(view_module) -> None:
     pin, hole = _cylinder_pair()
     ctx = make_ctx(active="Smoke", smoke_objects={"Pin": pin, "Hole": hole})

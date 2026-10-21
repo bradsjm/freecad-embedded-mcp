@@ -472,8 +472,9 @@ def _derive_mating_axis(
     ``no_mating_axis_found``. Without a ``FaceN`` subelement every
     cylindrical face of the placed shapes (capped at 64 per object) is
     considered. Exactly one
-    qualifying pair is required — axes parallel within 1 degree and center
-    distance within the larger radius. Zero pairs refuse with
+    qualifying pair is required — axes parallel within 1 degree and the
+    perpendicular distance from the second axis origin to the first axis
+    line within the larger radius. Zero pairs refuse with
     ``no_mating_axis_found`` (numeric tools are the next step); two or
     more refuse as ``ambiguous_mating_axis``. The axis sign is
     canonicalized (first nonzero component positive) so the derived
@@ -498,7 +499,12 @@ def _derive_mating_axis(
         for axis_b, center_b, radius_b in candidates_b:
             if abs(_vec_dot(axis_a, axis_b)) < cos_limit:
                 continue
-            if _vec_norm(_vec_sub(center_a, center_b)) > max(radius_a, radius_b):
+            # The axis origin may differ along the shared axis for a valid
+            # mating pair, so compare the offset's component perpendicular
+            # to the axis, not the raw center distance.
+            offset = _vec_sub(center_b, center_a)
+            perpendicular = _vec_sub(offset, _vec_scale(axis_a, _vec_dot(offset, axis_a)))
+            if _vec_norm(perpendicular) > max(radius_a, radius_b):
                 continue
             matches.append((axis_a, center_a, center_b))
     if not matches:
