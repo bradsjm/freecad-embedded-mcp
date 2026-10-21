@@ -80,6 +80,8 @@ A model usually knows what success looks like: one solid of roughly these dimens
 
 `create_object`, `create_objects`, `edit_object`, `edit_objects`, `create_feature`, `edit_feature`, and `validate_geometry` accept `expected_solids` and `expected_bounds` with `bounds_tolerance`. The server recomputes, compares, and refuses on deviation, reporting the exact mismatch and `operationState`. **Without expectations, a wrong boolean or a failed cut would return success-shaped output with the wrong geometry, and the model would build the next stage on a false premise.**
 
+Writes can also predeclare proof that needs no image: `expected_volume` and `expected_topology_counts` state the result as a volume range and as counts of the faces or edges a declarative query matches, and a miss rolls the write back instead of returning success-shaped output (fields, limits, and reasons: [mcp-tools.md](skills/freecad-mcp/references/mcp-tools.md#write-time-expectations)). Volume reuses the evaluator behind `validate_geometry`, so a reader and a writer cannot disagree, and a zero-match query counts as zero because a missing feature is exactly what a count must be able to prove. The checks prove volume and counts, not intent: a symmetric cut on the wrong face can preserve both.
+
 Declarative checks in `validate_geometry` extend the same predeclared intent to acceptance: `volume_range`, `clearance_min`, and `interference_max` state the condition in the request and answer with per-check `pass`/`fail`/`indeterminate` rows. `clearance_min` passes only when the measured minimum distance reaches the requested margin AND the common volume is zero — a positive distance alone does not prove separation and a zero common volume does not prove clearance — and a non-volumetric or unreadable target reports `indeterminate` instead of passing.
 
 ### 7. Refuse before harm, explain after
@@ -112,6 +114,7 @@ The codes are a closed set: `DOCUMENT_NOT_FOUND`, `OBJECT_NOT_FOUND`, `VALIDATIO
 | `validate_geometry` objects | 100 | A report per object multiplies fast. |
 | `inspect_topology` page | 50 default, 100 max | Faces and edges number in the hundreds. |
 | Feature `originals` | 1–8 | Patterns beyond this are a design smell. |
+| Write-time count queries | 32 per operation, 8 per target | A count check resolves a full query. |
 | `subshape_binder` references | 1–16 | Binders beyond this are fragile. |
 | Document and object detail | `compact` default | Full detail is opt-in per call. |
 | Property listings | `property_filter`, `property_offset`, `property_limit` | Spreadsheets have hundreds of properties. |
@@ -224,7 +227,7 @@ Apply these tests before adding a tool, a parameter, or a behavior. A capability
 4. **Accept the synonym, emit the canonical.** Every enum-valued input surface gets an alias table for unambiguous cross-tool terms, abbreviations, and case or separator variants; results and errors carry only canonical values. The table is closed and import-checked — liberal acceptance never means fuzzy matching, and an ambiguous value passes through and is refused by the closed schema.
 5. **Closed schema or no schema.** If the parameters cannot form a closed, registered schema, the capability belongs in `run_script`, where the lack of structure is at least explicit.
 6. **Failures must be nameable.** Every refusal needs a stable `code`, a `reason` token, evidence in `details`, and where possible a `nextTool`. If you cannot name the failure, you cannot prevalidate the input.
-7. **Writes carry expectations.** Any tool that changes geometry accepts `expected_solids` / `expected_bounds` / `expected_generation` as applicable, and reports `operationState` honestly.
+7. **Writes carry expectations.** Any tool that changes geometry accepts `expected_solids` / `expected_bounds` / `expected_volume` / `expected_topology_counts` / `expected_generation` as applicable, and reports `operationState` honestly.
 8. **Results self-identify.** New results carry `document` and `generation` where state matters, report actual names, and validate against an `outputSchema`.
 9. **Bound the payload.** Choose a limit from the design space, not the native maximum, and add pagination or a `detail` switch before the payload can crowd a context window.
 10. **Make danger explicit.** New file effects join the consent targets and the `allowed_roots` preflight. New expensive operations join the checkpoint list. Nothing risky ships silent when the client supports the consent contract; documented legacy fallback remains explicit.

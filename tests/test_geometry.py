@@ -1909,3 +1909,51 @@ def test_subshape_fingerprints_return_none_when_the_array_is_unreadable():
             raise RuntimeError("element map is gone")
 
     assert geometry.subshape_fingerprints(UnreadableShape(), "edge", [1]) is None
+
+
+@pytest.mark.parametrize(
+    ("volume", "solids", "valid", "minimum", "maximum", "status", "reason"),
+    [
+        (10.0, 1, True, 10.0, None, "pass", None),
+        (10.0, 1, True, None, 10.0, "pass", None),
+        (10.0, 1, True, 10.0, 10.0, "pass", None),
+        (10.0, 1, True, 10.5, None, "fail", None),
+        (10.0, 1, True, None, 9.5, "fail", None),
+        (10.0, 1, False, 1.0, None, "indeterminate", "target_invalid"),
+        (0.0, 0, True, 1.0, None, "indeterminate", "non_volumetric_target"),
+        (float("nan"), 1, True, 1.0, None, "indeterminate", "non_volumetric_target"),
+    ],
+)
+def test_evaluate_volume_range_is_the_verdict_validate_geometry_reports(
+    volume, solids, valid, minimum, maximum, status, reason
+):
+    # The write-time expected_volume gate calls this evaluator; a reader and
+    # a writer that disagree on an endpoint or an unreadable volume would
+    # accept in one tool what the other refuses.
+    obj = FakeObject("Box", FakeShape(volume=volume, solids=solids, valid=valid))
+    ctx = FakeCtx({"Box": obj})
+    check = {"kind": "volume_range", "object": {"object": "Box"}}
+    if minimum is not None:
+        check["min"] = minimum
+    if maximum is not None:
+        check["max"] = maximum
+
+    row = geometry.HANDLERS["validate_geometry"](ctx, {"document": "Doc", "checks": [check]})[
+        "checks"
+    ][0]
+    verdict = geometry.evaluate_volume_range(geometry.placed_shape(obj), minimum, maximum)
+
+    assert row["status"] == verdict["status"] == status
+    if status == "indeterminate":
+        assert row["reason"] == verdict["reason"] == reason
+        assert verdict["measured"] is None
+    else:
+        assert row["measured"] == verdict["measured"] == volume
+
+
+def test_evaluate_volume_range_reports_a_missing_shape_with_its_placement_error():
+    verdict = geometry.evaluate_volume_range(None, 1.0, None, "placement failed")
+
+    assert verdict["status"] == "indeterminate"
+    assert verdict["reason"] == "target_shapeless"
+    assert verdict["diagnostics"] == ["placement failed"]

@@ -24,7 +24,9 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 
+from . import topology_query as tq
 from .protocol import VALIDATION_FAILED, ToolError
+from .tool_contracts import MAX_COUNT_CHECKS_PER_TARGET, MAX_COUNT_QUERIES_PER_OPERATION
 
 _FAILED_STATES = {"invalid", "error", "touched"}
 
@@ -551,6 +553,247 @@ def _reveal(ctx: Any, doc: Any, targets: Sequence[Any]) -> None:
         return
 
 
+# ---------------------------------------------------------------------------
+# Write-time expectations: expected_volume and expected_topology_counts.
+# ---------------------------------------------------------------------------
+
+
+def _expectation_error(
+    message: str, reason: str, owner: str | None, extra: Mapping[str, Any] | None = None
+) -> ToolError:
+    """Build the shared pre-effect refusal for a malformed expectation."""
+
+    # The refusal details always name the stable reason token.
+    details: dict[str, Any] = {"reason": reason}
+    if owner is not None:
+        details["object"] = owner
+    if extra:
+        details.update(extra)
+    return ToolError(VALIDATION_FAILED, message, details)
+
+
+def _expectation_sources(
+    expectations: Mapping[str, Mapping[str, Any]] | None,
+    expected_volume: Mapping[str, Any] | None,
+    expected_topology_counts: Sequence[Mapping[str, Any]] | None,
+) -> list[tuple[str | None, Any, Any]]:
+    """List ``(owner, volume, counts)`` for every source stating a check.
+
+    The keyed ``expectations`` mapping wins over the single-target pair,
+    exactly like ``expected_solids``; a ``None`` owner means every target.
+    """
+
+    if expectations is None:
+        # A single-target request states one source that covers every target.
+        sources: list[tuple[str | None, Any, Any]] = [
+            (None, expected_volume, expected_topology_counts)
+        ]
+    else:
+        # A keyed request states one source per named target.
+        sources = [
+            (str(key), entry.get("expected_volume"), entry.get("expected_topology_counts"))
+            for key, entry in expectations.items()
+            if isinstance(entry, Mapping)
+        ]
+    return [source for source in sources if source[1] is not None or source[2] is not None]
+
+
+def _check_expectation_range(
+    minimum: Any,
+    maximum: Any,
+    *,
+    label: str,
+    empty_reason: str,
+    invalid_reason: str,
+    owner: str | None,
+    extra: Mapping[str, Any] | None = None,
+) -> None:
+    """Refuse a range without an endpoint or with ``min`` above ``max``."""
+
+    if minimum is None and maximum is None:
+        raise _expectation_error(f"{label} requires min or max", empty_reason, owner, extra)
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise _expectation_error(f"{label} has min greater than max", invalid_reason, owner, extra)
+
+
+def preflight_expectations(
+    expectations: Mapping[str, Mapping[str, Any]] | None = None,
+    expected_volume: Mapping[str, Any] | None = None,
+    expected_topology_counts: Sequence[Mapping[str, Any]] | None = None,
+) -> None:
+    """Refuse malformed ``expected_volume``/``expected_topology_counts`` before any effect.
+
+    Handlers call this before a checkpoint or a transaction; the gate calls
+    it again as a backstop. It refuses a range without an endpoint
+    (``empty_volume_range``/``empty_count_range``), a reversed range
+    (``invalid_volume_range``/``invalid_count_range``), a malformed or
+    unparsable count query, and more than 32 count queries in one
+    operation (``expectation_query_limit``). Structural schema violations
+    never reach this function: the wire schema refuses them first.
+    """
+
+    # Every source that states at least one check.
+    sources = _expectation_sources(expectations, expected_volume, expected_topology_counts)
+    # The count-query load of the whole operation.
+    queries = sum(len(counts) for _owner, _volume, counts in sources if counts is not None)
+    if queries > MAX_COUNT_QUERIES_PER_OPERATION:
+        raise _expectation_error(
+            f"the operation states {queries} topology count queries; at most "
+            f"{MAX_COUNT_QUERIES_PER_OPERATION} are allowed per operation",
+            "expectation_query_limit",
+            None,
+            {"limit": MAX_COUNT_QUERIES_PER_OPERATION, "requested": queries},
+        )
+    for owner, volume, counts in sources:
+        if volume is not None:
+            _check_expectation_range(
+                volume.get("min"),
+                volume.get("max"),
+                label="expected_volume",
+                empty_reason="empty_volume_range",
+                invalid_reason="invalid_volume_range",
+                owner=owner,
+            )
+        if counts is None:
+            continue
+        if len(counts) > MAX_COUNT_CHECKS_PER_TARGET:
+            raise _expectation_error(
+                f"expected_topology_counts accepts at most {MAX_COUNT_CHECKS_PER_TARGET} "
+                "checks per target",
+                "expectation_query_limit",
+                owner,
+                {"limit": MAX_COUNT_CHECKS_PER_TARGET, "requested": len(counts)},
+            )
+        for index, check in enumerate(counts):
+            _check_expectation_range(
+                check.get("min"),
+                check.get("max"),
+                label=f"expected_topology_counts[{index}]",
+                empty_reason="empty_count_range",
+                invalid_reason="invalid_count_range",
+                owner=owner,
+                extra={"checkIndex": index},
+            )
+            # Normalizing parses every selector, so a syntax error or an
+            # unsupported step order is refused before any effect.
+            tq.normalize_query(check.get("query"), f"expected_topology_counts[{index}].query")
+
+
+def _range_echo(source: Mapping[str, Any]) -> dict[str, Any]:
+    """Echo the stated ``min``/``max`` endpoints of an expectation range."""
+
+    return {key: source[key] for key in ("min", "max") if source.get(key) is not None}
+
+
+def _within_range(measured: float, expected: Mapping[str, Any]) -> bool:
+    """True when ``measured`` lies inside the inclusive ``min``/``max`` endpoints."""
+
+    # The stated inclusive lower endpoint, if any.
+    minimum = expected.get("min")
+    # The stated inclusive upper endpoint, if any.
+    maximum = expected.get("max")
+    return (minimum is None or measured >= minimum) and (maximum is None or measured <= maximum)
+
+
+def _count_check_error(exc: Exception, name: str, index: int) -> ToolError:
+    """Re-raise a failed count query with its object and check index.
+
+    Failures that already name a selector reason keep it; any other failure
+    to read the shape becomes ``expected_topology_count_unavailable``.
+    """
+
+    # The original details survive; reason, object and check index are added.
+    details: dict[str, Any] = (
+        dict(exc.details) if isinstance(exc, ToolError) and exc.details else {}
+    )
+    details.setdefault("reason", "expected_topology_count_unavailable")
+    details["object"] = name
+    details["checkIndex"] = index
+    # The original message survives; a foreign exception is described instead.
+    message = exc.message if isinstance(exc, ToolError) else _describe(exc)
+    return ToolError(VALIDATION_FAILED, message, details)
+
+
+def _evaluate_expectations(
+    ctx: Any,
+    doc: Any,
+    obj: Any,
+    volume: Mapping[str, Any] | None,
+    counts: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Evaluate one direct target's volume and count checks in document space.
+
+    Returns the closed result row of the checks that passed; the first
+    failing check raises ``VALIDATION_FAILED`` so the gate rolls back. The
+    volume verdict comes from the evaluator ``validate_geometry`` uses, and
+    counts resolve declarative queries as sets, so zero matches count as zero.
+    """
+
+    from .tools.geometry import evaluate_volume_range, placed_shape, resolve_query
+
+    # The live object name labels every row and refusal.
+    name = str(getattr(obj, "Name", "<unknown>"))
+    # The result row grows with each passed check.
+    row: dict[str, Any] = {"object": name}
+    if volume is not None:
+        try:
+            # The document-space copy of the shape, or the reason it is missing.
+            shape, shape_error = placed_shape(obj), None
+        except Exception as exc:
+            shape = None
+            shape_error = str(getattr(exc, "message", None) or exc)[:256]
+        # The shared evaluator's verdict on the placed shape.
+        verdict = evaluate_volume_range(shape, volume.get("min"), volume.get("max"), shape_error)
+        if verdict["status"] != "pass":
+            raise ToolError(
+                VALIDATION_FAILED,
+                f"Object '{name}' volume is not inside expected_volume "
+                f"({verdict['status']}); the mutation was rolled back.",
+                {
+                    "reason": "expected_volume",
+                    "object": name,
+                    "expected": _range_echo(volume),
+                    "measured": verdict["measured"],
+                    "status": verdict["status"],
+                    "checkReason": verdict["reason"],
+                },
+            )
+        row["volume"] = {**_range_echo(volume), "measured": verdict["measured"]}
+    if counts is not None:
+        # One result row per passed count check, in request order.
+        rows: list[dict[str, Any]] = []
+        for index, check in enumerate(counts):
+            try:
+                # Only the final index set matters; zero matches is an empty list.
+                _obj, _role, indices = resolve_query(
+                    ctx,
+                    doc,
+                    {"object": name, "query": check["query"]},
+                    f"expected_topology_counts[{index}].query",
+                )
+            except Exception as exc:
+                raise _count_check_error(exc, name, index) from exc
+            # The number of unique root indices in the final query stage.
+            measured = len(set(indices))
+            if not _within_range(measured, check):
+                raise ToolError(
+                    VALIDATION_FAILED,
+                    f"Object '{name}' topology count check {index} matched {measured} "
+                    "subshapes outside its expected range; the mutation was rolled back.",
+                    {
+                        "reason": "expected_topology_count",
+                        "object": name,
+                        "checkIndex": index,
+                        "query": check["query"],
+                        "expected": _range_echo(check),
+                        "measured": measured,
+                    },
+                )
+            rows.append({"query": check["query"], **_range_echo(check), "measured": measured})
+        row["topologyCounts"] = rows
+    return row
+
+
 @contextmanager
 def mutation(
     ctx: Any,
@@ -565,6 +808,8 @@ def mutation(
     outcome: dict | None = None,
     validate_after_recompute: Callable[[], None] | None = None,
     check_workload: Callable[[Any, list[Any]], None] | None = None,
+    expected_volume: Mapping[str, Any] | None = None,
+    expected_topology_counts: Sequence[Mapping[str, Any]] | None = None,
 ) -> Any:
     """Run one tool mutation inside its own FreeCAD transaction.
 
@@ -624,10 +869,23 @@ def mutation(
     ``nextAction: "inspect_target"``) for a commit failure whose prior
     state the gate cannot prove restored. Failures before the transaction
     opens stay without ``operationState`` because nothing started.
+
+    ``expected_volume`` (an inclusive mm3 ``min``/``max`` range) and
+    ``expected_topology_counts`` (up to eight query-count ranges) state
+    write-time proof for every direct target; a keyed ``expectations`` entry
+    carries the same two fields for one named target instead. Malformed or
+    over-limit requests are refused before the transaction opens
+    (:func:`preflight_expectations`). After the dependent validation and
+    before the commit, the gate evaluates the checks on the direct targets
+    in document space; a miss raises ``VALIDATION_FAILED`` with reason
+    ``expected_volume``, ``expected_topology_count`` or
+    ``expected_topology_count_unavailable`` and rolls the mutation back. The
+    rows of the checks that passed fill ``outcome["expectationResults"]``.
     """
 
     ctx.check_document_idle(doc)
     _reject_user_transaction(ctx, doc)
+    preflight_expectations(expectations, expected_volume, expected_topology_counts)
     if callable(expected_solids):
         expected_solids = expected_solids()
     # Reject runaway complexity before any effects when the targets are
@@ -810,6 +1068,23 @@ def mutation(
                     "recompute left the document invalid; the mutation was rolled back",
                     {"errors": errors[:_MAX_DIAGNOSTICS]},
                 )
+            # Result rows of the write-time checks that passed, in target order.
+            expectation_rows: list[dict[str, Any]] = []
+            for obj in targets:
+                name = str(getattr(obj, "Name", "<unknown>"))
+                if expectations is None:
+                    # The single-target pair applies to every direct target.
+                    target_volume, target_counts = expected_volume, expected_topology_counts
+                else:
+                    entry = expectations.get(name) or {}
+                    # A keyed entry states the checks of this target only.
+                    target_volume = entry.get("expected_volume")
+                    target_counts = entry.get("expected_topology_counts")
+                if target_volume is None and target_counts is None:
+                    continue
+                expectation_rows.append(
+                    _evaluate_expectations(ctx, doc, obj, target_volume, target_counts)
+                )
             if outcome is not None:
                 # Filled before the commit, while the validated objects are
                 # still the committed ones: nothing runs between this block
@@ -819,6 +1094,8 @@ def mutation(
                 outcome["dependentCountAfter"] = sum(
                     1 for dep in dependents if str(getattr(dep, "Name", "")) not in target_names
                 )
+                if expectation_rows:
+                    outcome["expectationResults"] = expectation_rows
             try:
                 doc.commitTransaction()
             except Exception as commit_exc:

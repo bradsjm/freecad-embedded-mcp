@@ -1028,6 +1028,91 @@ def _prepare_geometry_checks(
     return prepared, owners
 
 
+def _volume_gate_failure(
+    shape: Any, shape_error: str | None, label: str
+) -> tuple[str, list[str]] | None:
+    """Return ``(reason, diagnostics)`` when ``shape`` is not a valid positive solid.
+
+    ``None`` means the shape is a valid solid with positive finite volume.
+    ``label`` names the target in the diagnostics; ``shape_error`` carries the
+    placement failure recorded when the shape could not be resolved.
+    """
+
+    if shape is None:
+        return "target_shapeless", [shape_error or f"{label} has no shape"]
+    try:
+        # The native validity verdict; an unreadable verdict is never valid.
+        valid = bool(shape.isValid())
+    except Exception:
+        valid = None
+    if valid is not True:
+        return "target_invalid", [f"{label} failed shape.isValid()"]
+    # The native solid count, or None when the access fails.
+    solids = _solid_count(shape)
+    try:
+        # The finite solid volume, or None when it is unreadable.
+        volume = _finite(getattr(shape, "Volume", None))
+    except Exception:
+        volume = None
+    if not solids or volume is None or volume <= 0:
+        # The diagnostic shared by every volumetric refusal.
+        message = (
+            f"{label} reports solid_count={solids!r}, volume={volume!r}; "
+            "fit checks need a solid with positive volume"
+        )
+        return "non_volumetric_target", [message]
+    return None
+
+
+def evaluate_volume_range(
+    shape: Any,
+    minimum: float | None,
+    maximum: float | None,
+    shape_error: str | None = None,
+) -> dict[str, Any]:
+    """Judge one document-space solid against an inclusive mm3 volume range.
+
+    Shared by ``validate_geometry`` and the write-time ``expected_volume``
+    gate so a reader and a writer can never disagree. The result carries
+    ``status`` (``pass``, ``fail`` or ``indeterminate``), the finite
+    ``measured`` volume (``None`` when unreadable) and, for an indeterminate
+    verdict, a ``reason`` token plus bounded ``diagnostics``. Endpoints are
+    inclusive and either may be omitted; a shape that is missing, invalid, or
+    not a positive-volume solid is indeterminate, never a pass.
+    """
+
+    # The reason and diagnostics when the shape is not a positive solid.
+    failure = _volume_gate_failure(shape, shape_error, "target")
+    if failure is not None:
+        reason, diagnostics = failure
+        return {
+            "status": "indeterminate",
+            "measured": None,
+            "reason": reason,
+            "diagnostics": diagnostics,
+        }
+    try:
+        # The finite volume readback, or None when it is unreadable.
+        measured = _finite(getattr(shape, "Volume", None))
+    except Exception:
+        measured = None
+    if measured is None:
+        return {
+            "status": "indeterminate",
+            "measured": None,
+            "reason": "measurement_unavailable",
+            "diagnostics": ["volume readback was not a finite number"],
+        }
+    # Inclusive endpoints: an omitted endpoint never excludes a volume.
+    passed = (minimum is None or measured >= minimum) and (maximum is None or measured <= maximum)
+    return {
+        "status": "pass" if passed else "fail",
+        "measured": measured,
+        "reason": None,
+        "diagnostics": [],
+    }
+
+
 def _volumetric_gate(check: Mapping[str, Any], targets: list[Mapping[str, Any]]) -> dict | None:
     """Require valid, non-null volumetric targets before acceptance math.
 
@@ -1036,47 +1121,15 @@ def _volumetric_gate(check: Mapping[str, Any], targets: list[Mapping[str, Any]])
     finite solid volume; None means every target may proceed.
     """
 
-    # Volume-range checks gate one target; distance-style checks gate the
-    # ``a``/``b`` pair. The label must match the check's own arity so a
-    # single-target row never reports the misleading ``target 'a'``.
-    labels = ("object",) if check["kind"] == "volume_range" else ("a", "b")
-    for side, target in zip(labels, targets, strict=False):
+    # Distance-style checks gate the ``a``/``b`` pair; the label must match
+    # the check's own arity so a row never reports a misleading target name.
+    for side, target in zip(("a", "b"), targets, strict=False):
         if target is None:
             continue
-        label = f"target {side!r}" if side != "object" else "target"
-        shape = target["shape"]
-        if shape is None:
-            return _indeterminate_check(
-                check,
-                "target_shapeless",
-                [target["shapeError"] or f"{label} has no shape"],
-            )
-        try:
-            valid = bool(shape.isValid())
-        except Exception:
-            valid = None
-        if valid is not True:
-            return _indeterminate_check(
-                check,
-                "target_invalid",
-                [f"{label} failed shape.isValid()"],
-            )
-        solids = _solid_count(shape)
-        try:
-            volume = _finite(getattr(shape, "Volume", None))
-        except Exception:
-            volume = None
-        if not solids or volume is None or volume <= 0:
-            return _indeterminate_check(
-                check,
-                "non_volumetric_target",
-                [
-                    (
-                        f"{label} reports solid_count={solids!r}, volume={volume!r}; "
-                        "fit checks need a solid with positive volume"
-                    )
-                ],
-            )
+        # The refusal for the first pair member that is not a positive solid.
+        failure = _volume_gate_failure(target["shape"], target["shapeError"], f"target {side!r}")
+        if failure is not None:
+            return _indeterminate_check(check, failure[0], failure[1])
     return None
 
 
@@ -1088,39 +1141,27 @@ def _evaluate_geometry_checks(ctx: Any, doc: Any, checks: list[dict]) -> list[di
         kind = check["kind"]
         if kind == "volume_range":
             target = check["target"]
-            indeterminate = _volumetric_gate(check, [target])
-            if indeterminate is not None:
-                results.append(indeterminate)
-                continue
-            try:
-                measured = _finite(getattr(target["shape"], "Volume", None))
-            except Exception:
-                measured = None
-            minimum = check.get("min")
-            maximum = check.get("max")
-            if measured is None:
+            # The shared evaluator's verdict for this check's target.
+            verdict = evaluate_volume_range(
+                target["shape"], check.get("min"), check.get("max"), target["shapeError"]
+            )
+            if verdict["status"] == "indeterminate":
                 results.append(
-                    _indeterminate_check(
-                        check,
-                        "measurement_unavailable",
-                        ["volume readback was not a finite number"],
-                    )
+                    _indeterminate_check(check, verdict["reason"], verdict["diagnostics"])
                 )
                 continue
-            passed = (minimum is None or measured >= minimum) and (
-                maximum is None or measured <= maximum
-            )
+            # The closed pass or fail result row of this check.
             row = {
                 "id": check["id"],
                 "kind": kind,
-                "status": "pass" if passed else "fail",
+                "status": verdict["status"],
                 "object": {"object": target["name"]},
-                "measured": measured,
+                "measured": verdict["measured"],
             }
-            if minimum is not None:
-                row["min"] = minimum
-            if maximum is not None:
-                row["max"] = maximum
+            if check.get("min") is not None:
+                row["min"] = check["min"]
+            if check.get("max") is not None:
+                row["max"] = check["max"]
             results.append(row)
             continue
         target_a = check["target_a"]

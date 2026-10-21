@@ -3152,3 +3152,109 @@ def test_edit_feature_refuses_an_oversized_dependent_closure_before_the_transact
         assert excinfo.value.code == VALIDATION_FAILED
         assert excinfo.value.details == {"reason": "too_many_dependents"}
         assert doc.transactions == []
+
+
+# ---------------------------------------------------------------------------
+# Write-time expectations: expected_volume and expected_topology_counts.
+# ---------------------------------------------------------------------------
+
+_FOUR_FACES = [{"role": "face"}]
+
+
+def _feature_definition(module: types.ModuleType, name: str) -> dict:
+    """The served definition of one feature tool."""
+
+    return next(entry for entry in module.TOOL_DEFINITIONS if entry["name"] == name)
+
+
+def test_create_feature_expectations_check_the_body_not_the_new_feature() -> None:
+    expected = {
+        "expected_volume": {"min": 900.0, "max": 1100.0},
+        "expected_topology_counts": [{"query": _FOUR_FACES, "min": 4, "max": 4}],
+    }
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape(faces=[object()] * 4))
+        ctx = FakeCtx(doc)
+        # The same request must pass the served input schema.
+        request = {
+            "document": "Doc",
+            "body": "Body",
+            "kind": "pad",
+            "name": "Pad",
+            "profile": "Sketch",
+            **expected,
+        }
+        validate_schema(request, _feature_definition(module, "create_feature")["inputSchema"])
+
+        result = call(module, ctx, kind="pad", name="Pad", profile="Sketch", **expected)
+
+        assert result["expectationResults"] == [
+            {
+                "object": "Body",
+                "volume": {"min": 900.0, "max": 1100.0, "measured": 1000.0},
+                "topologyCounts": [{"query": _FOUR_FACES, "min": 4, "max": 4, "measured": 4}],
+            }
+        ]
+        validate_schema(result, _feature_definition(module, "create_feature")["outputSchema"])
+
+        rolled_back_body, rolled_back_doc = make_body_and_doc(shape=FakeShape(faces=[object()] * 4))
+        with pytest.raises(ToolError) as excinfo:
+            call(
+                module,
+                FakeCtx(rolled_back_doc),
+                kind="pad",
+                name="Pad",
+                profile="Sketch",
+                expected_topology_counts=[{"query": _FOUR_FACES, "min": 5}],
+            )
+
+        details = excinfo.value.details
+        assert details["reason"] == "expected_topology_count"
+        assert details["object"] == "Body"
+        assert details["operationState"] == "rolled_back"
+        assert [entry.Name for entry in rolled_back_body.Group] == ["Sketch"]
+
+
+def test_edit_feature_expectations_check_the_body_and_roll_back_a_miss() -> None:
+    with load_features() as module:
+        feature, doc = make_edit_doc(
+            "Target", "PartDesign::Fillet", ("Base", "Radius"), {"Radius": 1.0}
+        )
+        ctx = FakeCtx(doc)
+
+        # The same request must pass the served input schema.
+        request = {
+            "document": "Doc",
+            "body": "Body",
+            "object": "Target",
+            "parameters": {"radius": 2.5},
+            "expected_volume": {"min": 900.0},
+        }
+        validate_schema(request, _feature_definition(module, "edit_feature")["inputSchema"])
+
+        result = edit(
+            module,
+            ctx,
+            object="Target",
+            parameters={"radius": 2.5},
+            expected_volume={"min": 900.0},
+        )
+
+        assert result["expectationResults"] == [
+            {"object": "Body", "volume": {"min": 900.0, "measured": 1000.0}}
+        ]
+        validate_schema(result, _feature_definition(module, "edit_feature")["outputSchema"])
+
+        with pytest.raises(ToolError) as excinfo:
+            edit(
+                module,
+                ctx,
+                object="Target",
+                parameters={"radius": 4.0},
+                expected_volume={"min": 5000.0},
+            )
+
+        assert excinfo.value.details["reason"] == "expected_volume"
+        assert excinfo.value.details["object"] == "Body"
+        assert excinfo.value.details["operationState"] == "rolled_back"
+        assert feature.Radius == 2.5

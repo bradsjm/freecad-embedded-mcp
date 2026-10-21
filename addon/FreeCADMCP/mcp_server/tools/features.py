@@ -23,7 +23,7 @@ from typing import Any
 
 from .. import input_aliases as _aliases
 from .. import topology_query as tq
-from ..object_validation import document_bounds, geometry_report, mutation
+from ..object_validation import document_bounds, geometry_report, mutation, preflight_expectations
 from ..protocol import (
     VALIDATION_FAILED,
     ProtocolError,
@@ -604,6 +604,7 @@ _CREATE_FEATURE_INPUT = {
         "expected_solids": _objects._EXPECTED_SOLIDS,
         "expected_bounds": _objects._EXPECTED_BOUNDS,
         "bounds_tolerance": _objects._BOUNDS_TOLERANCE,
+        **_objects.EXPECTATION_PROPERTIES,
         "response_detail": _objects._RESPONSE_DETAIL,
     },
     "$defs": {**_objects._VALUE_DEFS, **_SEMANTIC_PARAM_DEFS},
@@ -644,6 +645,7 @@ _CREATE_FEATURE_OUTPUT = {
         "applied": _objects._APPLIED,
         "checkpoint": _CHECKPOINT_PROPERTY,
         "resolvedSelections": _objects._RESOLVED_SELECTIONS,
+        "expectationResults": _objects._EXPECTATION_RESULTS,
     },
     "$defs": {
         "geometryReport": _objects._GEOMETRY_REPORT,
@@ -651,6 +653,9 @@ _CREATE_FEATURE_OUTPUT = {
         "topologyResolvedSelection": tq.QUERY_DEFS["topologyResolvedSelection"],
     },
 }
+
+# The expectation result rows reference the shared topology query definitions.
+tq.merge_query_defs(_CREATE_FEATURE_OUTPUT)
 
 _EDIT_FEATURE_INPUT = tq.merge_query_defs(
     {
@@ -707,6 +712,7 @@ _EDIT_FEATURE_INPUT = tq.merge_query_defs(
             "expected_solids": _objects._EXPECTED_SOLIDS,
             "expected_bounds": _objects._EXPECTED_BOUNDS,
             "bounds_tolerance": _objects._BOUNDS_TOLERANCE,
+            **_objects.EXPECTATION_PROPERTIES,
             "response_detail": _objects._RESPONSE_DETAIL,
         },
     }
@@ -770,6 +776,7 @@ _EDIT_FEATURE_OUTPUT = tq.merge_query_defs(
             "checkpoint": _CHECKPOINT_PROPERTY,
             "geometryChange": _objects._CHANGE_GEOMETRY,
             "resolvedSelections": _objects._RESOLVED_SELECTIONS,
+            "expectationResults": _objects._EXPECTATION_RESULTS,
         },
         "$defs": {
             "geometryReport": _objects._GEOMETRY_REPORT,
@@ -967,7 +974,11 @@ TOOL_DEFINITIONS = [
             'aborts and removes the feature. response_detail: "compact" '
             "omits before-state geometry deltas, property before-values, "
             "and dependent counts from change; bodyReport always carries "
-            "the post-state verdict. Common synonyms from other modelers "
+            "the post-state verdict. Optional expected_volume (inclusive mm3 "
+            "range) and expected_topology_counts (query count ranges) "
+            "state write-time proof about the Body result; a miss rolls "
+            "the write back and passed checks return expectationResults. "
+            "Common synonyms from other modelers "
             "(extrude, cut, sweep, circular pattern, shell) and case or "
             "spacing variants are accepted and normalized; results always "
             "report the canonical kind."
@@ -1000,7 +1011,9 @@ TOOL_DEFINITIONS = [
             "Extent, depth-type, cut, and thread values accept common "
             "synonyms and case or spacing variants (thru, blind, c'bore, "
             "metric) and normalize to the canonical enum; results always "
-            "report the canonical value. "
+            "report the canonical value. Optional expected_volume and "
+            "expected_topology_counts check the Body result and return "
+            "passed checks as expectationResults. "
             'response_detail "full" adds each row before-state and the '
             "geometryChange deltas; the default compact omits them."
         ),
@@ -2581,13 +2594,16 @@ def _create_gear_profile(ctx: Any, doc: Any, body: Any, requested_name: str) -> 
 
 
 def _expected_body_expectation(arguments: Mapping[str, Any], tolerance: float) -> dict[str, Any]:
-    """Collect the caller's expected_solids/expected_bounds into a gate expectation."""
+    """Collect the caller's write-time expectations into one gate expectation."""
     expectation: dict[str, Any] = {}
     if arguments.get("expected_solids") is not None:
         expectation["expected_solids"] = arguments["expected_solids"]
     if arguments.get("expected_bounds") is not None:
         expectation["expected_bounds"] = arguments["expected_bounds"]
         expectation["bounds_tolerance"] = tolerance
+    for key in ("expected_volume", "expected_topology_counts"):
+        if arguments.get(key) is not None:
+            expectation[key] = arguments[key]
     return expectation
 
 
@@ -2766,6 +2782,8 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
     body_expectation = _expected_body_expectation(arguments, float(bounds_tolerance))
     if body_expectation:
         expectations[body.Name] = body_expectation
+    # Malformed or over-limit expectations are refused before any effect.
+    preflight_expectations(expectations)
 
     created: list[Any] = []
     outcome: dict[str, Any] = {}
@@ -2926,6 +2944,8 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
         ),
         "applied": [*applied, *applied_semantic],
     }
+    if "expectationResults" in outcome:
+        result["expectationResults"] = outcome["expectationResults"]
     if queries.receipts:
         result["resolvedSelections"] = queries.receipts
     return result
@@ -3231,6 +3251,8 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
     )
     if body_expectation:
         expectations[body.Name] = body_expectation
+    # Malformed or over-limit expectations are refused before any effect.
+    preflight_expectations(expectations)
     outcome: dict[str, Any] = {}
 
     label = _mutation_label("edit_feature", body, feature)
@@ -3340,6 +3362,8 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
             "boundsBefore": before_report["bounds"],
             "boundsAfter": document_bounds(feature),
         }
+    if "expectationResults" in outcome:
+        result["expectationResults"] = outcome["expectationResults"]
     if queries.receipts:
         result["resolvedSelections"] = queries.receipts
     return result

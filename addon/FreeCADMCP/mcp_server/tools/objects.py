@@ -25,6 +25,7 @@ from ..object_validation import (
     document_bounds,
     geometry_report,
     mutation,
+    preflight_expectations,
     shape_is_null,
 )
 from ..protocol import (
@@ -38,10 +39,12 @@ from ..protocol import (
 from ..tool_contracts import (
     _BOUNDS_TOLERANCE,
     _DEFAULT_BOUNDS_TOLERANCE,
+    _EXPECTATION_RESULTS,
     _EXPECTED_BOUNDS,
     _EXPECTED_GENERATION,
     _EXPECTED_SOLIDS,
     _GEOMETRY_REPORT,
+    EXPECTATION_PROPERTIES,
     require_expected_generation,
 )
 
@@ -746,6 +749,7 @@ _CREATE_INPUT = {
         "expected_solids": _EXPECTED_SOLIDS,
         "expected_bounds": _EXPECTED_BOUNDS,
         "bounds_tolerance": _BOUNDS_TOLERANCE,
+        **EXPECTATION_PROPERTIES,
         "response_detail": _RESPONSE_DETAIL,
     },
     "$defs": _VALUE_DEFS,
@@ -763,6 +767,7 @@ _EDIT_INPUT = {
         "expected_solids": _EXPECTED_SOLIDS,
         "expected_bounds": _EXPECTED_BOUNDS,
         "bounds_tolerance": _BOUNDS_TOLERANCE,
+        **EXPECTATION_PROPERTIES,
         "response_detail": _RESPONSE_DETAIL,
     },
     "$defs": _VALUE_DEFS,
@@ -799,6 +804,7 @@ _EDIT_OBJECTS_INPUT = {
                     "expected_solids": _EXPECTED_SOLIDS,
                     "expected_bounds": _EXPECTED_BOUNDS,
                     "bounds_tolerance": _BOUNDS_TOLERANCE,
+                    **EXPECTATION_PROPERTIES,
                 },
             },
         },
@@ -869,6 +875,7 @@ _MUTATED_OUTPUT = {
         "applied": _APPLIED,
         "change": _CHANGE,
         "resolvedSelections": _RESOLVED_SELECTIONS,
+        "expectationResults": _EXPECTATION_RESULTS,
     },
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
@@ -917,6 +924,7 @@ _EDIT_OBJECTS_OUTPUT = {
         },
         "applied": _APPLIED,
         "resolvedSelections": _RESOLVED_SELECTIONS,
+        "expectationResults": _EXPECTATION_RESULTS,
     },
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
@@ -951,6 +959,7 @@ _CREATE_OBJECTS_INPUT = {
                     "expected_solids": _EXPECTED_SOLIDS,
                     "expected_bounds": _EXPECTED_BOUNDS,
                     "bounds_tolerance": _BOUNDS_TOLERANCE,
+                    **EXPECTATION_PROPERTIES,
                 },
             },
         },
@@ -998,6 +1007,7 @@ _CREATE_OBJECTS_OUTPUT = {
         },
         "applied": _APPLIED,
         "resolvedSelections": _RESOLVED_SELECTIONS,
+        "expectationResults": _EXPECTATION_RESULTS,
     },
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
@@ -1040,7 +1050,11 @@ TOOL_DEFINITIONS = [
             "constraints and elements). Optional expected_bounds (six "
             "document-space mm coordinates in xmin, ymin, zmin, xmax, ymax, "
             "zmax order plus bounds_tolerance) gate the "
-            "commit. Returns the actual sanitized identity, post-recompute "
+            "commit; expected_volume (inclusive mm3 range) and "
+            "expected_topology_counts (declarative query count ranges) "
+            "prove the result without an image, roll the write back on a "
+            "miss and return passed checks as expectationResults. "
+            "Returns the actual sanitized identity, post-recompute "
             "validation and a compact factual change summary."
             'response_detail: "compact" omits before-state geometry '
             "deltas, property before-values, and dependent counts from "
@@ -1055,7 +1069,8 @@ TOOL_DEFINITIONS = [
             "Create 1-32 objects atomically in one transaction; entries may "
             "mix supported types and are applied in request order inside one "
             "transaction and one recompute, with optional per-object expectations "
-            "(expected_solids, expected_bounds, bounds_tolerance) keyed by "
+            "(expected_solids, expected_bounds, bounds_tolerance, "
+            "expected_volume, expected_topology_counts) keyed by "
             "the requested name and enforced against the actual sanitized "
             "object before commit. Every type and property is prevalidated "
             "before the transaction opens. A requested name that collides "
@@ -1088,7 +1103,9 @@ TOOL_DEFINITIONS = [
             "FuzzyTolerance is honored only when the feature actually "
             "exposes it. Optional expected_bounds (six document-space mm "
             "coordinates in xmin, ymin, zmin, xmax, ymax, zmax order plus "
-            "bounds_tolerance) gate the commit. Optional expected_generation "
+            "bounds_tolerance) gate the commit; expected_volume and "
+            "expected_topology_counts prove the result and return passed "
+            "checks as expectationResults. Optional expected_generation "
             "refuses the edit when the document changed since inspection. "
             "Returns "
             "before/after property values, geometry deltas, the dependent "
@@ -1107,7 +1124,8 @@ TOOL_DEFINITIONS = [
             "properties} entries applied in request order inside one "
             "transaction and one recompute, with optional per-object "
             "expectations (expected_solids, expected_bounds, "
-            "bounds_tolerance) checked before commit. An optional top-level "
+            "bounds_tolerance, expected_volume, expected_topology_counts) "
+            "checked before commit. An optional top-level "
             "expected_generation refuses the whole batch when the document "
             "changed since inspection. Duplicate object "
             "names are rejected and every property is prevalidated before "
@@ -3370,6 +3388,12 @@ def create_object(ctx: Any, args: dict) -> dict:
     bounds_tolerance = args.get("bounds_tolerance")
     if bounds_tolerance is None:
         bounds_tolerance = _DEFAULT_BOUNDS_TOLERANCE
+    # The optional write-time volume range, in mm3.
+    expected_volume = args.get("expected_volume")
+    # The optional write-time topology count checks.
+    expected_topology_counts = args.get("expected_topology_counts")
+    # Malformed or over-limit expectations are refused before any effect.
+    preflight_expectations(None, expected_volume, expected_topology_counts)
 
     factory, factory_kwargs = _plan_create(ctx, doc, obj_type, properties)
 
@@ -3396,6 +3420,8 @@ def create_object(ctx: Any, args: dict) -> dict:
         lambda: created,
         expected_solids=expected_solids,
         expected_bounds=expected_bounds,
+        expected_volume=expected_volume,
+        expected_topology_counts=expected_topology_counts,
         bounds_tolerance=float(bounds_tolerance),
         outcome=outcome,
         check_workload=_check_workload,
@@ -3442,6 +3468,8 @@ def create_object(ctx: Any, args: dict) -> dict:
             cell_contents_persisted=bool(spreadsheet_writes),
         ),
     }
+    if "expectationResults" in outcome:
+        result["expectationResults"] = outcome["expectationResults"]
     if queries.receipts:
         result["resolvedSelections"] = queries.receipts
     return result
@@ -3466,6 +3494,12 @@ def edit_object(ctx: Any, args: dict) -> dict:
     bounds_tolerance = args.get("bounds_tolerance")
     if bounds_tolerance is None:
         bounds_tolerance = _DEFAULT_BOUNDS_TOLERANCE
+    # The optional write-time volume range, in mm3.
+    expected_volume = args.get("expected_volume")
+    # The optional write-time topology count checks.
+    expected_topology_counts = args.get("expected_topology_counts")
+    # Malformed or over-limit expectations are refused before any effect.
+    preflight_expectations(None, expected_volume, expected_topology_counts)
     detail = str(args.get("response_detail") or "compact")
     queries = _PreparedQueries(ctx, doc)
     prepared = _prepare_properties(ctx, doc, obj, properties, queries=queries, owner=obj.Name)
@@ -3488,6 +3522,8 @@ def edit_object(ctx: Any, args: dict) -> dict:
         [obj],
         expected_solids=expected_solids,
         expected_bounds=expected_bounds,
+        expected_volume=expected_volume,
+        expected_topology_counts=expected_topology_counts,
         bounds_tolerance=float(bounds_tolerance),
         outcome=outcome,
         check_workload=_check_workload,
@@ -3526,6 +3562,8 @@ def edit_object(ctx: Any, args: dict) -> dict:
             cell_contents_persisted=bool(spreadsheet_writes),
         ),
     }
+    if "expectationResults" in outcome:
+        result["expectationResults"] = outcome["expectationResults"]
     if queries.receipts:
         result["resolvedSelections"] = queries.receipts
     return result
@@ -3694,6 +3732,8 @@ def edit_objects(ctx: Any, args: dict) -> dict:
             VALIDATION_FAILED,
             f"expectations name objects that are not edited: {unknown}",
         )
+    # Malformed or over-limit expectations are refused before any effect.
+    preflight_expectations(expectations)
 
     before_rows: dict[str, list[tuple[str, Any]]] = {}
     before_reports: dict[str, dict] = {}
@@ -3765,6 +3805,8 @@ def edit_objects(ctx: Any, args: dict) -> dict:
         "changes": changes,
         "applied": applied,
     }
+    if "expectationResults" in outcome:
+        result["expectationResults"] = outcome["expectationResults"]
     if queries.receipts:
         result["resolvedSelections"] = queries.receipts
     return result
@@ -3817,6 +3859,8 @@ def create_objects(ctx: Any, args: dict) -> dict:
             VALIDATION_FAILED,
             f"expectations name objects that are not created: {unknown}",
         )
+    # Malformed or over-limit expectations are refused before any effect.
+    preflight_expectations(expectations)
 
     created: list[Any] = []
     name_mapping: list[dict] = []
@@ -3904,6 +3948,8 @@ def create_objects(ctx: Any, args: dict) -> dict:
         "changes": changes,
         "applied": applied,
     }
+    if "expectationResults" in outcome:
+        result["expectationResults"] = outcome["expectationResults"]
     if queries.receipts:
         result["resolvedSelections"] = queries.receipts
     return result

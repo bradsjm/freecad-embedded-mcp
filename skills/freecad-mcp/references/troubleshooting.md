@@ -14,6 +14,7 @@ Read `details.reason` first. When `details.nextTool` exists, call that tool next
 | [Property assignment failed](#property-assignment-failed) | `inspect_objects(detail="full")` for names, types, and metadata |
 | [Mutation succeeded but the effect is wrong](#mutation-succeeded-but-the-effect-is-wrong) | Re-read the exact property, cell, link, or file effect |
 | [Atomic batch failed](#atomic-batch-failed) | Treat as fully rolled back and correct the invalid entry |
+| [Write-time expectation failed](#write-time-expectation-failed) | Read `details.reason`, `measured`, and `checkIndex`; the write rolled back |
 | [Sketch edit failed](#sketch-edit-failed) | Read `details.reason`; treat the batch as rolled back |
 | [Invalid or Touched object](#invalid-or-touched-object) | Inspect `state`, then the support and tool links |
 | [Deadline exceeded with unknown outcome](#deadline-exceeded-with-unknown-outcome) | Stop GUI calls, then inspect actual document state |
@@ -72,6 +73,15 @@ Current tool schemas reject unknown arguments. Do not probe schemas with deliber
 2. Read the error details, correct the invalid entry, and retry from the original document state.
 3. `create_objects` does not resolve links inside the batch: create the entries, read `nameMapping`, then link them with `edit_objects`.
 4. `reason: stale_generation` means the document changed since your last read. Re-inspect with `inspect_objects`, then retry the batch with the current top-level `expected_generation`.
+
+## Write-time expectation failed
+
+1. Read `details.operationState`. The document is unchanged only when it is `rolled_back`; for `rollback_failed` or `may_have_changed`, re-inspect before any retry.
+2. `reason: expected_volume` carries `status` (`fail` or `indeterminate`), `measured`, and `checkReason`. An `indeterminate` status means the shape was missing, invalid, or not a positive-volume solid; fix the model before you widen the range.
+3. `reason: expected_topology_count` carries `object`, `checkIndex`, `measured`, and `expected`. `expected_topology_count_unavailable` or a selector reason such as `selector_geometry_unavailable` means the shape could not be read for that query.
+4. `empty_volume_range`, `invalid_volume_range`, `empty_count_range`, `invalid_count_range`, and `expectation_query_limit` refuse before any effect: state `min` or `max`, keep `min` at or below `max`, and send at most 32 count queries per call.
+
+Contract: [mcp-tools.md](mcp-tools.md#write-time-expectations).
 
 ## Sketch edit failed
 

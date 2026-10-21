@@ -659,3 +659,264 @@ def test_geometry_report_never_raises_on_a_null_shape() -> None:
     assert report["ok"] is True
     assert report["volume"] is None
     assert shape_is_null(obj.Shape) is True
+
+
+# ---------------------------------------------------------------------------
+# Write-time expectations: expected_volume and expected_topology_counts.
+# ---------------------------------------------------------------------------
+
+
+class Cylinder:
+    """Native cylinder surface stand-in: the class name drives ``%CYLINDER``."""
+
+    def __init__(self, radius: float) -> None:
+        self.Radius = radius
+
+
+class Plane:
+    """Native plane surface stand-in: the class name drives ``%PLANE``."""
+
+
+class _CountEdge:
+    """A root edge whose identity is what ``isSame`` compares."""
+
+    def isSame(self, other: Any) -> bool:
+        return self is other
+
+
+class _CountFace:
+    """A face with a classified surface and its bounding edges."""
+
+    def __init__(self, surface: Any, edges: tuple[Any, ...] = ()) -> None:
+        self.Surface = surface
+        self.Edges = list(edges)
+
+
+class _CountShape:
+    """A solid-shaped double whose placed copy keeps the same subshapes."""
+
+    def __init__(self, volume: float, solids: int, faces: list[Any], edges: list[Any]) -> None:
+        self.Volume = volume
+        self.Solids = [object()] * solids
+        self.Faces = faces
+        self.Edges = edges
+        self.Placement: Any = None
+
+    def isNull(self) -> bool:
+        return False
+
+    def isValid(self) -> bool:
+        return True
+
+    def check(self) -> list[str]:
+        return []
+
+    def getTolerance(self, _mode: int) -> float:
+        return 1e-7
+
+    def copy(self) -> "_CountShape":
+        return _CountShape(self.Volume, len(self.Solids), self.Faces, self.Edges)
+
+
+def _counted_object(*, volume: float = 1000.0, solids: int = 1, placeable: bool = True) -> Any:
+    """A body with four cylinders (two of radius 3, two of 6), two planes and three edges."""
+
+    e1, e2, e3 = _CountEdge(), _CountEdge(), _CountEdge()
+    faces = [
+        _CountFace(Cylinder(3.0), (e1, e2)),
+        _CountFace(Cylinder(3.0), (e2, e3)),
+        _CountFace(Cylinder(6.0)),
+        _CountFace(Cylinder(6.0)),
+        _CountFace(Plane()),
+        _CountFace(Plane()),
+    ]
+    obj = FakeShapeObj("Box")
+    obj.Shape = _CountShape(volume, solids, faces, [e1, e2, e3])
+    if placeable:
+        obj.getGlobalPlacement = lambda: types.SimpleNamespace()  # type: ignore[attr-defined]
+    return obj
+
+
+class _EventDoc(FakeGateDoc):
+    """A gate document recording the transaction calls in order."""
+
+    def __init__(self, objects: list[Any]) -> None:
+        super().__init__(objects)
+        self.events: list[str] = []
+
+    def openTransaction(self, label: str) -> None:
+        self.events.append("open")
+
+    def commitTransaction(self) -> None:
+        self.events.append("commit")
+
+    def abortTransaction(self) -> None:
+        self.events.append("abort")
+
+
+class _ExpectationCtx(FakeGateCtx):
+    """A gate context that also resolves objects by name for query counts."""
+
+    def require_object(self, doc: _EventDoc, name: str) -> Any:
+        return next(obj for obj in doc.Objects if obj.Name == name)
+
+
+_CYLINDERS = {"role": "face", "selector": "%CYLINDER"}
+
+
+def _gate(obj: Any, **expectation: Any) -> tuple[_EventDoc, dict]:
+    """Run an empty mutation over ``obj`` with the given write-time expectations."""
+
+    doc = _EventDoc([obj])
+    outcome: dict = {}
+    with mutation(_ExpectationCtx(doc), doc, "gate", [obj], outcome=outcome, **expectation):
+        pass
+    return doc, outcome
+
+
+def test_passed_expectations_commit_and_report_only_the_requested_checks() -> None:
+    """Counts resolve as sets: zero matches count as zero and shared edges count once."""
+
+    obj = _counted_object()
+    counts = [
+        {"query": [_CYLINDERS], "min": 4, "max": 4},
+        {"query": [{"role": "face", "selector": "%CONE"}], "min": 0, "max": 0},
+        {"query": [_CYLINDERS, {"role": "face", "radius": {"min": 5}}], "min": 2},
+        {
+            "query": [_CYLINDERS, {"role": "face", "radius": {"max": 4}}, {"role": "edge"}],
+            "max": 3,
+        },
+    ]
+
+    doc, outcome = _gate(
+        obj,
+        expected_volume={"min": 1000.0, "max": 1000.0},
+        expected_topology_counts=counts,
+    )
+
+    assert doc.events == ["open", "commit"]
+    assert outcome["expectationResults"] == [
+        {
+            "object": "Box",
+            "volume": {"min": 1000.0, "max": 1000.0, "measured": 1000.0},
+            "topologyCounts": [
+                {**counts[0], "measured": 4},
+                {**counts[1], "measured": 0},
+                {**counts[2], "measured": 2},
+                {**counts[3], "measured": 3},
+            ],
+        }
+    ]
+
+    _doc, plain = _gate(_counted_object())
+    assert "expectationResults" not in plain
+
+
+@pytest.mark.parametrize(
+    ("obj", "expectation", "reason", "extra"),
+    [
+        (
+            _counted_object(),
+            {"expected_volume": {"min": 2000.0}},
+            "expected_volume",
+            {"status": "fail", "measured": 1000.0, "checkReason": None},
+        ),
+        (
+            _counted_object(volume=0.0, solids=0),
+            {"expected_volume": {"min": 1.0}},
+            "expected_volume",
+            {"status": "indeterminate", "checkReason": "non_volumetric_target"},
+        ),
+        (
+            _counted_object(),
+            {
+                "expected_topology_counts": [
+                    {"query": [_CYLINDERS], "min": 4},
+                    {"query": [_CYLINDERS], "min": 5, "max": 5},
+                ]
+            },
+            "expected_topology_count",
+            {"checkIndex": 1, "measured": 4, "expected": {"min": 5, "max": 5}},
+        ),
+        (
+            _counted_object(placeable=False),
+            {"expected_topology_counts": [{"query": [_CYLINDERS], "min": 4}]},
+            "expected_topology_count_unavailable",
+            {"checkIndex": 0},
+        ),
+    ],
+)
+def test_a_failed_expectation_rolls_the_mutation_back_with_its_reason(
+    obj: Any, expectation: dict, reason: str, extra: dict
+) -> None:
+    """A miss, an indeterminate volume or an unreadable shape never commits."""
+
+    doc = _EventDoc([obj])
+
+    with (
+        pytest.raises(ToolError) as excinfo,
+        mutation(_ExpectationCtx(doc), doc, "gate", [obj], **expectation),
+    ):
+        pass
+
+    details = excinfo.value.details or {}
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert details["reason"] == reason
+    assert details["object"] == "Box"
+    assert {key: details[key] for key in extra} == extra
+    assert details["operationState"] == "rolled_back"
+    assert doc.events == ["open", "abort"]
+
+
+_ONE_COUNT = {"query": [_CYLINDERS], "min": 1}
+
+
+@pytest.mark.parametrize(
+    ("expectation", "reason"),
+    [
+        ({"expected_volume": {}}, "empty_volume_range"),
+        ({"expected_volume": {"min": 5.0, "max": 1.0}}, "invalid_volume_range"),
+        ({"expected_topology_counts": [{"query": [_CYLINDERS]}]}, "empty_count_range"),
+        (
+            {"expected_topology_counts": [{"query": [_CYLINDERS], "min": 3, "max": 1}]},
+            "invalid_count_range",
+        ),
+        (
+            {
+                "expected_topology_counts": [
+                    {"query": [{"role": "face", "selector": "%%"}], "min": 1}
+                ]
+            },
+            "selector_syntax",
+        ),
+        (
+            {
+                "expectations": {
+                    f"Box{index}": {"expected_topology_counts": [_ONE_COUNT] * 7}
+                    for index in range(5)
+                }
+            },
+            "expectation_query_limit",
+        ),
+    ],
+)
+def test_a_malformed_expectation_is_refused_before_the_transaction_opens(
+    expectation: dict, reason: str
+) -> None:
+    """Nothing starts: no transaction, no body run and no operationState."""
+
+    obj = _counted_object()
+    doc = _EventDoc([obj])
+    ran: list[bool] = []
+
+    with (
+        pytest.raises(ToolError) as excinfo,
+        mutation(_ExpectationCtx(doc), doc, "gate", [obj], **expectation),
+    ):
+        ran.append(True)
+
+    assert excinfo.value.code == VALIDATION_FAILED
+    assert (excinfo.value.details or {})["reason"] == reason
+    assert "operationState" not in (excinfo.value.details or {})
+    assert doc.events == []
+    assert ran == []

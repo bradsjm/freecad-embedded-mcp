@@ -39,15 +39,18 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from ..object_validation import geometry_report, mutation
+from .. import topology_query as tq
+from ..object_validation import geometry_report, mutation, preflight_expectations
 from ..protocol import VALIDATION_FAILED, ToolError
 from ..tool_contracts import (
     _BOUNDS_TOLERANCE,
     _DEFAULT_BOUNDS_TOLERANCE,
+    _EXPECTATION_RESULTS,
     _EXPECTED_BOUNDS,
     _EXPECTED_GENERATION,
     _EXPECTED_SOLIDS,
     _GEOMETRY_REPORT,
+    EXPECTATION_PROPERTIES,
     require_expected_generation,
 )
 from .feature_contracts import check_workload
@@ -147,12 +150,15 @@ def _definition() -> dict[str, Any]:
             "the pre-edit geometry report. Every result includes the post-edit "
             "bodyReport and units in millimetres, cubic millimetres, and millimetres."
             " Pass expected_generation to refuse a plan made against a stale"
-            " document, and expected_solids/expected_bounds/bounds_tolerance"
-            " to state the post-edit contract."
+            " document, expected_solids/expected_bounds/bounds_tolerance to state"
+            " the post-edit contract, and expected_volume (inclusive mm3 range)"
+            " and expected_topology_counts (query-count ranges) to prove the"
+            " result without an image; a miss rolls the edit back, and passed"
+            " checks return expectationResults."
         ),
         "inputSchema": {
             "type": "object",
-            "$defs": {"property_add": _PROPERTY_ADD_SCHEMA},
+            "$defs": {"property_add": _PROPERTY_ADD_SCHEMA, **tq.QUERY_DEFS},
             "properties": {
                 "document": {"type": "string", "minLength": 1},
                 "object": {"type": "string", "minLength": 1},
@@ -165,6 +171,7 @@ def _definition() -> dict[str, Any]:
                 "expected_solids": _EXPECTED_SOLIDS,
                 "expected_bounds": _EXPECTED_BOUNDS,
                 "bounds_tolerance": _BOUNDS_TOLERANCE,
+                **EXPECTATION_PROPERTIES,
                 "expressions": {
                     "type": "object",
                     "additionalProperties": {"type": "string", "minLength": 1},
@@ -204,6 +211,7 @@ def _definition() -> dict[str, Any]:
                 },
                 "geometryReport": _GEOMETRY_REPORT,
                 "units": _UNITS,
+                **tq.QUERY_DEFS,
             },
             "properties": {
                 "document": {"type": "string", "minLength": 1},
@@ -223,6 +231,7 @@ def _definition() -> dict[str, Any]:
                 "bodyReport": {"$ref": "#/$defs/geometryReport"},
                 "beforeReport": {"$ref": "#/$defs/geometryReport"},
                 "units": {"$ref": "#/$defs/units"},
+                "expectationResults": _EXPECTATION_RESULTS,
             },
             "required": [
                 "document",
@@ -539,6 +548,12 @@ def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     )
 
     plan = _validate_all(obj, arguments)
+    # The optional write-time volume range, in mm3.
+    expected_volume = arguments.get("expected_volume")
+    # The optional write-time topology count checks.
+    expected_topology_counts = arguments.get("expected_topology_counts")
+    # Malformed or over-limit expectations are refused before any effect.
+    preflight_expectations(None, expected_volume, expected_topology_counts)
 
     expected_solids = arguments.get("expected_solids")
     expected_bounds = arguments.get("expected_bounds")
@@ -563,6 +578,8 @@ def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         [obj],
         expected_solids=capture_baseline,
         expected_bounds=expected_bounds,
+        expected_volume=expected_volume,
+        expected_topology_counts=expected_topology_counts,
         bounds_tolerance=float(bounds_tolerance),
         outcome=outcome,
         check_workload=check_workload,
@@ -595,6 +612,8 @@ def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         "bodyReport": outcome["reports"][str(obj.Name)],
         "units": {"length": "mm", "volume": "mm3", "tolerance": "mm"},
     }
+    if "expectationResults" in outcome:
+        result["expectationResults"] = outcome["expectationResults"]
     if str(arguments.get("response_detail") or "compact") == "full":
         result["beforeReport"] = before_report
     return result

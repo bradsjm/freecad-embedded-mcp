@@ -342,6 +342,24 @@ def _stub_placed_shape(obj: Any) -> Any:
 _STUB_GEOMETRY.placed_shape = _stub_placed_shape
 
 
+def _stub_evaluate_volume_range(
+    shape: Any, minimum: Any, maximum: Any, shape_error: Any = None
+) -> dict:
+    """Inclusive pass/fail stand-in for geometry.evaluate_volume_range."""
+
+    volume = float(shape.Volume)
+    inside = (minimum is None or volume >= minimum) and (maximum is None or volume <= maximum)
+    return {
+        "status": "pass" if inside else "fail",
+        "measured": volume,
+        "reason": None,
+        "diagnostics": [],
+    }
+
+
+_STUB_GEOMETRY.evaluate_volume_range = _stub_evaluate_volume_range
+
+
 def _stub_subshape_fingerprints(shape: Any, role: str, indices: Any) -> None:
     """The doubles carry no readable subshape geometry: no fingerprint evidence.
 
@@ -3775,3 +3793,182 @@ def test_batch_creation_query_resolutions_do_not_collide() -> None:
     assert holder_b.Mount == (target_b, ["Face1"])
     receipts = result["resolvedSelections"]
     assert [row["references"][0]["object"] for row in receipts] == ["TargetA", "TargetB"]
+
+
+# ---------------------------------------------------------------------------
+# Write-time expectations: expected_volume and expected_topology_counts.
+# ---------------------------------------------------------------------------
+
+_FACES = [{"role": "face"}]
+_EXPECT = {
+    "expected_volume": {"min": 500.0, "max": 2000.0},
+    "expected_topology_counts": [{"query": _FACES, "min": 3, "max": 3}],
+}
+
+
+def _three_face_box(name: str = "Box", **kwargs: Any) -> FakeObj:
+    """A box whose shape exposes three faces for count queries."""
+
+    return box(name, shape=FakeShape(faces=(object(), object(), object())), **kwargs)
+
+
+def _definition_of(name: str) -> dict:
+    """The registered definition of a writer served by objects or parameters."""
+
+    return next(
+        entry
+        for entry in [*objects_mod.TOOL_DEFINITIONS, *parameters_mod.TOOL_DEFINITIONS]
+        if entry["name"] == name
+    )
+
+
+def test_writer_schemas_accept_write_time_expectations_and_bound_them() -> None:
+    requests = {
+        "create_object": {"document": "Doc", "type": "Part::Box", "name": "Box", **_EXPECT},
+        "edit_object": {
+            "document": "Doc",
+            "object": "Box",
+            "properties": {"Length": 1},
+            **_EXPECT,
+        },
+        "edit_parameters": {"document": "Doc", "object": "Box", **_EXPECT},
+        "create_objects": {
+            "document": "Doc",
+            "entries": [{"type": "Part::Box", "name": "Box"}],
+            "expectations": {"Box": _EXPECT},
+        },
+        "edit_objects": {
+            "document": "Doc",
+            "edits": [{"object": "Box", "properties": {"Length": 1}}],
+            "expectations": {"Box": _EXPECT},
+        },
+    }
+    for name, request in requests.items():
+        validate_schema(request, _definition_of(name)["inputSchema"])
+
+    schema = _definition_of("create_object")["inputSchema"]
+    base = requests["create_object"]
+    too_many = {**base, "expected_topology_counts": _EXPECT["expected_topology_counts"] * 9}
+    unknown_key = {**base, "expected_volume": {"min": 1.0, "tolerance": 1}}
+    no_query = {**base, "expected_topology_counts": [{"min": 1}]}
+    for invalid in (too_many, unknown_key, no_query):
+        with pytest.raises(ProtocolError):
+            validate_schema(invalid, schema)
+
+
+class _FaceBoxDoc(FakeDoc):
+    """A document whose addObject creates three-face boxes."""
+
+    def addObject(self, type_id: str, name: str) -> FakeObj:
+        obj = _three_face_box(name)
+        obj.Document = self
+        self.Objects.append(obj)
+        self._by_name[obj.Name] = obj
+        return obj
+
+
+def test_single_writers_forward_expectations_and_report_only_after_commit() -> None:
+    doc = _FaceBoxDoc(objects=[_three_face_box("Edited", values={"Length": 4.0})])
+    ctx = FakeCtx(doc)
+
+    edited = objects_mod.edit_object(
+        ctx,
+        {"document": doc.Name, "object": "Edited", "properties": {"Length": 40}, **_EXPECT},
+    )
+    created = objects_mod.create_object(
+        ctx, {"document": doc.Name, "type": "Part::Box", "name": "Fresh", **_EXPECT}
+    )
+
+    row = {
+        "object": "Edited",
+        "volume": {"min": 500.0, "max": 2000.0, "measured": 1000.0},
+        "topologyCounts": [{"query": _FACES, "min": 3, "max": 3, "measured": 3}],
+    }
+    assert edited["expectationResults"] == [row]
+    assert created["expectationResults"] == [{**row, "object": "Fresh"}]
+    validate_schema(edited, _output_schema("edit_object"))
+    validate_schema(created, _output_schema("create_object"))
+
+    unrequested = objects_mod.edit_object(
+        ctx, {"document": doc.Name, "object": "Edited", "properties": {"Length": 41}}
+    )
+    assert "expectationResults" not in unrequested
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.edit_object(
+            ctx,
+            {
+                "document": doc.Name,
+                "object": "Edited",
+                "properties": {"Length": 99},
+                "expected_volume": {"max": 10.0},
+            },
+        )
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["reason"] == "expected_volume"
+    assert error.details["operationState"] == "rolled_back"
+    assert doc.getObject("Edited").Length == 41.0
+
+
+def test_batch_expectations_follow_the_requested_name_to_the_actual_object() -> None:
+    doc = _BoxDoc(objects=[box("Box")])
+    ctx = FakeCtx(doc)
+    request = {
+        "document": doc.Name,
+        "entries": [{"type": "Part::Box", "name": "Box"}],
+        "expectations": {"Box": {"expected_volume": {"min": 500.0}}},
+    }
+
+    result = objects_mod.create_objects(ctx, request)
+
+    # The requested name "Box" collided, so FreeCAD named the object Box001.
+    assert result["nameMapping"] == [{"requested": "Box", "actual": "Box001"}]
+    assert result["expectationResults"] == [
+        {"object": "Box001", "volume": {"min": 500.0, "measured": 1000.0}}
+    ]
+    validate_schema(result, _output_schema("create_objects"))
+
+    failing = {**request, "expectations": {"Box": {"expected_volume": {"min": 5000.0}}}}
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_objects(ctx, failing)
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["object"] == "Box001"
+    assert [obj.Name for obj in doc.Objects] == ["Box", "Box001"]
+
+    edits = objects_mod.edit_objects(
+        ctx,
+        {
+            "document": doc.Name,
+            "edits": [{"object": "Box", "properties": {"Length": 2}}],
+            "expectations": {"Box": {"expected_topology_counts": [{"query": _FACES, "max": 0}]}},
+        },
+    )
+    assert edits["expectationResults"] == [
+        {
+            "object": "Box",
+            "topologyCounts": [{"query": _FACES, "max": 0, "measured": 0}],
+        }
+    ]
+    validate_schema(edits, _output_schema("edit_objects"))
+
+
+def test_the_query_cap_refuses_a_batch_before_any_effect() -> None:
+    doc = _BoxDoc()
+    ctx = FakeCtx(doc)
+    count = {"query": _FACES, "min": 0}
+    names = [f"Box{index}" for index in range(5)]
+
+    with pytest.raises(ToolError) as exc_info:
+        objects_mod.create_objects(
+            ctx,
+            {
+                "document": doc.Name,
+                "entries": [{"type": "Part::Box", "name": name} for name in names],
+                "expectations": {name: {"expected_topology_counts": [count] * 7} for name in names},
+            },
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["reason"] == "expectation_query_limit"
+    assert doc.calls == []
+    assert doc.Objects == []

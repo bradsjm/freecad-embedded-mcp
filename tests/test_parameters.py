@@ -737,3 +737,84 @@ def test_definition_is_finite_and_bound():
     check_schema(definition["outputSchema"])
     assert definition["inputSchema"]["additionalProperties"] is False
     assert definition["outputSchema"]["additionalProperties"] is False
+
+
+# ---------------------------------------------------------------------------
+# Write-time expectations: expected_volume and expected_topology_counts.
+# ---------------------------------------------------------------------------
+
+
+class _Solid:
+    """A one-solid shape double whose document-space copy is itself."""
+
+    Volume = 1000.0
+    Solids = (object(),)
+    Faces: tuple = ()
+    Edges: tuple = ()
+    Placement = None
+
+    def isNull(self):
+        return False
+
+    def isValid(self):
+        return True
+
+    def copy(self):
+        return self
+
+
+class _SolidObj(FakeObj):
+    """A parameter object that carries a placed solid."""
+
+    Shape = _Solid()
+
+    def getGlobalPlacement(self):
+        return object()
+
+
+def test_expected_volume_and_counts_are_reported_after_commit():
+    from mcp_server.protocol import validate_schema
+
+    ctx = FakeCtx(_SolidObj())
+    counts = [{"query": [{"role": "face"}], "max": 0}]
+
+    result = call(
+        ctx,
+        {
+            **base(),
+            "add": [{"name": "Depth", "type": "App::PropertyLength"}],
+            "expected_volume": {"min": 999.0, "max": 1001.0},
+            "expected_topology_counts": counts,
+        },
+    )
+
+    assert result["expectationResults"] == [
+        {
+            "object": "Box",
+            "volume": {"min": 999.0, "max": 1001.0, "measured": 1000.0},
+            "topologyCounts": [{**counts[0], "measured": 0}],
+        }
+    ]
+    validate_schema(result, parameters.TOOL_DEFINITIONS[0]["outputSchema"])
+
+
+def test_unreadable_volume_refuses_the_edit_and_rolls_it_back():
+    obj = FakeObj()
+    ctx = FakeCtx(obj)
+
+    with pytest.raises(ToolError) as excinfo:
+        call(
+            ctx,
+            {
+                **base(),
+                "add": [{"name": "Depth", "type": "App::PropertyLength"}],
+                "expected_volume": {"min": 1.0},
+            },
+        )
+
+    details = excinfo.value.details
+    assert details["reason"] == "expected_volume"
+    assert details["status"] == "indeterminate"
+    assert details["operationState"] == "rolled_back"
+    assert ctx.doc.transactions[-1] == ("abort",)
+    assert obj.PropertiesList == []

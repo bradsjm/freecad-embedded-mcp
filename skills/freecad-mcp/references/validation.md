@@ -84,6 +84,28 @@ print({
 })
 ```
 
+### Prove a write without an image
+
+Pass `expected_volume` and `expected_topology_counts` on the write itself. The server checks them after the recompute and before the commit, and rolls the write back on a miss. This pocket cuts four through holes in a 40 × 30 × 10 mm plate: the volume must land near 12 000 − 4·π·3²·10 ≈ 10 869 mm³, and exactly four cylindrical faces must exist.
+
+```json
+{
+  "document": "Bracket",
+  "body": "Body",
+  "kind": "pocket",
+  "name": "FourHoles",
+  "profile": "HoleSketch",
+  "parameters": {"extent": "through_all", "reversed": true},
+  "expected_solids": 1,
+  "expected_volume": {"min": 10860, "max": 10880},
+  "expected_topology_counts": [
+    {"query": [{"role": "face", "selector": "%CYLINDER"}], "min": 4, "max": 4}
+  ]
+}
+```
+
+A passing call returns `expectationResults` with the measured volume and count. A miss fails with `reason: expected_volume` or `expected_topology_count` and `operationState: rolled_back`. The `HoleSketch` sits on the bottom plane (XY at z = 0), so the pocket needs `"reversed": true` to cut up into the plate. Without it the cut went into empty space and `expected_volume` refused the write (measured 12 000 mm³): that is the failure the check exists to catch. These checks prove volume and counts, not intent: a symmetric cut on the wrong face can preserve both, so confirm placement with bounds, `measure`, or `inspect_topology` when it matters.
+
 ## 5. Measure fit and clearance with both modes
 
 `measure` reports Open CASCADE results. Each mode answers one narrow question.
