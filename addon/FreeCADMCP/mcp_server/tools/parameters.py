@@ -51,9 +51,11 @@ from ..tool_contracts import (
     _EXPECTED_SOLIDS,
     _GEOMETRY_REPORT,
     EXPECTATION_PROPERTIES,
+    INCLUDE_MATERIAL_CHANGE,
     require_expected_generation,
 )
 from .feature_contracts import check_workload
+from .material_change import MATERIAL_CHANGES_SCHEMA
 
 # Property types accepted for ``add``; the FreeCAD-level
 # ``supportedProperties()`` check below additionally guards at runtime.
@@ -154,7 +156,8 @@ def _definition() -> dict[str, Any]:
             " the post-edit contract, and expected_volume (inclusive mm3 range)"
             " and expected_topology_counts (query-count ranges) to prove the"
             " result without an image; a miss rolls the edit back, and passed"
-            " checks return expectationResults."
+            " checks return expectationResults. include_material_change adds"
+            " materialChanges with the added and removed volume and bounds."
         ),
         "inputSchema": {
             "type": "object",
@@ -172,6 +175,7 @@ def _definition() -> dict[str, Any]:
                 "expected_bounds": _EXPECTED_BOUNDS,
                 "bounds_tolerance": _BOUNDS_TOLERANCE,
                 **EXPECTATION_PROPERTIES,
+                "include_material_change": INCLUDE_MATERIAL_CHANGE,
                 "expressions": {
                     "type": "object",
                     "additionalProperties": {"type": "string", "minLength": 1},
@@ -232,6 +236,7 @@ def _definition() -> dict[str, Any]:
                 "beforeReport": {"$ref": "#/$defs/geometryReport"},
                 "units": {"$ref": "#/$defs/units"},
                 "expectationResults": _EXPECTATION_RESULTS,
+                "materialChanges": MATERIAL_CHANGES_SCHEMA,
             },
             "required": [
                 "document",
@@ -570,6 +575,10 @@ def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         before_report.update(report)
         return report["solid_count"] if expected_solids is None else expected_solids
 
+    # Material baselines exist only when requested and precede the transaction.
+    from .material_change import capture_material_baselines, report_material_changes
+
+    material_pairs = capture_material_baselines(ctx, doc, arguments, [(str(obj.Name), obj)])
     outcome: dict[str, Any] = {}
     with mutation(
         ctx,
@@ -614,6 +623,8 @@ def _edit_parameters(ctx: Any, arguments: dict[str, Any]) -> dict[str, Any]:
     }
     if "expectationResults" in outcome:
         result["expectationResults"] = outcome["expectationResults"]
+    if material_pairs is not None:
+        result["materialChanges"] = report_material_changes(material_pairs)
     if str(arguments.get("response_detail") or "compact") == "full":
         result["beforeReport"] = before_report
     return result

@@ -132,6 +132,7 @@ The protocol also provides `server/discover`, `tools/list`, `tasks/get`, `tasks/
 Text evidence gives dimensional proof. A `capture_view` image gives only qualitative evidence of form. In one FreeCAD 1.1.3 profile, text tool calls took 29–38 ms and returned a few hundred tokens. A `detail` capture took 0.24 s. An `overview` capture renders seven views. It took 1.40 s and cost about 1,800 image tokens at its default size. Costs vary by client and model.
 
 - Answer dimension, position, orientation, count, and fit questions with `validate_geometry`, `measure`, or `inspect_topology` first.
+- Pass `include_material_change: true` on an edit when the location of the added or removed material matters. `materialChanges` reports the volume and bounds of each, as text.
 - Read a profile with `measure(mode="section")`. It returns exact lines and circles in document coordinates.
 - Do not capture an image after each stage.
 - Capture once after you locate the relevant objects in an unfamiliar model, and once before delivery.

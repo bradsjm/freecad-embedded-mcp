@@ -139,6 +139,17 @@ _EXPECTATION_RESULTS = {
     ),
 }
 
+# The opt-in flag asks an edit for post-commit material-change evidence.
+INCLUDE_MATERIAL_CHANGE = {
+    "type": "boolean",
+    "default": False,
+    "description": (
+        "When true, add materialChanges: the volume and document-space bounds of "
+        "the material this write added and removed, measured after commit. "
+        "False or absent does no extra work."
+    ),
+}
+
 # Mutation results share one bounded geometry evidence shape.
 _GEOMETRY_REPORT = {
     "type": "object",

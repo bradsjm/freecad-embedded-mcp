@@ -32,8 +32,10 @@ from ..protocol import (
     stale_generation_details,
     validate_schema,
 )
+from ..tool_contracts import INCLUDE_MATERIAL_CHANGE
 from . import feature_contracts as _contracts
 from . import objects as _objects
+from .material_change import MATERIAL_CHANGES_SCHEMA
 
 #: Kinds whose original raw-``properties`` contract stays available. Every
 #: other kind accepts typed semantic parameters only.
@@ -605,6 +607,7 @@ _CREATE_FEATURE_INPUT = {
         "expected_bounds": _objects._EXPECTED_BOUNDS,
         "bounds_tolerance": _objects._BOUNDS_TOLERANCE,
         **_objects.EXPECTATION_PROPERTIES,
+        "include_material_change": INCLUDE_MATERIAL_CHANGE,
         "response_detail": _objects._RESPONSE_DETAIL,
     },
     "$defs": {**_objects._VALUE_DEFS, **_SEMANTIC_PARAM_DEFS},
@@ -646,6 +649,7 @@ _CREATE_FEATURE_OUTPUT = {
         "checkpoint": _CHECKPOINT_PROPERTY,
         "resolvedSelections": _objects._RESOLVED_SELECTIONS,
         "expectationResults": _objects._EXPECTATION_RESULTS,
+        "materialChanges": MATERIAL_CHANGES_SCHEMA,
     },
     "$defs": {
         "geometryReport": _objects._GEOMETRY_REPORT,
@@ -713,6 +717,7 @@ _EDIT_FEATURE_INPUT = tq.merge_query_defs(
             "expected_bounds": _objects._EXPECTED_BOUNDS,
             "bounds_tolerance": _objects._BOUNDS_TOLERANCE,
             **_objects.EXPECTATION_PROPERTIES,
+            "include_material_change": INCLUDE_MATERIAL_CHANGE,
             "response_detail": _objects._RESPONSE_DETAIL,
         },
     }
@@ -777,6 +782,7 @@ _EDIT_FEATURE_OUTPUT = tq.merge_query_defs(
             "geometryChange": _objects._CHANGE_GEOMETRY,
             "resolvedSelections": _objects._RESOLVED_SELECTIONS,
             "expectationResults": _objects._EXPECTATION_RESULTS,
+            "materialChanges": MATERIAL_CHANGES_SCHEMA,
         },
         "$defs": {
             "geometryReport": _objects._GEOMETRY_REPORT,
@@ -978,6 +984,8 @@ TOOL_DEFINITIONS = [
             "range) and expected_topology_counts (query count ranges) "
             "state write-time proof about the Body result; a miss rolls "
             "the write back and passed checks return expectationResults. "
+            "include_material_change adds materialChanges: the volume and "
+            "bounds of material the write added and removed from the Body. "
             "Common synonyms from other modelers "
             "(extrude, cut, sweep, circular pattern, shell) and case or "
             "spacing variants are accepted and normalized; results always "
@@ -1013,7 +1021,8 @@ TOOL_DEFINITIONS = [
             "metric) and normalize to the canonical enum; results always "
             "report the canonical value. Optional expected_volume and "
             "expected_topology_counts check the Body result and return "
-            "passed checks as expectationResults. "
+            "passed checks as expectationResults. include_material_change "
+            "adds materialChanges for the Body. "
             'response_detail "full" adds each row before-state and the '
             "geometryChange deltas; the default compact omits them."
         ),
@@ -2826,6 +2835,12 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
     # Ordinary pads, pockets, holes and gear profiles are not checkpointed;
     # the expensive dress-up/pattern/loft/pipe kinds are.
     _checkpoint_if_expensive(ctx, doc, label, kind in _contracts.EXPENSIVE_KINDS)
+    # The Body baseline exists only when requested and precedes the transaction.
+    from .material_change import capture_material_baselines, report_material_changes
+
+    material_pairs = capture_material_baselines(
+        ctx, doc, arguments, [(str(body.Name), body)], empty_when_solidless=True
+    )
 
     with mutation(
         ctx,
@@ -2946,6 +2961,8 @@ def _create_feature(ctx: Any, arguments: dict) -> dict:
     }
     if "expectationResults" in outcome:
         result["expectationResults"] = outcome["expectationResults"]
+    if material_pairs is not None:
+        result["materialChanges"] = report_material_changes(material_pairs)
     if queries.receipts:
         result["resolvedSelections"] = queries.receipts
     return result
@@ -3257,6 +3274,12 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
 
     label = _mutation_label("edit_feature", body, feature)
     _checkpoint_if_expensive(ctx, doc, label, _contracts.expensive_feature_present([body, feature]))
+    # The Body baseline exists only when requested and precedes the transaction.
+    from .material_change import capture_material_baselines, report_material_changes
+
+    material_pairs = capture_material_baselines(
+        ctx, doc, arguments, [(str(body.Name), body)], empty_when_solidless=True
+    )
 
     def _check_final_values() -> None:
         """Expressions can resolve anywhere; the final native value cannot."""
@@ -3364,6 +3387,8 @@ def _edit_feature(ctx: Any, arguments: dict) -> dict:
         }
     if "expectationResults" in outcome:
         result["expectationResults"] = outcome["expectationResults"]
+    if material_pairs is not None:
+        result["materialChanges"] = report_material_changes(material_pairs)
     if queries.receipts:
         result["resolvedSelections"] = queries.receipts
     return result

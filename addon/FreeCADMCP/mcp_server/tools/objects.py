@@ -45,8 +45,10 @@ from ..tool_contracts import (
     _EXPECTED_SOLIDS,
     _GEOMETRY_REPORT,
     EXPECTATION_PROPERTIES,
+    INCLUDE_MATERIAL_CHANGE,
     require_expected_generation,
 )
+from .material_change import MATERIAL_CHANGES_SCHEMA
 
 _MAX_LINKS = 64
 _MAX_FILTER = 64
@@ -768,6 +770,7 @@ _EDIT_INPUT = {
         "expected_bounds": _EXPECTED_BOUNDS,
         "bounds_tolerance": _BOUNDS_TOLERANCE,
         **EXPECTATION_PROPERTIES,
+        "include_material_change": INCLUDE_MATERIAL_CHANGE,
         "response_detail": _RESPONSE_DETAIL,
     },
     "$defs": _VALUE_DEFS,
@@ -795,6 +798,7 @@ _EDIT_OBJECTS_INPUT = {
             "maxItems": 32,
         },
         "expected_generation": _EXPECTED_GENERATION,
+        "include_material_change": INCLUDE_MATERIAL_CHANGE,
         "expectations": {
             "type": "object",
             "additionalProperties": {
@@ -880,6 +884,12 @@ _MUTATED_OUTPUT = {
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
 
+# edit_object adds optional material-change evidence; create_object never does.
+_EDIT_OUTPUT = {
+    **_MUTATED_OUTPUT,
+    "properties": {**_MUTATED_OUTPUT["properties"], "materialChanges": MATERIAL_CHANGES_SCHEMA},
+}
+
 _DELETE_OUTPUT = {
     "type": "object",
     "additionalProperties": False,
@@ -925,6 +935,7 @@ _EDIT_OBJECTS_OUTPUT = {
         "applied": _APPLIED,
         "resolvedSelections": _RESOLVED_SELECTIONS,
         "expectationResults": _EXPECTATION_RESULTS,
+        "materialChanges": MATERIAL_CHANGES_SCHEMA,
     },
     "$defs": _MUTATION_OUTPUT_DEFS,
 }
@@ -1112,10 +1123,12 @@ TOOL_DEFINITIONS = [
             "counts before and after, and post-recompute validation."
             'response_detail: "compact" omits before-state geometry '
             "deltas, property before-values, and dependent counts from "
-            "change; report always carries the post-state verdict."
+            "change; report always carries the post-state verdict. "
+            "include_material_change adds materialChanges with the added and "
+            "removed volume and bounds."
         ),
         "inputSchema": _EDIT_INPUT,
-        "outputSchema": _MUTATED_OUTPUT,
+        "outputSchema": _EDIT_OUTPUT,
     },
     {
         "name": "edit_objects",
@@ -1135,7 +1148,8 @@ TOOL_DEFINITIONS = [
             'response_detail: "compact" omits before-state geometry '
             "deltas, property before-values, and dependent counts from "
             "each change; per-object reports always carry the post-state "
-            "verdict."
+            "verdict. include_material_change adds one materialChanges row "
+            "per object (at most eight measured)."
         ),
         "inputSchema": _EDIT_OBJECTS_INPUT,
         "outputSchema": _EDIT_OBJECTS_OUTPUT,
@@ -3514,6 +3528,10 @@ def edit_object(ctx: Any, args: dict) -> dict:
     bounds_before = document_bounds(obj)
     dependents = dependent_count([obj])
 
+    # Material baselines exist only when requested and precede the transaction.
+    from .material_change import capture_material_baselines, report_material_changes
+
+    material_pairs = capture_material_baselines(ctx, doc, args, [(str(obj.Name), obj)])
     outcome: dict = {}
     with mutation(
         ctx,
@@ -3564,6 +3582,8 @@ def edit_object(ctx: Any, args: dict) -> dict:
     }
     if "expectationResults" in outcome:
         result["expectationResults"] = outcome["expectationResults"]
+    if material_pairs is not None:
+        result["materialChanges"] = report_material_changes(material_pairs)
     if queries.receipts:
         result["resolvedSelections"] = queries.receipts
     return result
@@ -3752,6 +3772,12 @@ def edit_objects(ctx: Any, args: dict) -> dict:
             spreadsheet_writes.extend(writes)
             spreadsheet_writes_by_object[obj.Name] = bool(writes)
 
+    # Material baselines exist only when requested and precede the transaction.
+    from .material_change import capture_material_baselines, report_material_changes
+
+    material_pairs = capture_material_baselines(
+        ctx, doc, args, [(str(obj.Name), obj) for obj in targets]
+    )
     outcome: dict = {}
     with mutation(
         ctx,
@@ -3807,6 +3833,8 @@ def edit_objects(ctx: Any, args: dict) -> dict:
     }
     if "expectationResults" in outcome:
         result["expectationResults"] = outcome["expectationResults"]
+    if material_pairs is not None:
+        result["materialChanges"] = report_material_changes(material_pairs)
     if queries.receipts:
         result["resolvedSelections"] = queries.receipts
     return result

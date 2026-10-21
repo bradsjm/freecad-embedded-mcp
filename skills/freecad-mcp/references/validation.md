@@ -96,6 +96,7 @@ Pass `expected_volume` and `expected_topology_counts` on the write itself. The s
   "name": "FourHoles",
   "profile": "HoleSketch",
   "parameters": {"extent": "through_all", "reversed": true},
+  "include_material_change": true,
   "expected_solids": 1,
   "expected_volume": {"min": 10860, "max": 10880},
   "expected_topology_counts": [
@@ -105,6 +106,16 @@ Pass `expected_volume` and `expected_topology_counts` on the write itself. The s
 ```
 
 A passing call returns `expectationResults` with the measured volume and count. A miss fails with `reason: expected_volume` or `expected_topology_count` and `operationState: rolled_back`. The `HoleSketch` sits on the bottom plane (XY at z = 0), so the pocket needs `"reversed": true` to cut up into the plate. Without it the cut went into empty space and `expected_volume` refused the write (measured 12 000 mm³): that is the failure the check exists to catch. These checks prove volume and counts, not intent: a symmetric cut on the wrong face can preserve both, so confirm placement with bounds, `measure`, or `inspect_topology` when it matters.
+
+`include_material_change: true` also returns `materialChanges` for the Body, measured after the commit. The row for this call looks like this:
+
+```json
+{"object": "Body", "status": "ok", "reason": null,
+ "added": {"volume": 0, "bounds": null},
+ "removed": {"volume": 1130.97, "bounds": [7, 7, 0, 33, 23, 10]}}
+```
+
+`removed.bounds` is the document-space box of the material the cut took away: here the four holes (x 7–33, y 7–23) over the full z 0–10. Read it to see which face a cut entered. For a blind pocket on the same plate, `removed.bounds` with z 7–10 means the cut entered the top face; z 0–3 means the bottom face. Volume and counts alone cannot tell those two apart.
 
 ## 5. Measure fit and clearance with both modes
 

@@ -323,6 +323,8 @@ Structured object, parameter, sketch, and feature edits use MCP-owned transactio
 
 Writes can prove their own result without an image: `expected_volume` and `expected_topology_counts` roll the write back on a miss and report passed checks as `expectationResults` ([contract](skills/freecad-mcp/references/mcp-tools.md#write-time-expectations)).
 
+`include_material_change` on the edit tools adds `materialChanges`: the volume and bounds of the material a write added and removed ([contract](skills/freecad-mcp/references/mcp-tools.md#material-change-evidence)).
+
 `create_objects` applies 1–32 entries in one transaction and one recompute. It returns a `nameMapping` because FreeCAD sanitizes and de-duplicates names. Sibling links inside the same batch are not supported because the actual names do not exist until creation finishes; use `edit_objects` after the batch.
 
 `response_detail` defaults to `"compact"` on object and feature mutations; pass `"full"` explicitly for before/after deltas. Compact changes omit before-state property and geometry deltas and dependent counts, but keep the post-state validation report.

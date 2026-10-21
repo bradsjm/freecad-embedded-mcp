@@ -94,13 +94,19 @@ class FakeShape:
         solids: int = 1,
         volume: float = 1000.0,
         bounds: tuple[float, ...] = (0.0, 0.0, 0.0, 10.0, 10.0, 10.0),
+        null: bool = False,
     ) -> None:
         self._valid = valid
         self._solids = solids
         self.Volume = volume
         self._bounds = bounds
+        self._null = null
         object.__setattr__(self, "_faces", list(faces or []))
         object.__setattr__(self, "_edges", list(edges or []))
+
+    def isNull(self) -> bool:
+        """A native shape reports whether it carries no geometry."""
+        return self._null
 
     def isValid(self) -> bool:
         return self._valid
@@ -3258,3 +3264,190 @@ def test_edit_feature_expectations_check_the_body_and_roll_back_a_miss() -> None
         assert excinfo.value.details["object"] == "Body"
         assert excinfo.value.details["operationState"] == "rolled_back"
         assert feature.Radius == 2.5
+
+
+# ---------------------------------------------------------------------------
+# include_material_change: feature tools diff the Body.
+# ---------------------------------------------------------------------------
+
+
+def _material_row(name: str) -> dict:
+    """A schema-valid material-change row for a named object."""
+
+    return {
+        "object": name,
+        "status": "ok",
+        "reason": None,
+        "added": {"volume": 1.0, "bounds": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]},
+        "removed": {"volume": 0.0, "bounds": None},
+    }
+
+
+def _spy_material_change(monkeypatch: pytest.MonkeyPatch, doc: FakeDoc) -> types.SimpleNamespace:
+    """Replace the B2 core functions with spies that record the transaction state."""
+
+    import importlib
+
+    module = importlib.import_module("mcp_server.tools.material_change")
+    spy = types.SimpleNamespace(captured=[], reported=[])
+
+    def capture(obj: Any, *, empty: bool = False) -> dict:
+        spy.captured.append((obj.Name, empty, [entry[0] for entry in doc.transactions]))
+        return {"shape": None, "faces": 0, "reason": None, "empty": empty}
+
+    def report(pairs: list) -> list[dict]:
+        spy.reported.append(([pair[0] for pair in pairs], [e[0] for e in doc.transactions]))
+        return [_material_row(pair[0]) for pair in pairs]
+
+    monkeypatch.setattr(module, "capture_baseline", capture)
+    monkeypatch.setattr(module, "report_material_changes", report)
+    return spy
+
+
+def test_feature_tools_report_the_body_material_change_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+        ctx = FakeCtx(doc)
+        spy = _spy_material_change(monkeypatch, doc)
+
+        plain = call(module, ctx, kind="pad", name="Pad", profile="Sketch")
+        assert "materialChanges" not in plain
+        assert spy.captured == []
+
+        doc.transactions.clear()
+        created = call(
+            module, ctx, kind="pad", name="Pad2", profile="Sketch", include_material_change=True
+        )
+        assert created["materialChanges"] == [_material_row("Body")]
+        validate_schema(created, _feature_definition(module, "create_feature")["outputSchema"])
+        # The Body baseline precedes the transaction; the report follows the commit.
+        assert spy.captured == [("Body", False, [])]
+        assert spy.reported == [(["Body"], ["open", "commit"])]
+
+    with load_features() as module:
+        _feature, edit_doc = make_edit_doc(
+            "Target", "PartDesign::Fillet", ("Base", "Radius"), {"Radius": 1.0}
+        )
+        spy = _spy_material_change(monkeypatch, edit_doc)
+
+        edited = edit(
+            module,
+            FakeCtx(edit_doc),
+            object="Target",
+            parameters={"radius": 2.5},
+            include_material_change=True,
+        )
+
+        assert edited["materialChanges"] == [_material_row("Body")]
+        validate_schema(edited, _feature_definition(module, "edit_feature")["outputSchema"])
+        assert spy.captured == [("Body", False, [])]
+        assert spy.reported == [(["Body"], ["open", "commit"])]
+
+
+@pytest.mark.parametrize("shape", [FakeShape(solids=0), FakeShape(solids=0, null=True)])
+def test_a_first_feature_uses_the_empty_baseline(
+    monkeypatch: pytest.MonkeyPatch, shape: FakeShape
+) -> None:
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=shape)
+        spy = _spy_material_change(monkeypatch, doc)
+
+        call(
+            module,
+            FakeCtx(doc),
+            kind="pad",
+            name="Pad",
+            profile="Sketch",
+            include_material_change=True,
+        )
+
+        # A readable Body without a solid (a fresh Body's null shape included)
+        # has no before-state to subtract.
+        assert spy.captured == [("Body", True, [])]
+
+
+class _UnreadableShapeBody(FakeBody):
+    """A Body whose ``Shape`` cannot be read before the write, as a failed native read."""
+
+    @property
+    def Shape(self) -> Any:
+        # Readable once the transaction has opened, so only the baseline read fails.
+        if not object.__getattribute__(self, "_doc").transactions:
+            raise RuntimeError("shape unavailable")
+        return FakeShape()
+
+
+def test_an_unreadable_body_is_a_snapshot_failure_not_an_added_part() -> None:
+    with load_features() as module:
+        sketch = FakeFeature("Sketch", "Sketcher::SketchObject", properties=())
+        body = _UnreadableShapeBody(members=[sketch])
+        doc = FakeDoc(body, supported=SUPPORTED)
+        doc.Objects.append(sketch)
+
+        result = call(
+            module,
+            FakeCtx(doc),
+            kind="pad",
+            name="Pad",
+            profile="Sketch",
+            include_material_change=True,
+        )
+
+        # The write commits; the unreadable before-state is reported as data.
+        assert doc.transactions[-1] == ("commit",)
+        assert result["materialChanges"] == [
+            {
+                "object": "Body",
+                "status": "skipped",
+                "reason": "snapshot_failed",
+                "added": None,
+                "removed": None,
+            }
+        ]
+        validate_schema(result, _feature_definition(module, "create_feature")["outputSchema"])
+
+
+def test_a_failed_feature_write_never_reaches_the_material_change_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    miss = {"expected_volume": {"min": 5000.0}}
+    with load_features() as module:
+        _body, doc = make_body_and_doc(shape=FakeShape())
+        spy = _spy_material_change(monkeypatch, doc)
+
+        with pytest.raises(ToolError) as created:
+            call(
+                module,
+                FakeCtx(doc),
+                kind="pad",
+                name="Pad",
+                profile="Sketch",
+                include_material_change=True,
+                **miss,
+            )
+
+        assert created.value.details["operationState"] == "rolled_back"
+        assert len(spy.captured) == 1
+        assert spy.reported == []
+
+    with load_features() as module:
+        _feature, edit_doc = make_edit_doc(
+            "Target", "PartDesign::Fillet", ("Base", "Radius"), {"Radius": 1.0}
+        )
+        spy = _spy_material_change(monkeypatch, edit_doc)
+
+        with pytest.raises(ToolError) as edited:
+            edit(
+                module,
+                FakeCtx(edit_doc),
+                object="Target",
+                parameters={"radius": 4.0},
+                include_material_change=True,
+                **miss,
+            )
+
+        assert edited.value.details["operationState"] == "rolled_back"
+        assert len(spy.captured) == 1
+        assert spy.reported == []

@@ -798,9 +798,69 @@ def test_expected_volume_and_counts_are_reported_after_commit():
     validate_schema(result, parameters.TOOL_DEFINITIONS[0]["outputSchema"])
 
 
-def test_unreadable_volume_refuses_the_edit_and_rolls_it_back():
+# ---------------------------------------------------------------------------
+# include_material_change: the opt-in flag reaches edit_parameters.
+# ---------------------------------------------------------------------------
+
+
+def _material_row(name):
+    """A schema-valid material-change row for a named object."""
+
+    return {
+        "object": name,
+        "status": "ok",
+        "reason": None,
+        "added": {"volume": 1.0, "bounds": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]},
+        "removed": {"volume": 0.0, "bounds": None},
+    }
+
+
+def _spy_material_change(monkeypatch, ctx):
+    """Replace the B2 core functions with spies that record the transaction state."""
+    import importlib
+    import types
+
+    module = importlib.import_module("mcp_server.tools.material_change")
+    spy = types.SimpleNamespace(captured=[], reported=[])
+
+    def capture(obj, *, empty=False):
+        spy.captured.append((obj.Name, [entry[0] for entry in ctx.doc.transactions]))
+        return {"shape": None, "faces": 0, "reason": None, "empty": empty}
+
+    def report(pairs):
+        spy.reported.append(([pair[0] for pair in pairs], [e[0] for e in ctx.doc.transactions]))
+        return [_material_row(pair[0]) for pair in pairs]
+
+    monkeypatch.setattr(module, "capture_baseline", capture)
+    monkeypatch.setattr(module, "report_material_changes", report)
+    return spy
+
+
+def test_include_material_change_reports_after_commit_and_is_inert_otherwise(monkeypatch):
+    from mcp_server.protocol import validate_schema
+
+    ctx = FakeCtx(FakeObj())
+    spy = _spy_material_change(monkeypatch, ctx)
+    change = {"add": [{"name": "Depth", "type": "App::PropertyLength"}]}
+
+    for inert in ({}, {"include_material_change": False}):
+        assert "materialChanges" not in call(ctx, {**base(), **inert, "expressions": {}})
+    assert spy.captured == []
+
+    ctx.doc.transactions.clear()
+    result = call(ctx, {**base(), **change, "include_material_change": True})
+
+    assert result["materialChanges"] == [_material_row("Box")]
+    validate_schema(result, parameters.TOOL_DEFINITIONS[0]["outputSchema"])
+    # The baseline precedes the transaction; the report follows the commit.
+    assert spy.captured == [("Box", [])]
+    assert spy.reported == [(["Box"], ["open", "commit"])]
+
+
+def test_a_failed_edit_never_reaches_the_material_change_report(monkeypatch):
     obj = FakeObj()
     ctx = FakeCtx(obj)
+    spy = _spy_material_change(monkeypatch, ctx)
 
     with pytest.raises(ToolError) as excinfo:
         call(
@@ -809,12 +869,17 @@ def test_unreadable_volume_refuses_the_edit_and_rolls_it_back():
                 **base(),
                 "add": [{"name": "Depth", "type": "App::PropertyLength"}],
                 "expected_volume": {"min": 1.0},
+                "include_material_change": True,
             },
         )
 
+    # A shapeless target cannot satisfy the volume check: indeterminate, rolled back.
     details = excinfo.value.details
     assert details["reason"] == "expected_volume"
     assert details["status"] == "indeterminate"
     assert details["operationState"] == "rolled_back"
     assert ctx.doc.transactions[-1] == ("abort",)
     assert obj.PropertiesList == []
+    # The baseline was taken before the write; the failed write is never reported.
+    assert len(spy.captured) == 1
+    assert spy.reported == []

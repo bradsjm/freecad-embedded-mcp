@@ -3972,3 +3972,125 @@ def test_the_query_cap_refuses_a_batch_before_any_effect() -> None:
     assert error.details["reason"] == "expectation_query_limit"
     assert doc.calls == []
     assert doc.Objects == []
+
+
+# ---------------------------------------------------------------------------
+# include_material_change: the opt-in flag reaches the edit tools.
+# ---------------------------------------------------------------------------
+
+
+def _material_row(name: str) -> dict:
+    """A schema-valid material-change row for a named object."""
+
+    return {
+        "object": name,
+        "status": "ok",
+        "reason": None,
+        "added": {"volume": 1.0, "bounds": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]},
+        "removed": {"volume": 0.0, "bounds": None},
+    }
+
+
+def _spy_material_change(monkeypatch: pytest.MonkeyPatch, doc: FakeDoc) -> types.SimpleNamespace:
+    """Replace the B2 core functions with spies that record the transaction state."""
+
+    import importlib
+
+    module = importlib.import_module("mcp_server.tools.material_change")
+    spy = types.SimpleNamespace(captured=[], reported=[])
+
+    def capture(obj: Any, *, empty: bool = False) -> dict:
+        spy.captured.append((obj.Name, empty, [call[0] for call in doc.calls]))
+        return {"shape": None, "faces": 0, "reason": None, "empty": empty}
+
+    def report(pairs: list) -> list[dict]:
+        spy.reported.append(([pair[0] for pair in pairs], [call[0] for call in doc.calls]))
+        return [_material_row(pair[0]) for pair in pairs]
+
+    monkeypatch.setattr(module, "capture_baseline", capture)
+    monkeypatch.setattr(module, "report_material_changes", report)
+    return spy
+
+
+def _material_edit_request(tool: str, doc: FakeDoc, **extra: Any) -> dict:
+    """A valid request for the single or batch edit tool over First/Second."""
+
+    if tool == "edit_object":
+        return {"document": doc.Name, "object": "First", "properties": {"Length": 5}, **extra}
+    return {
+        "document": doc.Name,
+        "edits": [
+            {"object": "Second", "properties": {"Length": 5}},
+            {"object": "First", "properties": {"Length": 6}},
+        ],
+        **extra,
+    }
+
+
+@pytest.mark.parametrize("tool", ["edit_object", "edit_objects"])
+def test_include_material_change_reports_after_commit_and_is_inert_otherwise(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    doc, ctx, _first, _second = _batch_doc()
+    spy = _spy_material_change(monkeypatch, doc)
+    handler = getattr(objects_mod, tool)
+
+    for inert in ({}, {"include_material_change": False}):
+        result = handler(ctx, _material_edit_request(tool, doc, **inert))
+        assert "materialChanges" not in result
+    assert spy.captured == []
+    assert spy.reported == []
+
+    doc.calls.clear()
+    result = handler(ctx, _material_edit_request(tool, doc, include_material_change=True))
+
+    names = ["First"] if tool == "edit_object" else ["Second", "First"]
+    assert result["materialChanges"] == [_material_row(name) for name in names]
+    validate_schema(result, _output_schema(tool))
+    # Baselines are captured in request order before the transaction opens;
+    # the report runs only after the commit.
+    assert [(name, calls) for name, _empty, calls in spy.captured] == [(n, []) for n in names]
+    assert spy.reported == [(names, ["open", "commit"])]
+
+
+@pytest.mark.parametrize("tool", ["edit_object", "edit_objects"])
+def test_a_failed_write_never_reaches_the_material_change_report(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    doc, ctx, first, _second = _batch_doc()
+    spy = _spy_material_change(monkeypatch, doc)
+    miss = {"expected_volume": {"max": 1.0}}
+    extra = miss if tool == "edit_object" else {"expectations": {"First": miss}}
+
+    with pytest.raises(ToolError) as exc_info:
+        getattr(objects_mod, tool)(
+            ctx, _material_edit_request(tool, doc, include_material_change=True, **extra)
+        )
+
+    error = expect_tool_error(exc_info, VALIDATION_FAILED)
+    assert error.details["reason"] == "expected_volume"
+    assert error.details["operationState"] == "rolled_back"
+    assert first.Length == 1.0
+    assert spy.captured  # the flag reached the tool and captured before the write
+    assert spy.reported == []
+
+
+def test_a_batch_captures_baselines_only_up_to_the_material_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    doc = FakeDoc(objects=[box(f"B{index}") for index in range(10)])
+    spy = _spy_material_change(monkeypatch, doc)
+
+    result = objects_mod.edit_objects(
+        FakeCtx(doc),
+        {
+            "document": doc.Name,
+            "edits": [{"object": f"B{index}", "properties": {"Length": 2}} for index in range(10)],
+            "include_material_change": True,
+        },
+    )
+
+    names = [f"B{index}" for index in range(10)]
+    # Ten objects are reported in request order, but only eight were snapshotted.
+    assert [row["object"] for row in result["materialChanges"]] == names
+    assert [name for name, _empty, _calls in spy.captured] == names[:8]
