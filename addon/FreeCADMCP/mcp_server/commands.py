@@ -14,6 +14,7 @@ snapshots, the settings dialog, tooltips or logs.
 
 import os
 import secrets
+import socket
 
 import FreeCAD
 import FreeCADGui
@@ -241,9 +242,12 @@ class McpUiController(QtCore.QObject):
         connection = status.get("connection") or {}
         gui = status.get("gui") or {}
         remote = bool(connection.get("remote_enabled"))
+        # The bind address is informational; only the endpoint must be usable.
         bind_address = "0.0.0.0" if remote else "127.0.0.1"
+        # The tooltip shares the dialog's endpoint mapping.
+        endpoint = _display_endpoint(status)[0]
         lines = [
-            f"Endpoint: {status.get('endpoint') or 'not listening'}",
+            f"Endpoint: {endpoint or 'not listening'}",
             f"Bind address: {bind_address}",
             f"Access: {'Network enabled' if remote else 'Local only'}",
             f"Dispatch health: {gui.get('state', 'unknown')}",
@@ -379,7 +383,8 @@ class ToggleMCPServerCommand:
             _controller_refresh()
             return
         state = status.get("state")
-        endpoint = status.get("endpoint")
+        # The reported URL is the same copyable form the dialogs show.
+        endpoint = _display_endpoint(status)[0] or "not listening"
         if state == "running":
             _show_status_bar(f"MCP server running at {endpoint}")
             _report_message(f"[MCP] Server started at {endpoint}")
@@ -421,30 +426,76 @@ class ToggleMCPServerCommand:
 # ---------------------------------------------------------------------------
 
 
+def _network_host() -> str:
+    """Return this machine's primary IPv4 address, loopback on failure.
+
+    A UDP connect to a non-routable address selects the outbound
+    interface without sending a packet. A loopback or wildcard result is
+    unusable in a client URL, so it maps to 127.0.0.1.
+    """
+
+    # The probe socket is closed on every path, including connect failure.
+    probe = None
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("10.255.255.255", 1))
+        # getsockname() reports the local address selected by the route.
+        host = str(probe.getsockname()[0])
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        if probe is not None:
+            probe.close()
+    if not host or host == "0.0.0.0" or host.startswith("127."):
+        return "127.0.0.1"
+    return host
+
+
+def _display_endpoint(status: dict) -> tuple[str | None, bool]:
+    """Return the user-facing endpoint URL and whether the server is listening.
+
+    The URL is ``None`` when no listening or configured port is known.
+    Network mode advertises this machine's network address with the
+    actual listening port, or the configured port otherwise. Local-only
+    mode keeps the loopback form. The dialog, tooltip and startup
+    messages share this mapping so they cannot disagree.
+    """
+
+    connection = status.get("connection") or {}
+    network_active = bool(connection.get("remote_enabled"))
+    actual_port = status.get("port")
+    configured_port = connection.get("configured_port")
+    running = status.get("state") in ("running", "starting", "draining")
+    # A running server reports its bound port; otherwise the configured port is next.
+    listening = bool(running and actual_port)
+    if network_active:
+        port = actual_port if listening else configured_port
+        endpoint = f"http://{_network_host()}:{port}/mcp" if port else None
+        return endpoint, listening
+    if listening:
+        endpoint = str(status.get("endpoint") or f"http://127.0.0.1:{actual_port}/mcp")
+        return endpoint, True
+    endpoint = f"http://127.0.0.1:{configured_port}/mcp" if configured_port else None
+    return endpoint, False
+
+
 def _connection_details(status: dict, saved: dict | None) -> dict:
     """Pure rows model for the Connection Details dialog.
 
-    The copyable endpoint is always the local loopback form: a network
-    wildcard listener maps to ``http://127.0.0.1:<actual port>/mcp``; the
-    wildcard address is only ever shown as the bind address. Tokens are
-    NOT part of the model — the dialog handles them separately and they
-    never reach status snapshots or tooltips.
+    In network mode the copyable endpoint is this machine's network
+    address with the actual or configured port. In local-only mode the
+    endpoint stays loopback. The wildcard address is only ever shown as
+    the bind address. Tokens are NOT part of the model — the dialog
+    handles them separately and they never reach status snapshots or
+    tooltips.
     """
 
     state = status.get("state")
     connection = status.get("connection") or {}
     network_active = bool(connection.get("remote_enabled"))
-    actual_port = status.get("port")
     configured_port = connection.get("configured_port")
-    running = state in ("running", "starting", "draining")
-    if running and actual_port:
-        endpoint = (
-            f"http://127.0.0.1:{actual_port}/mcp" if network_active else str(status.get("endpoint"))
-        )
-        listening = True
-    else:
-        endpoint = f"http://127.0.0.1:{configured_port}/mcp" if configured_port else None
-        listening = False
+    # The shared mapping resolves listening state, port precedence and host.
+    endpoint, listening = _display_endpoint(status)
     mode = "Network enabled" if network_active else "Local only"
     return {
         "state": state or "stopped",
@@ -562,15 +613,6 @@ class ConnectionDetailsCommand:
         restart_note = QtWidgets.QLabel(dialog)
         if model["restart_required"]:
             restart_note.setText(_tr("Restart required to apply saved connection settings."))
-        lan_note = None
-        if model["mode"] == "Network enabled":
-            lan_note = QtWidgets.QLabel(dialog)
-            lan_note.setText(
-                _tr(
-                    "Network clients connect to this computer's LAN address; "
-                    "the endpoint above is this machine's local loopback form."
-                )
-            )
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close, parent=dialog)
         buttons.rejected.connect(dialog.reject)
@@ -590,8 +632,6 @@ class ConnectionDetailsCommand:
         layout.addRow(buttons_row)
         if model["restart_required"]:
             layout.addRow(restart_note)
-        if lan_note is not None:
-            layout.addRow(lan_note)
         layout.addRow(buttons)
 
         # Keyboard tab order follows the form.

@@ -48,9 +48,8 @@ def _auto_start_mcp():
             return
 
         status = mcp_server_module.start_server()
-        FreeCAD.Console.PrintMessage(
-            f"[MCP] Auto-start: {status.get('state')} at {status.get('endpoint')}\n"
-        )
+        endpoint = commands._display_endpoint(status)[0] or "not listening"
+        FreeCAD.Console.PrintMessage(f"[MCP] Auto-start: {status.get('state')} at {endpoint}\n")
     except Exception as exc:
         FreeCAD.Console.PrintWarning(f"[MCP] Auto-start failed: {exc}\n")
         try:

@@ -580,13 +580,17 @@ def test_connection_details_dialog_masks_token_and_maps_endpoint(monkeypatch):
     )
     monkeypatch.setattr(server_module, "server_status", lambda: status)
     monkeypatch.setattr(server_module, "get_server", lambda: active)
+    monkeypatch.setattr(commands, "_network_host", lambda: "192.168.1.50")
     window = _make_window(monkeypatch, [])
 
     commands.ConnectionDetailsCommand().Activated()
 
-    # The local endpoint is the loopback mapping; the wildcard address is
-    # only ever the bind address. The active token is never echoed into
-    # the status bar, console output or tooltips.
+    # The wildcard listener maps to this machine's network address for
+    # the copyable endpoint; the wildcard URL is never shown. The active
+    # token is never echoed into the status bar, console output or tooltips.
+    widget_texts = [str(widget.text()) for widget in FakeWidget.instances]
+    assert "http://192.168.1.50:9876/mcp" in widget_texts
+    assert "http://0.0.0.0:9876/mcp" not in widget_texts
     endpoint_texts = [call[0] for call in window.status_bar.messages]
     assert endpoint_texts == []
     assert all("0.0.0.0" not in message for message in ts.FakeConsole.messages)
@@ -603,6 +607,111 @@ def test_connection_details_dialog_masks_token_and_maps_endpoint(monkeypatch):
     assert len(token_fields) == 1
     assert token_fields[0].text() == active_token
     assert token_fields[0].isReadOnly() is True
+
+
+def test_connection_details_network_mode_uses_configured_port_when_stopped(monkeypatch):
+    monkeypatch.setattr(commands, "_network_host", lambda: "192.168.1.50")
+    status = _status(
+        state="stopped",
+        connection={
+            "remote_enabled": True,
+            "allowed_ips": "",
+            "configured_port": 9999,
+        },
+    )
+
+    model = commands._connection_details(status, None)
+
+    assert model["endpoint"] == "http://192.168.1.50:9999/mcp"
+    assert model["listening"] is False
+    assert model["endpoint_copyable"] is True
+    assert model["bind_address"] == "0.0.0.0"
+
+
+def test_connection_details_local_only_stays_loopback(monkeypatch):
+    monkeypatch.setattr(commands, "_network_host", lambda: pytest.fail("probe must not run"))
+    status = _status(
+        state="running",
+        running=True,
+        port=9876,
+        endpoint="http://127.0.0.1:9876/mcp",
+    )
+
+    model = commands._connection_details(status, None)
+
+    assert model["endpoint"] == "http://127.0.0.1:9876/mcp"
+    assert model["bind_address"] == "127.0.0.1"
+
+
+def test_network_host_uses_route_probe_and_closes_the_socket(monkeypatch):
+    class FakeProbeSocket:
+        def __init__(self) -> None:
+            self.target = None
+            self.closed = False
+
+        def connect(self, target) -> None:
+            self.target = target
+
+        def getsockname(self):
+            return ("192.168.1.50", 0)
+
+        def close(self) -> None:
+            self.closed = True
+
+    probe = FakeProbeSocket()
+    monkeypatch.setattr(commands.socket, "socket", lambda *_args: probe)
+
+    assert commands._network_host() == "192.168.1.50"
+    assert probe.target == ("10.255.255.255", 1)
+    assert probe.closed is True
+
+
+@pytest.mark.parametrize("probe_result", ["oserror", "0.0.0.0", "127.0.0.1"])
+def test_network_host_falls_back_to_loopback(monkeypatch, probe_result):
+    if probe_result == "oserror":
+
+        def _fail(*_args, **_kwargs):
+            raise OSError("no route to host")
+
+        monkeypatch.setattr(commands.socket, "socket", _fail)
+    else:
+
+        class FakeProbeSocket:
+            def connect(self, _target) -> None:
+                pass
+
+            def getsockname(self):
+                return (probe_result, 0)
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(commands.socket, "socket", lambda *_args: FakeProbeSocket())
+
+    assert commands._network_host() == "127.0.0.1"
+
+
+def test_tooltip_endpoint_uses_network_host(monkeypatch):
+    monkeypatch.setattr(commands, "_network_host", lambda: "192.168.1.50")
+    status = _status(
+        state="running",
+        running=True,
+        port=9876,
+        endpoint="http://0.0.0.0:9876/mcp",
+        connection={
+            "remote_enabled": True,
+            "allowed_ips": "",
+            "configured_port": 9876,
+        },
+    )
+    controller = object.__new__(commands.McpUiController)
+    controller._settings = None
+
+    tooltip = controller._tooltip(status)
+
+    endpoint_line = next(line for line in tooltip.splitlines() if line.startswith("Endpoint: "))
+    assert endpoint_line.endswith("http://192.168.1.50:9876/mcp")
+    assert SAVED_SETTINGS["token"] not in tooltip
 
 
 def test_status_snapshots_never_contain_the_token():

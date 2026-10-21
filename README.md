@@ -177,7 +177,7 @@ The transport accepts up to 64 HTTP connections and 32 active SSE streams. It li
 
 ## Connecting an MCP client
 
-The server speaks the JSON-RPC MCP protocol over Streamable HTTP at `http://127.0.0.1:9876/mcp` by default. Start FreeCAD and start the MCP server before connecting a client. If you enable **Network access**, replace the loopback URL with the configured address and send `Authorization: Bearer <token>` on every request.
+The server speaks the JSON-RPC MCP protocol over Streamable HTTP at `http://127.0.0.1:9876/mcp` by default. Start FreeCAD and start the MCP server before connecting a client. With **Network access**, **Connection Details…** shows this machine's network address as the endpoint for remote clients; clients on this machine can use the loopback URL. Send `Authorization: Bearer <token>` on every request.
 
 ### Claude Code
 
