@@ -664,7 +664,7 @@ class TestBuilders:
         assert result["resultType"] == "complete"
         assert result["_meta"][protocol.META_SERVER_INFO] == {
             "name": "freecad-mcp-addon",
-            "version": "2.0.0",
+            "version": "2.0.1",
         }
         assert result["supportedVersions"] == ["2026-07-28"]
 

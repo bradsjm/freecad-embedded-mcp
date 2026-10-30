@@ -79,6 +79,7 @@ from mcp_server.subscriptions import (
 )
 from mcp_server.tasks import (
     TASK_ELIGIBLE_OPERATIONS,
+    TASKS_EXTENSION_ID,
     TaskStore,
     create_task_wire,
     declares_tasks_capability,
@@ -1178,15 +1179,27 @@ class Server:
         return _rpc_result(validated["id"], complete_result(payload))
 
     def _discover_payload(self, snapshot: dict, refresh_error: dict | None) -> dict:
-        """Build the discover payload from a snapshot plus live settings flags."""
-        capabilities = {
+        """Build the discover payload: standard MCP capabilities plus the FreeCAD snapshot.
+
+        ``capabilities`` carries only the spec's ServerCapabilities object so
+        clients can see the tools and resources surfaces. The FreeCAD
+        snapshot and the live settings flags travel in ``freecadSnapshot``.
+        """
+        # FreeCAD/OCC/exporter/FEM data plus the live settings flags.
+        freecad_snapshot = {
             key: value for key, value in snapshot.items() if key != "supportedTypesDocument"
         }
-        capabilities["scriptingEnabled"] = bool(self.settings.get("allow_scripts", False))
-        capabilities["recoveryEnabled"] = bool(self.settings.get("recovery_enabled", False))
+        freecad_snapshot["scriptingEnabled"] = bool(self.settings.get("allow_scripts", False))
+        freecad_snapshot["recoveryEnabled"] = bool(self.settings.get("recovery_enabled", False))
         return {
             "supportedVersions": [SUPPORTED_PROTOCOL_VERSION],
-            "capabilities": capabilities,
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"subscribe": True, "listChanged": False},
+                # Detached task support, so clients can discover the Tasks extension.
+                "extensions": {TASKS_EXTENSION_ID: {}},
+            },
+            "freecadSnapshot": freecad_snapshot,
             "supportedTypesDocument": snapshot.get("supportedTypesDocument"),
             "refreshError": refresh_error,
         }

@@ -1,6 +1,6 @@
 [project]
 name = "freecad-embedded-mcp-addon"
-version = "2.0.0"
+version = "2.0.1"
 description = "FreeCAD add-on embedding a Model Context Protocol server"
 readme = "README.md"
 authors = [

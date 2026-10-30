@@ -653,7 +653,17 @@ def test_discovery_is_gui_independent_and_complete():
     result = response["result"]
     assert result["supportedVersions"] == ["2026-07-28"]
     # Default discover returns the latest successful immutable cache.
-    assert result["capabilities"] == {
+    # Contract: DiscoverResult.capabilities is the standard MCP ServerCapabilities
+    # object. Spec-following clients (@ai-sdk/mcp) read ``capabilities.tools`` and
+    # refuse to list tools without it. Plausible defect: FreeCAD snapshot keys
+    # copied into ``capabilities`` again (the reported regression). The legacy
+    # ``initialize`` test covers only the other era, so nothing else guards this.
+    assert "tools" in result["capabilities"]
+    assert "resources" in result["capabilities"]
+    assert "io.modelcontextprotocol/tasks" in result["capabilities"]["extensions"]
+    assert "freecad" not in result["capabilities"]
+    assert "scriptingEnabled" not in result["capabilities"]
+    assert result["freecadSnapshot"] == {
         "freecad": {"version": [1, 1, 3]},
         "scriptingEnabled": True,
         "recoveryEnabled": False,
@@ -2337,7 +2347,7 @@ def test_discover_refresh_requires_known_document():
     assert result["refreshError"]["code"] == "DOCUMENT_NOT_FOUND"
     assert result["refreshError"]["message"] == "no such document: Missing"
     # A failed refresh leaves the cache untouched.
-    assert result["capabilities"] == {
+    assert result["freecadSnapshot"] == {
         "scriptingEnabled": True,
         "recoveryEnabled": False,
     }

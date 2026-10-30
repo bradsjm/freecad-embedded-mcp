@@ -160,7 +160,7 @@ The legacy adapter accepts Streamable HTTP revisions `2025-03-26`, `2025-06-18`,
 
 The embedded server routes these MCP methods:
 
-- `server/discover` — return cached or refreshed server capabilities.
+- `server/discover` — return the standard MCP `capabilities` (`tools`, `resources`) plus a `freecadSnapshot` of FreeCAD, OCC, exporter, and FEM data, cached or refreshed.
 - `tools/list` — return the active tool surface and JSON schemas.
 - `tools/call` — validate and run one structured tool.
 - `tasks/get`, `tasks/update`, and `tasks/cancel` — manage detached operations when the client declares `io.modelcontextprotocol/tasks`.

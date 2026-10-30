@@ -50,7 +50,7 @@ from typing import Any
 SUPPORTED_PROTOCOL_VERSION = "2026-07-28"
 JSONRPC_VERSION = "2.0"
 
-SERVER_INFO = {"name": "freecad-mcp-addon", "version": "2.0.0"}
+SERVER_INFO = {"name": "freecad-mcp-addon", "version": "2.0.1"}
 
 # Streamable HTTP request-metadata headers (case-insensitive names,
 # case-sensitive values).

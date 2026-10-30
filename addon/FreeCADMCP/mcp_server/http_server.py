@@ -504,7 +504,7 @@ class _McpRequestHandler(http.server.BaseHTTPRequestHandler):
     """Single-connection handler; the request thread owns any SSE stream."""
 
     protocol_version = "HTTP/1.1"
-    server_version = "freecad-mcp-addon/2.0.0"
+    server_version = "freecad-mcp-addon/2.0.1"
     sys_version = ""
 
     def setup(self):
